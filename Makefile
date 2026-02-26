@@ -10,7 +10,7 @@ CIRCUIT_DIR     := circuit
 CIRCUIT_TARGET  := riscv64ima-zisk-zkvm-elf
 CIRCUIT_ELF     := $(CIRCUIT_DIR)/target/$(CIRCUIT_TARGET)/release/davinci-zkvm-circuit
 
-DATA_DIR        := data/simple_mul_bn254
+DATA_DIR        := data/ballot_proof_bn254
 PROOFS_DIR      := $(DATA_DIR)
 INPUT_BIN       := $(DATA_DIR)/aggregated_bn254/zisk_full_verify_input.bin
 NPROOFS         ?= 128

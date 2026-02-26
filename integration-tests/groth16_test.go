@@ -27,8 +27,8 @@ func testDataDir() string {
 	if d := os.Getenv("TEST_DATA_DIR"); d != "" {
 		return d
 	}
-	// Relative to integration-tests/ directory: ../data/simple_mul_bn254
-	return filepath.Join("..", "data", "simple_mul_bn254")
+	// Relative to integration-tests/ directory: ../data/ballot_proof_bn254
+	return filepath.Join("..", "data", "ballot_proof_bn254")
 }
 
 // ProveRequest mirrors the service API request body.
