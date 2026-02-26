@@ -13,6 +13,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     ca-certificates \
     cmake \
+    libgmp-dev \
+    nlohmann-json3-dev \
+    libsodium-dev \
+    libopenmpi-dev \
+    nasm \
+    libclang-dev \
+    clang \
+    protobuf-compiler \
+    libprotobuf-dev \
+    libomp-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust toolchain
@@ -21,22 +31,6 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
 ENV PATH="/root/.cargo/bin:$PATH"
 
 ARG ZISK_VERSION=v0.15.0
-
-# Install cargo-zisk and the ZisK RISC-V toolchain
-RUN curl -fsSL \
-    "https://github.com/0xPolygonHermez/zisk/releases/download/${ZISK_VERSION}/cargo_zisk_linux_amd64.tar.gz" \
-    -o /tmp/cargo_zisk.tar.gz && \
-    mkdir -p /root/.zisk/bin && \
-    tar -xzf /tmp/cargo_zisk.tar.gz -C /tmp && \
-    cp /tmp/bin/* /root/.zisk/bin/ && \
-    chmod +x /root/.zisk/bin/cargo-zisk && \
-    rm -rf /tmp/cargo_zisk.tar.gz /tmp/bin
-
-ENV PATH="/root/.zisk/bin:$PATH"
-
-# Install the ZisK Rust toolchain (RISC-V target)
-# This is needed to rebuild cargo-zisk from source
-RUN cargo-zisk sdk install-toolchain
 
 # Clone ZisK source at the pinned version and build with GPU support
 RUN git clone --depth 1 --branch ${ZISK_VERSION} \
@@ -50,12 +44,7 @@ ENV PATH="/usr/local/cuda-12.8/bin:$PATH"
 # Build libstarksgpu.a then cargo-zisk with GPU support
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
-    cargo build --release --features gpu 2>&1 | tee /tmp/build.log; \
-    if [ $? -ne 0 ]; then \
-        echo "=== Build failed. Last 50 lines of output: ==="; \
-        tail -50 /tmp/build.log; \
-        exit 1; \
-    fi
+    bash -c 'set -euo pipefail; cargo build --release --features gpu 2>&1 | tee /tmp/build.log'
 
 # ── Stage 2: Build the Rust service ───────────────────────────────────────────
 FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04 AS service-builder
@@ -91,6 +80,9 @@ RUN rm -rf input-gen/src service/src
 COPY input-gen/src input-gen/src
 COPY service/src service/src
 
+# Invalidate fingerprints so cargo rebuilds the real crates
+RUN find target/release/.fingerprint -maxdepth 1 -name "davinci*" -exec rm -rf {} + 2>/dev/null || true
+
 RUN cargo build --release -p davinci-zkvm-service -p davinci-zkvm-input-gen
 
 # ── Stage 3: CUDA runtime image ───────────────────────────────────────────────
@@ -100,13 +92,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
     libgomp1 \
+    libsodium23 \
+    libopenmpi3 \
+    openmpi-bin \
+    openmpi-common \
+    libomp5-18 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
+# Create symlink for libzisk_witness.so at the default path cargo-zisk expects
+RUN mkdir -p /root/.zisk/bin && \
+    ln -s /usr/local/lib/libzisk_witness.so /root/.zisk/bin/libzisk_witness.so
+
 # Copy GPU-enabled cargo-zisk
 COPY --from=cuda-builder /src/zisk/target/release/cargo-zisk /usr/local/bin/cargo-zisk
-COPY --from=cuda-builder /src/zisk/target/release/libzisk_witness.so /usr/local/lib/libzisk_witness.so 2>/dev/null || true
+# libzisk_witness.so may not exist in all builds; copy if present
+RUN --mount=from=cuda-builder,source=/src/zisk/target/release,target=/zisk-build \
+    cp /zisk-build/libzisk_witness.so /usr/local/lib/libzisk_witness.so 2>/dev/null || true
 
 # Copy service binary
 COPY --from=service-builder /build/target/release/davinci-zkvm /app/davinci-zkvm
@@ -120,8 +123,17 @@ ENV CIRCUIT_ELF_PATH=/app/circuit.elf
 ENV CARGO_ZISK_BIN=/usr/local/bin/cargo-zisk
 ENV PROOF_OUTPUT_DIR=/proofs
 ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+# Restrict OpenMPI to loopback/shared-memory transport only — prevents any
+# CUDA-aware MPI transport from touching the CUDA context and destroying it.
+ENV OMPI_MCA_btl=vader,self
+ENV OMPI_MCA_pml=ob1
+ENV OMPI_MCA_opal_cuda_support=0
+ENV OMPI_MCA_btl_smcuda_use_cuda_ipc=0
+# Allow OpenMPI to run as root (required in Docker containers)
+ENV OMPI_ALLOW_RUN_AS_ROOT=1
+ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 
-# Check-setup entrypoint: build constant trees if missing, then start service
+# Check-setup entrypoint: build GPU constant trees if missing, warm up CUDA, then start service
 COPY <<'EOF' /app/entrypoint.sh
 #!/bin/bash
 set -e
@@ -133,6 +145,12 @@ if [ ! -f "${CONSTTREE_CHECK}" ] && [ ! -f "${CONSTTREE_CHECK_CPU}" ]; then
     echo "=== Constant trees not found. Running check-setup (this may take a while) ==="
     /usr/local/bin/cargo-zisk check-setup --proving-key "${PROVING_KEY_PATH}" -a
 fi
+
+# GPU warmup: run check-setup (basic, no -a) to initialize CUDA twiddle factors
+# and force the NVIDIA driver to create a stable device context before serving.
+# This prevents the "context is destroyed" cold-start race on the first prove call.
+echo "=== GPU warmup: initializing CUDA context ==="
+/usr/local/bin/cargo-zisk check-setup --proving-key "${PROVING_KEY_PATH}" 2>/dev/null || true
 
 exec /app/davinci-zkvm "$@"
 EOF

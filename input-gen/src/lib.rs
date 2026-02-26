@@ -188,6 +188,15 @@ fn write_u64_slice(buf: &mut Vec<u8>, words: &[u64]) {
 }
 
 /// Compute Fiat-Shamir challenge r_shift from all proof data (must match guest's transcript).
+///
+/// Scheme (must stay in sync with circuit/src/main.rs):
+///   digest  = SHA256("groth16-batch-v1" || A_0||B_0||C_0||pub_0 || ... )
+///   d0      = SHA256(digest || counter(8B) || 0x00)
+///   d1      = SHA256(digest || counter(8B) || 0x01)
+///   r_shift = Fr::from_random_bytes(d0 || d1)   (retry with counter++ if not invertible)
+///
+/// Pre-hashing the 36KB transcript to 32 bytes before the retry loop avoids re-hashing
+/// the full transcript on each retry attempt.
 fn compute_r_shift(proofs: &[Proof<Bn254>], public_inputs: &[Vec<Fr>]) -> Fr {
     let mut data = Vec::<u8>::new();
     data.extend_from_slice(b"groth16-batch-v1");
@@ -199,18 +208,22 @@ fn compute_r_shift(proofs: &[Proof<Bn254>], public_inputs: &[Vec<Fr>]) -> Fr {
             for w in fr_to_u64x4(pub_val) { data.extend_from_slice(&w.to_le_bytes()); }
         }
     }
+    // Pre-hash full transcript to 32 bytes to avoid re-hashing on retries.
+    let digest: [u8; 32] = Sha256::digest(&data).into();
     let mut counter = 0u64;
     loop {
         let d0: [u8; 32] = {
-            let mut h = data.clone();
-            h.extend_from_slice(&counter.to_be_bytes());
-            h.push(0u8);
+            let mut h = [0u8; 41];
+            h[..32].copy_from_slice(&digest);
+            h[32..40].copy_from_slice(&counter.to_be_bytes());
+            h[40] = 0u8;
             Sha256::digest(&h).into()
         };
         let d1: [u8; 32] = {
-            let mut h = data.clone();
-            h.extend_from_slice(&counter.to_be_bytes());
-            h.push(1u8);
+            let mut h = [0u8; 41];
+            h[..32].copy_from_slice(&digest);
+            h[32..40].copy_from_slice(&counter.to_be_bytes());
+            h[40] = 1u8;
             Sha256::digest(&h).into()
         };
         let mut wide = [0u8; 64];

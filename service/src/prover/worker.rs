@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::process::Command;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 use chrono::Utc;
 
@@ -78,7 +78,7 @@ async fn worker_loop(
         }
 
         let start = Instant::now();
-        let result = run_prove(&config, &task).await;
+        let result = run_prove_with_retry(&config, &task).await;
         let elapsed_ms = start.elapsed().as_millis() as u64;
 
         if let Some(mut job) = jobs.get_mut(&job_id) {
@@ -98,6 +98,55 @@ async fn worker_loop(
         }
     }
     info!("Prover worker stopped");
+}
+
+/// Detects transient CUDA cold-start failures.
+///
+/// # Background
+///
+/// ZisK uses OpenMPI internally. On container cold-start, OpenMPI's atexit
+/// handler calls `MPI_Finalize` (which destroys the CUDA context) before the
+/// NTT_Goldilocks_GPU destructor runs. This causes a `cudaGetLastError: context
+/// is destroyed (709)` abort on the **first** `cargo-zisk prove` invocation
+/// after the container starts. Subsequent invocations succeed normally.
+///
+/// This is a ZisK/OpenMPI bug, not a problem with the input or the proving key.
+/// We handle it transparently with up to `MAX_CUDA_RETRIES` automatic retries,
+/// hiding the crash output from the API consumer.
+fn is_transient_cuda_error(msg: &str) -> bool {
+    msg.contains("context is destroyed")
+        || msg.contains("cudaGetLastError")
+        || msg.contains("SIGABRT")
+        || msg.contains("MPI_ERRORS_ARE_FATAL")
+}
+
+/// Maximum number of automatic retries for transient CUDA cold-start errors.
+const MAX_CUDA_RETRIES: u32 = 3;
+
+/// Retry delay between CUDA cold-start retries.
+const CUDA_RETRY_DELAY_SECS: u64 = 5;
+
+/// Run prove, automatically retrying up to [`MAX_CUDA_RETRIES`] times on
+/// transient CUDA cold-start errors. The crash output is suppressed on retried
+/// attempts and is only surfaced if all retries are exhausted.
+async fn run_prove_with_retry(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
+    let mut last_err = anyhow::anyhow!("prove never attempted");
+    for attempt in 1..=MAX_CUDA_RETRIES + 1 {
+        match run_prove(config, task).await {
+            Ok(()) => return Ok(()),
+            Err(e) if is_transient_cuda_error(&e.to_string()) && attempt <= MAX_CUDA_RETRIES => {
+                warn!(
+                    "Job {} hit transient CUDA cold-start error (attempt {}/{}), \
+                     retrying in {}s",
+                    task.job_id, attempt, MAX_CUDA_RETRIES, CUDA_RETRY_DELAY_SECS
+                );
+                last_err = e;
+                tokio::time::sleep(tokio::time::Duration::from_secs(CUDA_RETRY_DELAY_SECS)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err)
 }
 
 async fn run_prove(config: &Config, task: &ProveTask) -> anyhow::Result<()> {

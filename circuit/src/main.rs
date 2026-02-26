@@ -123,7 +123,8 @@ fn structured_scalar_power(num: usize, s: &FrRaw) -> Vec<FrRaw> {
     powers
 }
 
-// SHA256 using ZisK sha256f hardware precompile
+// SHA256 using ZisK sha256f hardware precompile.
+// Handles arbitrary-length input via standard SHA256 padding.
 fn sha256_once(data: &[u8]) -> [u8; 32] {
     let mut state = [
         0x6a09e667u32, 0xbb67ae85u32, 0x3c6ef372u32, 0xa54ff53au32,
@@ -149,18 +150,26 @@ fn sha256_once(data: &[u8]) -> [u8; 32] {
     out
 }
 
-/// Derive Fr challenge from arbitrary bytes using double-hash wide reduction.
-fn challenge_fr(data: &[u8]) -> Option<FrRaw> {
+/// Derive a non-zero Fr challenge from a 32-byte digest using double-hash wide reduction.
+///
+/// Optimised for small fixed-size input: uses stack-allocated [u8; 41] buffers to avoid
+/// heap allocations in the retry loop.  The caller is responsible for pre-hashing any
+/// large transcript down to 32 bytes before calling this function.
+fn challenge_fr(digest: &[u8; 32]) -> Option<FrRaw> {
+    // Each iteration hashes digest || counter(8B) || domain(1B) twice.
+    // The result fits in [u8; 41] — no heap needed.
     let mut counter = 0u64;
     loop {
-        let mut input0 = data.to_vec();
-        input0.extend_from_slice(&counter.to_be_bytes());
-        input0.push(0u8);
+        let mut input0 = [0u8; 41];
+        input0[..32].copy_from_slice(digest);
+        input0[32..40].copy_from_slice(&counter.to_be_bytes());
+        input0[40] = 0u8;
         let d0 = sha256_once(&input0);
 
-        let mut input1 = data.to_vec();
-        input1.extend_from_slice(&counter.to_be_bytes());
-        input1.push(1u8);
+        let mut input1 = [0u8; 41];
+        input1[..32].copy_from_slice(digest);
+        input1[32..40].copy_from_slice(&counter.to_be_bytes());
+        input1[40] = 1u8;
         let d1 = sha256_once(&input1);
 
         let mut wide = [0u8; 64];
@@ -266,10 +275,18 @@ fn main() {
     }
 
     // --- Derive r_shift from all proof data (Fiat-Shamir) ---
-    // Transcript: domain || A_i || B_i || C_i || pub_i for each i
+    // Transcript: domain || A_i || B_i || C_i || pub_i for each i.
+    //
+    // Optimisation: pre-hash the full transcript down to 32 bytes before calling
+    // challenge_fr.  This reduces Sha256f AIR rows from 2×577=1154 to 577+2=579
+    // (50% reduction) and avoids 2×36KB heap clones inside challenge_fr's retry loop.
+    // Security is unchanged: SHA256(T) is collision-resistant, so binding r_shift to
+    // SHA256(T) is equivalent to binding it to T directly under ROM.
     let mut batch_ok = !parse_fail;
     if batch_ok {
-        let mut transcript = Vec::<u8>::new();
+        // Pre-allocate to exact size to avoid Vec reallocations during extend_from_slice.
+        let transcript_size = 16 + nproofs * (64 + 128 + 64 + n_public * 32);
+        let mut transcript = Vec::<u8>::with_capacity(transcript_size);
         transcript.extend_from_slice(b"groth16-batch-v1");
         for i in 0..nproofs {
             for w in proofs[i].a.iter() { transcript.extend_from_slice(&w.to_le_bytes()); }
@@ -279,9 +296,14 @@ fn main() {
                 for w in proofs[i].public_inputs[j].iter() { transcript.extend_from_slice(&w.to_le_bytes()); }
             }
         }
+        // Compress the full transcript to 32 bytes before challenge derivation.
+        // challenge_fr operates on the digest, using stack-allocated buffers — no heap.
+        let transcript_digest = sha256_once(&transcript);
+        drop(transcript); // free the 36KB Vec before allocating pairing inputs
+
         // r_shift is computed to bind the check to proof data (Fiat-Shamir),
         // ensuring host-precomputed hints are sound under BDDH + random oracle model.
-        let r_shift = challenge_fr(&transcript).unwrap_or_else(|| { batch_ok = false; ZERO_FR });
+        let r_shift = challenge_fr(&transcript_digest).unwrap_or_else(|| { batch_ok = false; ZERO_FR });
 
         if !fr_eq(&r_shift, &ZERO_FR) {
             // Batch pairing using host-precomputed hints (all validated by the pairing equation):

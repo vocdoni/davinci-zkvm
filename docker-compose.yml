@@ -1,5 +1,50 @@
+# davinci-zkvm Docker Compose
+#
+# Profiles:
+#   cuda  — NVIDIA GPU prover (default). Requires NVIDIA driver 570+, CUDA 12.8,
+#           nvidia-container-toolkit.
+#   cpu   — API-only, no proof generation. ZisK v0.15.0 GPU proving keys are
+#           incompatible with CPU provers (different Merkle tree format).
+#
+# Usage:
+#   docker compose --profile cuda up -d   # GPU prover (default)
+#   docker compose --profile cpu  up -d   # CPU API-only
+#
+# The default profile is set to 'cuda' via the .env file. Override with:
+#   COMPOSE_PROFILES=cpu docker compose up -d
+
 services:
   davinci-zkvm:
+    profiles: [cuda]
+    image: davinci-zkvm-cuda:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    ports:
+      - "${LISTEN_PORT:-8080}:8080"
+    volumes:
+      - ${PROVING_KEY_PATH:-~/.zisk/provingKey}:/proving-key
+      - proofs:/proofs
+    environment:
+      - PROOF_OUTPUT_DIR=/proofs
+      - MAX_QUEUE_SIZE=${MAX_QUEUE_SIZE:-100}
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  davinci-zkvm-cpu:
+    profiles: [cpu]
     image: davinci-zkvm:latest
     build:
       context: .
@@ -7,7 +52,7 @@ services:
     ports:
       - "${LISTEN_PORT:-8080}:8080"
     volumes:
-      - ${PROVING_KEY_PATH:-~/.zisk/provingKey}:/proving-key:ro
+      - ${PROVING_KEY_PATH:-~/.zisk/provingKey}:/proving-key
       - proofs:/proofs
     environment:
       - PROOF_OUTPUT_DIR=/proofs

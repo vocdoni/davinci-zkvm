@@ -7,10 +7,10 @@ A production-ready ZisK zkVM service that verifies batches of 128 Groth16 BN254 
 `davinci-zkvm` wraps the [ZisK](https://github.com/0xPolygonHermez/zisk) zkVM prover in an HTTP service. Callers submit batches of 128 [snarkjs](https://github.com/iden3/snarkjs) Groth16 BN254 proofs via `POST /prove`. The service queues the request, runs the ZisK STARK prover, and makes the final proof available for download.
 
 **Key properties:**
-- Single sequential job queue (ZisK prover uses all available GPU/CPU resources)
+- Single sequential job queue (ZisK prover uses all available GPU resources)
 - Pre-built circuit ELF checked into the repository — no ZisK toolchain required at runtime
-- Supports both CPU proving and CUDA GPU proving (NVIDIA RTX/Blackwell, sm_120)
-- Fully Dockerized with two images: CPU (`Dockerfile`) and GPU (`Dockerfile.cuda`)
+- Requires NVIDIA GPU (RTX/Blackwell, sm_120+) with CUDA 12.8 — ZisK v0.15.0 GPU proving keys use GPU-specific Merkle trees incompatible with CPU proving
+- Fully Dockerized with GPU image (`Dockerfile.cuda`) and API-only CPU image (`Dockerfile`)
 
 ## Quick Start
 
@@ -18,9 +18,9 @@ A production-ready ZisK zkVM service that verifies batches of 128 Groth16 BN254 
 
 - Docker + Docker Compose
 - ZisK proving key (≈36 GB) at `~/.zisk/provingKey` (see [Setup](#proving-key-setup))
-- *(GPU only)* NVIDIA driver 570+, CUDA 12.8, nvidia-container-toolkit
+- NVIDIA driver 570+, CUDA 12.8, nvidia-container-toolkit
 
-### CPU (default)
+### GPU (default)
 
 ```bash
 git clone https://github.com/0xPolygonHermez/davinci-zkvm.git
@@ -28,15 +28,18 @@ cd davinci-zkvm
 docker compose up -d
 ```
 
-### GPU (CUDA)
+### CPU (API only — no proof generation)
+
+> **Note:** ZisK v0.15.0 proving keys use GPU-specific polynomial commitment schemes
+> (blocked Merkle trees via `merkletreeCoalescedBlocks`) that are incompatible with CPU provers.
+> The CPU image provides the full HTTP API (health, queue, proof download) but proof jobs
+> will fail. Use the GPU image for actual proof generation.
 
 ```bash
 git clone https://github.com/0xPolygonHermez/davinci-zkvm.git
 cd davinci-zkvm
-docker compose -f docker-compose.cuda.yml up -d
+docker compose -f docker-compose.cpu.yml up -d
 ```
-
-The service is available at `http://localhost:8080`.
 
 ## API Reference
 
@@ -180,8 +183,8 @@ make setup-trees
 ### Docker
 
 ```bash
-make docker-build        # Build CPU image
-make docker-build-cuda   # Build CUDA GPU image
+make docker-build        # Build CUDA GPU image (default)
+make docker-build-cpu    # Build CPU-only image (API only, no proving)
 ```
 
 ### Integration tests
@@ -237,8 +240,8 @@ The service maintains a single sequential job queue. When a proof job reaches th
 
 | Mode | Time |
 |------|------|
-| CPU (AMD Ryzen 9) | ~747 seconds |
-| GPU (NVIDIA RTX 5070 Ti, sm_120) | ~26 seconds |
+| GPU (NVIDIA RTX 5070 Ti, sm_120) | ~30–35 seconds |
+| CPU | Not supported (see note above) |
 
 ## License
 
