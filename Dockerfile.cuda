@@ -1,0 +1,143 @@
+# ── Stage 1: Build cargo-zisk with CUDA GPU support ──────────────────────────
+# Uses CUDA 12.8 — required for RTX 5000 series (Blackwell sm_120, PTX 8.7)
+# Driver 570+ needed; CUDA 13.x is NOT compatible with driver 570
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04 AS cuda-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    ca-certificates \
+    cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust toolchain
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
+    -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:$PATH"
+
+ARG ZISK_VERSION=v0.15.0
+
+# Install cargo-zisk and the ZisK RISC-V toolchain
+RUN curl -fsSL \
+    "https://github.com/0xPolygonHermez/zisk/releases/download/${ZISK_VERSION}/cargo_zisk_linux_amd64.tar.gz" \
+    -o /tmp/cargo_zisk.tar.gz && \
+    mkdir -p /root/.zisk/bin && \
+    tar -xzf /tmp/cargo_zisk.tar.gz -C /tmp && \
+    cp /tmp/bin/* /root/.zisk/bin/ && \
+    chmod +x /root/.zisk/bin/cargo-zisk && \
+    rm -rf /tmp/cargo_zisk.tar.gz /tmp/bin
+
+ENV PATH="/root/.zisk/bin:$PATH"
+
+# Install the ZisK Rust toolchain (RISC-V target)
+# This is needed to rebuild cargo-zisk from source
+RUN cargo-zisk sdk install-toolchain
+
+# Clone ZisK source at the pinned version and build with GPU support
+RUN git clone --depth 1 --branch ${ZISK_VERSION} \
+    https://github.com/0xPolygonHermez/zisk.git /src/zisk
+
+WORKDIR /src/zisk
+
+# Use CUDA 12.8 nvcc for building libstarksgpu.a
+ENV PATH="/usr/local/cuda-12.8/bin:$PATH"
+
+# Build libstarksgpu.a then cargo-zisk with GPU support
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    cargo build --release --features gpu 2>&1 | tee /tmp/build.log; \
+    if [ $? -ne 0 ]; then \
+        echo "=== Build failed. Last 50 lines of output: ==="; \
+        tail -50 /tmp/build.log; \
+        exit 1; \
+    fi
+
+# ── Stage 2: Build the Rust service ───────────────────────────────────────────
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04 AS service-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
+    -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:$PATH"
+
+WORKDIR /build
+
+COPY Cargo.toml Cargo.lock ./
+COPY input-gen/Cargo.toml input-gen/Cargo.toml
+COPY service/Cargo.toml service/Cargo.toml
+
+RUN mkdir -p input-gen/src input-gen/src/bin service/src && \
+    echo 'pub fn placeholder() {}' > input-gen/src/lib.rs && \
+    echo 'fn main() {}' > input-gen/src/bin/gen-input.rs && \
+    echo 'fn main() {}' > service/src/main.rs
+
+RUN cargo build --release -p davinci-zkvm-service -p davinci-zkvm-input-gen 2>&1 || true
+RUN rm -rf input-gen/src service/src
+
+COPY input-gen/src input-gen/src
+COPY service/src service/src
+
+RUN cargo build --release -p davinci-zkvm-service -p davinci-zkvm-input-gen
+
+# ── Stage 3: CUDA runtime image ───────────────────────────────────────────────
+FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy GPU-enabled cargo-zisk
+COPY --from=cuda-builder /src/zisk/target/release/cargo-zisk /usr/local/bin/cargo-zisk
+COPY --from=cuda-builder /src/zisk/target/release/libzisk_witness.so /usr/local/lib/libzisk_witness.so 2>/dev/null || true
+
+# Copy service binary
+COPY --from=service-builder /build/target/release/davinci-zkvm /app/davinci-zkvm
+
+# Copy pre-built circuit ELF
+COPY circuit/elf/circuit.elf /app/circuit.elf
+
+ENV LISTEN_ADDR=0.0.0.0:8080
+ENV PROVING_KEY_PATH=/proving-key
+ENV CIRCUIT_ELF_PATH=/app/circuit.elf
+ENV CARGO_ZISK_BIN=/usr/local/bin/cargo-zisk
+ENV PROOF_OUTPUT_DIR=/proofs
+ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+
+# Check-setup entrypoint: build constant trees if missing, then start service
+COPY <<'EOF' /app/entrypoint.sh
+#!/bin/bash
+set -e
+
+# Build constant trees if not present (GPU-specific format: .consttree_gpu)
+CONSTTREE_CHECK="${PROVING_KEY_PATH}/zisk/Zisk/airs/ArithEq/compressor/compressor.consttree_gpu"
+CONSTTREE_CHECK_CPU="${PROVING_KEY_PATH}/zisk/Zisk/airs/ArithEq/compressor/compressor.consttree"
+if [ ! -f "${CONSTTREE_CHECK}" ] && [ ! -f "${CONSTTREE_CHECK_CPU}" ]; then
+    echo "=== Constant trees not found. Running check-setup (this may take a while) ==="
+    /usr/local/bin/cargo-zisk check-setup --proving-key "${PROVING_KEY_PATH}" -a
+fi
+
+exec /app/davinci-zkvm "$@"
+EOF
+RUN chmod +x /app/entrypoint.sh
+
+EXPOSE 8080
+
+ENTRYPOINT ["/app/entrypoint.sh"]

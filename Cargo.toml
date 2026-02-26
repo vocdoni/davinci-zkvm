@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "input-gen",
+    "service",
+]
+# circuit/ is a ZisK RISC-V guest program — build with: make build-circuit
+# It requires the +zisk toolchain and cannot be compiled with standard cargo.
+exclude = ["circuit"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/0xPolygonHermez/davinci-zkvm"

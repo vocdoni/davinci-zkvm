@@ -1,0 +1,26 @@
+[package]
+name = "davinci-zkvm-input-gen"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "davinci_zkvm_input_gen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gen-input"
+path = "src/bin/gen-input.rs"
+
+[dependencies]
+anyhow = "1"
+ark-bn254 = { version = "0.4", default-features = false, features = ["curve"] }
+ark-ec = { version = "0.4", default-features = false }
+ark-ff = { version = "0.4", default-features = false }
+ark-groth16 = { version = "0.4", default-features = false }
+ark-snark = { version = "0.4", default-features = false }
+ark-serialize = { version = "0.4", default-features = false }
+ark-std = { version = "0.4", default-features = false, features = ["std"] }
+num-bigint = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
