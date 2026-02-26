@@ -22,13 +22,12 @@ var apiURL = func() string {
 	return "http://localhost:8080"
 }()
 
-// testDataDir returns the path to test proofs, relative to repo root or from env.
+// testDataDir returns the path to test proofs, relative to the integration-tests/ directory.
 func testDataDir() string {
 	if d := os.Getenv("TEST_DATA_DIR"); d != "" {
 		return d
 	}
-	// Relative to integration-tests/ directory: ../data/ballot_proof_bn254
-	return filepath.Join("..", "data", "ballot_proof_bn254")
+	return filepath.Join("data", "ballot_proof_bn254")
 }
 
 // ProveRequest mirrors the service API request body.

@@ -28,7 +28,6 @@ provingKey/
 
 # ── Powers of Tau ceremony files ─────────────────────────────────────────────
 # Large binary files (97MB–288MB); download separately via snarkjs.
-# See data/simple_mul_bn254/README.md or the Makefile for instructions.
 *.ptau
 
 # ── Docker / local environment ───────────────────────────────────────────────
