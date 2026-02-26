@@ -5,16 +5,15 @@
 //! All integers are little-endian; field/curve elements are stored as `[u64; N]`.
 //!
 //! ```text
-//! Header          : magic(u64) log_n(u64) nproofs(u64) n_public(u64)
-//! VK              : alpha_g1(G1) beta_g2(G2) gamma_g2(G2) delta_g2(G2)
-//!                   gamma_abc_len(u64) gamma_abc[..](G1 each)
-//! Proofs          : nproofs(u64) [a(G1) b(G2) c(G1) pubs[..](FrRaw each)] × nproofs
-//! Hints           : scaled_a[..](G1 each) neg_alpha_rsum(G1) neg_g_ic(G1) neg_acc_c(G1)
-//! ECDSA (optional): [r s px py](FrRaw each) × nproofs
+//! Header : magic(u64) log_n(u64) nproofs(u64) n_public(u64)
+//! VK     : alpha_g1(G1) beta_g2(G2) gamma_g2(G2) delta_g2(G2)
+//!          gamma_abc_len(u64) gamma_abc[..](G1 each)
+//! Proofs : nproofs(u64) [a(G1) b(G2) c(G1) pubs[..](FrRaw each)] × nproofs
+//! Hints  : scaled_a[..](G1 each) neg_alpha_rsum(G1) neg_g_ic(G1) neg_acc_c(G1)
+//! ECDSA  : [r s px py](FrRaw each) × nproofs  (mandatory)
 //! ```
 //!
-//! The ECDSA block is detected by checking whether the remaining byte count after
-//! the hints equals `nproofs × 4 × 32`.  Its absence is not an error.
+//! The ECDSA block must be present; its expected size is `nproofs × 4 × 32` bytes.
 
 use crate::bn254::{g1_identity, g2_identity};
 use crate::types::*;
@@ -50,7 +49,7 @@ pub struct ParsedInput {
     pub neg_alpha_rsum: G1,
     pub neg_g_ic: G1,
     pub neg_acc_c: G1,
-    /// ECDSA entries; empty when no ECDSA block is present in the input.
+    /// ECDSA entries; one per proof (mandatory).
     pub ecdsa: Vec<EcdsaEntry>,
     /// Number of bytes consumed (equals `input.len()` on success).
     pub bytes_consumed: usize,
@@ -134,25 +133,20 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
     let neg_g_ic       = read_g1!(&mut off);
     let neg_acc_c      = read_g1!(&mut off);
 
-    // --- Optional ECDSA block ---
-    // Present when the remaining bytes exactly equal nproofs × (r + s + px + py) × 32.
+    // --- ECDSA block (mandatory) ---
+    // Must be present: exactly nproofs × (r + s + px + py) × 32 bytes remaining.
     let ecdsa_block_size = nproofs * 4 * 32;
-    let has_ecdsa    = *fail_mask == 0 && off + ecdsa_block_size == input.len();
-    let groth16_only = *fail_mask == 0 && off == input.len();
-    if *fail_mask == 0 && !has_ecdsa && !groth16_only {
+    if *fail_mask == 0 && off + ecdsa_block_size != input.len() {
         *fail_mask |= 1 << 31;
     }
 
-    let mut ecdsa = Vec::new();
-    if has_ecdsa {
-        ecdsa = Vec::with_capacity(nproofs);
-        for _ in 0..nproofs {
-            let r  = read_fr!(&mut off);
-            let s  = read_fr!(&mut off);
-            let px = read_fr!(&mut off);
-            let py = read_fr!(&mut off);
-            ecdsa.push(EcdsaEntry { r, s, px, py });
-        }
+    let mut ecdsa = Vec::with_capacity(nproofs);
+    for _ in 0..nproofs {
+        let r  = read_fr!(&mut off);
+        let s  = read_fr!(&mut off);
+        let px = read_fr!(&mut off);
+        let py = read_fr!(&mut off);
+        ecdsa.push(EcdsaEntry { r, s, px, py });
     }
 
     ParsedInput {

@@ -14,9 +14,7 @@ pub struct ProveRequest {
     pub proofs: Vec<SnarkJsProof>,
     /// public inputs for each proof (same length as proofs)
     pub public_inputs: Vec<Vec<String>>,
-    /// optional ECDSA signatures — one per proof, in same order.
-    /// If present, the circuit will verify secp256k1 signatures over vote_id.
-    #[serde(default)]
+    /// ECDSA signatures — one per proof, in same order. Mandatory.
     pub sigs: Vec<EcdsaSig>,
 }
 

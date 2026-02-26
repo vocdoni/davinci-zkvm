@@ -36,8 +36,8 @@ provingKey/
 .env
 
 # ── Go test binaries ─────────────────────────────────────────────────────────
-integration-tests/*.test
-integration-tests/vendor/
+go-sdk/tests/*.test
+go-sdk/tests/vendor/
 
 # ── IDE / OS ─────────────────────────────────────────────────────────────────
 .idea/

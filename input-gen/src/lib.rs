@@ -270,8 +270,8 @@ pub fn generate_input(vk: &SnarkJsVk, proofs_json: &[SnarkJsProof], public_input
     if proofs_json.len() != public_inputs_json.len() {
         bail!("proofs and public_inputs must have the same length");
     }
-    if !sigs.is_empty() && sigs.len() != num_proofs {
-        bail!("sigs length ({}) must equal num_proofs ({}) or be empty", sigs.len(), num_proofs);
+    if sigs.len() != num_proofs {
+        bail!("sigs length ({}) must equal num_proofs ({}); ECDSA signatures are mandatory", sigs.len(), num_proofs);
     }
 
     // Detect G2 encoding mode from the first proof
@@ -347,16 +347,12 @@ pub fn generate_input(vk: &SnarkJsVk, proofs_json: &[SnarkJsProof], public_input
     write_u64_slice(&mut buf, &g1_to_raw(&neg_g_ic));
     write_u64_slice(&mut buf, &g1_to_raw(&neg_acc_c));
 
-    // ECDSA signatures (appended after Groth16 data, one entry per proof)
-    // Each entry: r[4] || s[4] || px[4] || py[4]  (all [u64;4] little-endian)
-    // The circuit reads these to verify secp256k1 signatures over vote_id.
-    if !sigs.is_empty() {
-        for sig in sigs {
-            write_u64_slice(&mut buf, &hex32_to_u64x4(&sig.signature_r)?);
-            write_u64_slice(&mut buf, &hex32_to_u64x4(&sig.signature_s)?);
-            write_u64_slice(&mut buf, &hex32_to_u64x4(&sig.public_key_x)?);
-            write_u64_slice(&mut buf, &hex32_to_u64x4(&sig.public_key_y)?);
-        }
+    // ECDSA signatures (one entry per proof): r[4] || s[4] || px[4] || py[4] (all [u64;4] LE)
+    for sig in sigs {
+        write_u64_slice(&mut buf, &hex32_to_u64x4(&sig.signature_r)?);
+        write_u64_slice(&mut buf, &hex32_to_u64x4(&sig.signature_s)?);
+        write_u64_slice(&mut buf, &hex32_to_u64x4(&sig.public_key_x)?);
+        write_u64_slice(&mut buf, &hex32_to_u64x4(&sig.public_key_y)?);
     }
 
     Ok(buf)
@@ -389,11 +385,11 @@ fn read_json<T: for<'de> serde::Deserialize<'de>>(path: &Path) -> Result<T> {
 
 /// Load ECDSA signatures from a directory.
 /// Reads `sig_1.json..sig_N.json` (produced by davinci-circom generate-proofs.sh).
-/// Returns an empty Vec if no sig files exist (backward-compatible).
+/// Fails if no sig files are found — ECDSA signatures are mandatory.
 pub fn load_signatures_from_dir(dir: &Path, num_proofs: usize) -> Result<Vec<EcdsaSig>> {
     let mut sig_paths = collect_paths(dir, "sig_")?;
     if sig_paths.is_empty() {
-        return Ok(vec![]);
+        bail!("no sig_*.json files found in {}; ECDSA signatures are mandatory", dir.display());
     }
     if sig_paths.len() < num_proofs {
         bail!("not enough sig files in {} (need {}, found {})", dir.display(), num_proofs, sig_paths.len());

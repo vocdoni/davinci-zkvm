@@ -71,20 +71,20 @@ fn address_matches(addr_bytes: &[u8; 20], pubs_addr: &FrRaw) -> bool {
 
 /// Verify all ECDSA signatures in `parsed.ecdsa`.
 ///
-/// Returns `(has_ecdsa, ecdsa_ok)`:
-/// - `has_ecdsa = false` when no ECDSA block was present (backward-compatible mode).
-/// - `ecdsa_ok  = false` when any signature or address binding check fails.
+/// Returns `ecdsa_ok = false` when any signature or address binding check fails.
 ///
 /// # Fail-mask bits
-/// - Bit 3 — ECDSA signature or address-binding check failed
-pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> (bool, bool) {
+/// - Bit 3 — ECDSA signature or address-binding check failed (or ECDSA block missing)
+pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     if parsed.ecdsa.is_empty() {
-        return (false, true);
+        // ECDSA block is mandatory; treat absence as failure
+        *fail_mask |= 1 << 3;
+        return false;
     }
     // Public input layout: pubs[0] = address (uint160), pubs[1] = vote_id (uint64)
     if parsed.n_public < 2 {
         *fail_mask |= 1 << 3;
-        return (true, false);
+        return false;
     }
     for (i, sig) in parsed.ecdsa.iter().enumerate() {
         let pubs    = &parsed.proofs[i].public_inputs;
@@ -94,13 +94,13 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> (bool, bool) {
 
         if !secp256k1_ecdsa_verify(&pk, &z, &sig.r, &sig.s) {
             *fail_mask |= 1 << 3;
-            return (true, false);
+            return false;
         }
         let addr = eth_address_from_pk(&sig.px, &sig.py);
         if !address_matches(&addr, &pubs[0]) {
             *fail_mask |= 1 << 3;
-            return (true, false);
+            return false;
         }
     }
-    (true, true)
+    true
 }
