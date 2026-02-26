@@ -70,7 +70,7 @@ func TestSubmitAndProve(t *testing.T) {
 		t.Skip("DAVINCI_SKIP_PROVING=1, skipping full proof test")
 	}
 
-	req, err := davinci.LoadProveRequestFromDir(testDataDir(), 128)
+	req, err := loadProveRequestFromDir(testDataDir(), 128)
 	if err != nil {
 		t.Fatalf("loading prove request: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestSubmitAndProve(t *testing.T) {
 }
 
 func TestProofNotReadyWhileQueued(t *testing.T) {
-	req, err := davinci.LoadProveRequestFromDir(testDataDir(), 128)
+	req, err := loadProveRequestFromDir(testDataDir(), 128)
 	if err != nil {
 		t.Fatalf("loading prove request: %v", err)
 	}

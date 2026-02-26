@@ -1,4 +1,4 @@
-package davinci
+package tests
 
 import (
 	"encoding/json"
@@ -8,9 +8,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 )
 
-// LoadProveRequestFromDir builds a ProveRequest by reading proof, public, and sig
+// loadProveRequestFromDir builds a ProveRequest by reading proof, public, and sig
 // files from dir. It expects:
 //   - verification_key.json
 //   - proof_1.json .. proof_N.json
@@ -18,8 +20,7 @@ import (
 //   - sig_1.json .. sig_N.json  (mandatory)
 //
 // Only the first n proofs (sorted numerically) are loaded.
-func LoadProveRequestFromDir(dir string, n int) (*ProveRequest, error) {
-	// VK
+func loadProveRequestFromDir(dir string, n int) (*davinci.ProveRequest, error) {
 	vkBytes, err := os.ReadFile(filepath.Join(dir, "verification_key.json"))
 	if err != nil {
 		return nil, fmt.Errorf("reading verification_key.json: %w", err)
@@ -78,7 +79,7 @@ func LoadProveRequestFromDir(dir string, n int) (*ProveRequest, error) {
 		sigs[i] = sigRaw
 	}
 
-	return &ProveRequest{
+	return &davinci.ProveRequest{
 		VK:           json.RawMessage(vkBytes),
 		Proofs:       proofs,
 		PublicInputs: publics,
