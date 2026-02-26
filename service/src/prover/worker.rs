@@ -150,6 +150,22 @@ async fn run_prove_with_retry(config: &Config, task: &ProveTask) -> anyhow::Resu
 }
 
 async fn run_prove(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
+    // Produces a ZisK STARK proof (vadcop_final_proof.bin).
+    //
+    // NOTE: --final-snark is intentionally NOT passed here.
+    //
+    // ZisK's full pipeline ends with an optional FFlonk BN254 zkSNARK stage
+    // ("recursivef" → final.zkey) that would produce a compact, on-chain-verifiable
+    // proof.  However, the distributed v0.15.0 proving key does not include the
+    // required `final/` artifacts (final.so, final.zkey, final.dat).  Passing
+    // --final-snark with the current proving key causes proofman to silently
+    // discard the error (the result of generate_fflonk_snark_proof is `let _`),
+    // so the flag has no effect — it only wastes initialisation time.
+    //
+    // When Polygon releases the final-snark proving key artifacts, re-add:
+    //   .arg("--final-snark")
+    // and update the /proof download endpoint to serve the resulting JSON file
+    // instead of vadcop_final_proof.bin.
     let output = Command::new(&config.cargo_zisk_bin)
         .arg("prove")
         .arg("--elf").arg(&config.circuit_elf_path)
@@ -158,7 +174,6 @@ async fn run_prove(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
         .arg("--output-dir").arg(&task.output_dir)
         .arg("--emulator")
         .arg("--aggregation")
-        .arg("--final-snark")
         .arg("--verify-proofs")
         .output()
         .await
