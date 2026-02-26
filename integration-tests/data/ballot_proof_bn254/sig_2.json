@@ -1,0 +1,10 @@
+{
+  "private_key": "0x4febb223b5ee7ecca7206a51954dedf2ddaff18fe35e1cc0927a58ce79f45632",
+  "public_key_x": "0xbd8e8955cb2b4dae5ad1b7305d196600b479056a4c965e1cebbb12553d7119f1",
+  "public_key_y": "0xcacfd3c4f0ac468be3bba7cb094d8aa5d9f0dc5e5e1afa8e5c5ade65f165c67c",
+  "signature_r": "0x4ef97b1732e76177def039f3c5763cf487b8c30d631a0d169b8314fb5a425bc3",
+  "signature_s": "0x70a28dcf4c4dc86b9a40c1d9e512d66af185cbaca6e8bbf076cf9460105a3d8b",
+  "signature_v": 1,
+  "vote_id": 10605286408320286682,
+  "address": "462459178936397272659100257470383780780701533028"
+}

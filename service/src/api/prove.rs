@@ -26,8 +26,9 @@ pub async fn submit_prove(
     let vk = req.vk.clone();
     let proofs = req.proofs.clone();
     let public_inputs = req.public_inputs.clone();
+    let sigs = req.sigs.clone();
     let input_bytes = match tokio::task::spawn_blocking(move || {
-        generate_input(&vk, &proofs, &public_inputs)
+        generate_input(&vk, &proofs, &public_inputs, &sigs)
     }).await {
         Ok(Ok(bytes)) => bytes,
         Ok(Err(e)) => {

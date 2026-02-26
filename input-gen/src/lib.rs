@@ -19,6 +19,26 @@ use std::path::{Path, PathBuf};
 // "GROTH16B" in little-endian ASCII — matches guest magic constant
 const MAGIC: u64 = 0x423631484f545247u64;
 
+/// ECDSA signature + public key for one ballot, as produced by davinci-circom.
+///
+/// All hex strings are 32-byte big-endian with "0x" prefix.
+/// The circuit verifies: secp256k1_ecdsa_verify(pk, z, r, s)
+/// where z = keccak256(Ethereum-signed-message hash of vote_id).
+#[derive(Debug, Deserialize, Clone)]
+pub struct EcdsaSig {
+    pub public_key_x: String,  // 0x-prefixed 32-byte big-endian hex
+    pub public_key_y: String,  // 0x-prefixed 32-byte big-endian hex
+    pub signature_r: String,   // 0x-prefixed 32-byte big-endian hex
+    pub signature_s: String,   // 0x-prefixed 32-byte big-endian hex
+    pub vote_id: u64,
+    pub address: String,       // decimal uint160
+    // private_key and signature_v are not used by the circuit; present for debugging
+    #[serde(default)]
+    pub private_key: String,
+    #[serde(default)]
+    pub signature_v: u8,
+}
+
 /// snarkjs Groth16 proof JSON format
 #[derive(Debug, Deserialize, Clone)]
 pub struct SnarkJsProof {
@@ -242,13 +262,16 @@ fn compute_r_shift(proofs: &[Proof<Bn254>], public_inputs: &[Vec<Fr>]) -> Fr {
 /// power of two >= 2 and match the circuit's expected batch size (typically 128).
 ///
 /// Returns raw bytes suitable for writing to disk and passing to `cargo-zisk prove --input`.
-pub fn generate_input(vk: &SnarkJsVk, proofs_json: &[SnarkJsProof], public_inputs_json: &[Vec<String>]) -> Result<Vec<u8>> {
+pub fn generate_input(vk: &SnarkJsVk, proofs_json: &[SnarkJsProof], public_inputs_json: &[Vec<String>], sigs: &[EcdsaSig]) -> Result<Vec<u8>> {
     let num_proofs = proofs_json.len();
     if num_proofs < 2 || !num_proofs.is_power_of_two() {
         bail!("num_proofs ({}) must be a power of two >= 2", num_proofs);
     }
     if proofs_json.len() != public_inputs_json.len() {
         bail!("proofs and public_inputs must have the same length");
+    }
+    if !sigs.is_empty() && sigs.len() != num_proofs {
+        bail!("sigs length ({}) must equal num_proofs ({}) or be empty", sigs.len(), num_proofs);
     }
 
     // Detect G2 encoding mode from the first proof
@@ -324,6 +347,18 @@ pub fn generate_input(vk: &SnarkJsVk, proofs_json: &[SnarkJsProof], public_input
     write_u64_slice(&mut buf, &g1_to_raw(&neg_g_ic));
     write_u64_slice(&mut buf, &g1_to_raw(&neg_acc_c));
 
+    // ECDSA signatures (appended after Groth16 data, one entry per proof)
+    // Each entry: r[4] || s[4] || px[4] || py[4]  (all [u64;4] little-endian)
+    // The circuit reads these to verify secp256k1 signatures over vote_id.
+    if !sigs.is_empty() {
+        for sig in sigs {
+            write_u64_slice(&mut buf, &hex32_to_u64x4(&sig.signature_r)?);
+            write_u64_slice(&mut buf, &hex32_to_u64x4(&sig.signature_s)?);
+            write_u64_slice(&mut buf, &hex32_to_u64x4(&sig.public_key_x)?);
+            write_u64_slice(&mut buf, &hex32_to_u64x4(&sig.public_key_y)?);
+        }
+    }
+
     Ok(buf)
 }
 
@@ -350,4 +385,37 @@ pub fn load_proofs_from_dir(dir: &Path, num_proofs: usize) -> Result<(Vec<SnarkJ
 fn read_json<T: for<'de> serde::Deserialize<'de>>(path: &Path) -> Result<T> {
     let raw = fs::read(path).with_context(|| format!("failed reading {}", path.display()))?;
     serde_json::from_slice(&raw).with_context(|| format!("invalid JSON: {}", path.display()))
+}
+
+/// Load ECDSA signatures from a directory.
+/// Reads `sig_1.json..sig_N.json` (produced by davinci-circom generate-proofs.sh).
+/// Returns an empty Vec if no sig files exist (backward-compatible).
+pub fn load_signatures_from_dir(dir: &Path, num_proofs: usize) -> Result<Vec<EcdsaSig>> {
+    let mut sig_paths = collect_paths(dir, "sig_")?;
+    if sig_paths.is_empty() {
+        return Ok(vec![]);
+    }
+    if sig_paths.len() < num_proofs {
+        bail!("not enough sig files in {} (need {}, found {})", dir.display(), num_proofs, sig_paths.len());
+    }
+    sig_paths.truncate(num_proofs);
+    sig_paths.iter().map(|p| read_json(p)).collect()
+}
+
+/// Parse a 0x-prefixed 32-byte big-endian hex string into [u64; 4] little-endian.
+/// The circuit reads these words as little-endian 64-bit integers.
+fn hex32_to_u64x4(s: &str) -> Result<[u64; 4]> {
+    let hex = s.strip_prefix("0x").unwrap_or(s);
+    let bytes = hex::decode(hex)
+        .with_context(|| format!("invalid hex: {}", s))?;
+    if bytes.len() != 32 {
+        bail!("expected 32-byte hex, got {} bytes: {}", bytes.len(), s);
+    }
+    // Input is big-endian; convert to little-endian u64 words (lowest word = bytes[24..32])
+    let mut out = [0u64; 4];
+    for i in 0..4 {
+        let start = 24 - i * 8; // big-endian: word 0 = bytes[24..32]
+        out[i] = u64::from_be_bytes(bytes[start..start + 8].try_into().unwrap());
+    }
+    Ok(out)
 }

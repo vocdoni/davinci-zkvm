@@ -6,10 +6,10 @@ use ark_bn254::Fr as ArkFr;
 use ark_ff::{BigInt as ArkBigInt, Field as ArkField, PrimeField};
 use ziskos::{
     read_input_slice, set_output,
-    syscalls::{syscall_arith256_mod, SyscallArith256ModParams},
+    syscalls::{syscall_arith256_mod, syscall_keccak_f, SyscallArith256ModParams, SyscallPoint256},
     zisklib::{
         add_bn254, is_on_curve_bn254, is_on_curve_twist_bn254, is_on_subgroup_twist_bn254,
-        mul_bn254, neg_fp_bn254, pairing_batch_bn254, sha256f_compress,
+        mul_bn254, neg_fp_bn254, pairing_batch_bn254, secp256k1_ecdsa_verify, sha256f_compress,
     },
 };
 
@@ -150,7 +150,92 @@ fn sha256_once(data: &[u8]) -> [u8; 32] {
     out
 }
 
-/// Derive a non-zero Fr challenge from a 32-byte digest using double-hash wide reduction.
+// Keccak-256 using ZisK keccak_f hardware precompile (Keccak rate = 136 bytes).
+// Handles up to 135 bytes of input (fits in one block — sufficient for our use cases:
+//   60 bytes for Ethereum signed-message hash, 64 bytes for pubkey address derivation).
+//
+// NOTE: This uses Keccak-256 padding (domain separation = 0x01), NOT SHA3-256 (0x06).
+// Go-ethereum uses Keccak-256 which matches this implementation.
+fn keccak256_short(data: &[u8]) -> [u8; 32] {
+    assert!(data.len() < 136, "keccak256_short: input too long (>= 136 bytes)");
+    // Lane-based Keccak state (25 × u64 = 200 bytes), initialised to zero
+    let mut state = [0u64; 25];
+
+    // Absorb: XOR padded message into first 136 bytes (rate) of state.
+    // Keccak-256 padding: message || 0x01 || 0x00...00 || 0x80 (at byte index 135)
+    for (i, &b) in data.iter().enumerate() {
+        state[i / 8] ^= (b as u64) << ((i % 8) * 8);
+    }
+    // Domain suffix 0x01 at byte after message
+    let pad_pos = data.len();
+    state[pad_pos / 8] ^= 0x01u64 << ((pad_pos % 8) * 8);
+    // Rate terminator 0x80 at byte 135 (last byte of the 136-byte block)
+    state[135 / 8] ^= 0x80u64 << ((135 % 8) * 8);
+
+    // Permute
+    unsafe { syscall_keccak_f(&mut state as *mut [u64; 25]); }
+
+    // Extract first 32 bytes (the 256-bit digest) from the LE lane state
+    let mut out = [0u8; 32];
+    for i in 0..32usize {
+        out[i] = (state[i / 8] >> ((i % 8) * 8)) as u8;
+    }
+    out
+}
+
+// Build the 60-byte Ethereum signed-message for a vote_id and return keccak256(message)
+// as a [u64; 4] little-endian scalar (for use as z in secp256k1_ecdsa_verify).
+//
+// Scheme (matching davinci-node/crypto/signatures/ethereum):
+//   message  = PadToSign(vote_id_BE8) = [0x00×24, vote_id_be_byte0..7] (32 bytes)
+//   envelope = "\x19Ethereum Signed Message:\n32" || message  (60 bytes)
+//   hash     = keccak256(envelope)
+//   z        = hash interpreted as 256-bit big-endian integer → [u64;4] LE
+fn eth_message_hash(vote_id: u64) -> [u64; 4] {
+    // prefix: "\x19Ethereum Signed Message:\n32" = 28 bytes
+    const PREFIX: &[u8] = b"\x19Ethereum Signed Message:\n32";
+    let mut msg = [0u8; 60];
+    msg[..28].copy_from_slice(PREFIX);
+    // PadToSign: 24 zero bytes already present, append 8-byte BE vote_id
+    msg[28 + 24..].copy_from_slice(&vote_id.to_be_bytes());
+
+    let h = keccak256_short(&msg);
+
+    // Convert big-endian 32-byte hash to [u64; 4] LE (least significant word first)
+    [
+        u64::from_be_bytes(h[24..32].try_into().unwrap()),
+        u64::from_be_bytes(h[16..24].try_into().unwrap()),
+        u64::from_be_bytes(h[8..16].try_into().unwrap()),
+        u64::from_be_bytes(h[0..8].try_into().unwrap()),
+    ]
+}
+
+// Derive the Ethereum address from a secp256k1 public key (uncompressed, no prefix).
+// address = keccak256(px_be32 || py_be32)[12..] as big-endian 20 bytes.
+//
+// Inputs: px and py as [u64; 4] LE (standard ZisK representation).
+// Returns the address as a 20-byte big-endian array.
+fn eth_address_from_pk(px: &[u64; 4], py: &[u64; 4]) -> [u8; 20] {
+    // Build 64-byte input: px as 32-byte BE || py as 32-byte BE
+    let mut input = [0u8; 64];
+    for i in 0..4 {
+        input[i * 8..i * 8 + 8].copy_from_slice(&px[3 - i].to_be_bytes());
+        input[32 + i * 8..32 + i * 8 + 8].copy_from_slice(&py[3 - i].to_be_bytes());
+    }
+    let h = keccak256_short(&input);
+    h[12..].try_into().unwrap()
+}
+
+// Compare the keccak-derived address bytes with the address stored in a BN254 Fr element.
+// The Fr element stores the uint160 address as [u64; 4] LE, address[0] = lower 64 bits.
+fn address_matches(addr_bytes: &[u8; 20], pubs_addr: &FrRaw) -> bool {
+    // Build expected 20 big-endian bytes from Fr element (uint160)
+    let mut expected = [0u8; 20];
+    expected[0..4].copy_from_slice(&(pubs_addr[2] as u32).to_be_bytes());
+    expected[4..12].copy_from_slice(&pubs_addr[1].to_be_bytes());
+    expected[12..20].copy_from_slice(&pubs_addr[0].to_be_bytes());
+    addr_bytes == &expected
+}
 ///
 /// Optimised for small fixed-size input: uses stack-allocated [u8; 41] buffers to avoid
 /// heap allocations in the retry loop.  The caller is responsible for pre-hashing any
@@ -251,7 +336,14 @@ fn main() {
     let neg_g_ic = read_words_le::<8>(input, &mut offset).unwrap_or_else(|| { parse_fail = true; g1_identity() });
     let neg_acc_c = read_words_le::<8>(input, &mut offset).unwrap_or_else(|| { parse_fail = true; g1_identity() });
 
-    if offset != input.len() { parse_fail = true; }
+    // Check for optional ECDSA signature block.
+    // If present: nproofs × 4 × 32 bytes (r, s, px, py — each 32 bytes = [u64;4])
+    let ecdsa_block_size = nproofs * 4 * 32;
+    let has_ecdsa = !parse_fail && (offset + ecdsa_block_size == input.len());
+    let groth16_only = !parse_fail && (offset == input.len());
+    if !parse_fail && !has_ecdsa && !groth16_only {
+        parse_fail = true;
+    }
 
     // --- Validate points ---
     if !parse_fail {
@@ -326,9 +418,57 @@ fn main() {
     }
 
     if !batch_ok { fail_mask |= 1 << 2; }
+
+    // --- ECDSA signature verification (optional, present when has_ecdsa=true) ---
+    //
+    // For each proof i, the ECDSA block contains:
+    //   r[4], s[4], px[4], py[4]  — all [u64;4] little-endian
+    //
+    // We verify:
+    //   1. secp256k1_ecdsa_verify(pk, z, r, s)
+    //      where z = keccak256(Ethereum-signed-message envelope of vote_id)
+    //   2. keccak256(px_be32 || py_be32)[12:] == address public input (pubs[0])
+    //
+    // If any verification fails, ecdsa_ok is set false and fail_mask bit 3 is set.
+    // Missing sig block (groth16_only) is not an error — the output bit reflects presence.
+    let mut ecdsa_ok = true;
+    if has_ecdsa && batch_ok {
+        for i in 0..nproofs {
+            let r = read_words_le::<4>(input, &mut offset).unwrap_or_else(|| { ecdsa_ok = false; [0; 4] });
+            let s = read_words_le::<4>(input, &mut offset).unwrap_or_else(|| { ecdsa_ok = false; [0; 4] });
+            let px = read_words_le::<4>(input, &mut offset).unwrap_or_else(|| { ecdsa_ok = false; [0; 4] });
+            let py = read_words_le::<4>(input, &mut offset).unwrap_or_else(|| { ecdsa_ok = false; [0; 4] });
+
+            if !ecdsa_ok { break; }
+
+            // n_public must be >= 2 (address at index 0, vote_id at index 1)
+            if proofs[i].public_inputs.len() < 2 { ecdsa_ok = false; break; }
+
+            let pubs_addr = &proofs[i].public_inputs[0];
+            let vote_id = proofs[i].public_inputs[1][0]; // fits in u64
+
+            // 1. ECDSA signature verification
+            let pk = SyscallPoint256 { x: px, y: py };
+            let z = eth_message_hash(vote_id);
+            if !secp256k1_ecdsa_verify(&pk, &z, &r, &s) {
+                ecdsa_ok = false;
+                break;
+            }
+
+            // 2. Public key → Ethereum address binding
+            let addr_bytes = eth_address_from_pk(&px, &py);
+            if !address_matches(&addr_bytes, pubs_addr) {
+                ecdsa_ok = false;
+                break;
+            }
+        }
+    }
+
+    if has_ecdsa && !ecdsa_ok { fail_mask |= 1 << 3; }
+
     if parse_fail { fail_mask |= 1 << 31; }
 
-    let overall_ok = !parse_fail && batch_ok;
+    let overall_ok = !parse_fail && batch_ok && (!has_ecdsa || ecdsa_ok);
     set_output(0, if overall_ok { 1 } else { 0 });
     set_output(1, fail_mask);
     set_output(2, log_n as u32);
@@ -337,4 +477,5 @@ fn main() {
     set_output(5, input.len() as u32);
     set_output(6, offset as u32);
     set_output(7, if batch_ok { 1 } else { 0 });
+    set_output(8, if has_ecdsa { if ecdsa_ok { 1 } else { 0 } } else { 2 }); // 2 = not present
 }

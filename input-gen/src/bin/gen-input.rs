@@ -9,7 +9,7 @@
 //!   ...
 
 use anyhow::Result;
-use davinci_zkvm_input_gen::{generate_input, load_proofs_from_dir, SnarkJsVk};
+use davinci_zkvm_input_gen::{generate_input, load_proofs_from_dir, load_signatures_from_dir, SnarkJsVk};
 use std::path::PathBuf;
 
 fn main() -> Result<()> {
@@ -39,9 +39,13 @@ fn main() -> Result<()> {
 
     eprintln!("Loading {} proofs from {:?}", nproofs, proofs_dir);
     let (proofs, public_inputs) = load_proofs_from_dir(&proofs_dir, nproofs)?;
+    let sigs = load_signatures_from_dir(&proofs_dir, nproofs)?;
+    if !sigs.is_empty() {
+        eprintln!("Loaded {} ECDSA signatures", sigs.len());
+    }
 
     eprintln!("Generating binary input...");
-    let bytes = generate_input(&vk, &proofs, &public_inputs)?;
+    let bytes = generate_input(&vk, &proofs, &public_inputs, &sigs)?;
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;
     }

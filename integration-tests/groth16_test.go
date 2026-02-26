@@ -35,6 +35,8 @@ type ProveRequest struct {
 	VK           json.RawMessage   `json:"vk"`
 	Proofs       []json.RawMessage `json:"proofs"`
 	PublicInputs [][]string        `json:"public_inputs"`
+	// Sigs is optional — include when sig_N.json files are present in the data directory
+	Sigs []json.RawMessage `json:"sigs,omitempty"`
 }
 
 // JobResponse mirrors the service API job status response.
@@ -76,11 +78,22 @@ func loadProveRequest(t *testing.T, n int) ProveRequest {
 			publicPaths = append(publicPaths, filepath.Join(dataDir, e.Name()))
 		}
 	}
+
+	var sigPaths []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "sig_") && strings.HasSuffix(e.Name(), ".json") {
+			sigPaths = append(sigPaths, filepath.Join(dataDir, e.Name()))
+		}
+	}
+
 	sort.Slice(proofPaths, func(i, j int) bool {
 		return numericSuffix(proofPaths[i]) < numericSuffix(proofPaths[j])
 	})
 	sort.Slice(publicPaths, func(i, j int) bool {
 		return numericSuffix(publicPaths[i]) < numericSuffix(publicPaths[j])
+	})
+	sort.Slice(sigPaths, func(i, j int) bool {
+		return numericSuffix(sigPaths[i]) < numericSuffix(sigPaths[j])
 	})
 
 	if len(proofPaths) < n || len(publicPaths) < n {
@@ -110,11 +123,28 @@ func loadProveRequest(t *testing.T, n int) ProveRequest {
 		publics[i] = pub
 	}
 
-	return ProveRequest{
+	req := ProveRequest{
 		VK:           json.RawMessage(vkBytes),
 		Proofs:       proofs,
 		PublicInputs: publics,
 	}
+
+	// Load ECDSA signatures if available (optional — backward-compatible)
+	if len(sigPaths) >= n {
+		sigPaths = sigPaths[:n]
+		sigs := make([]json.RawMessage, n)
+		for i := 0; i < n; i++ {
+			raw, err := os.ReadFile(sigPaths[i])
+			if err != nil {
+				t.Fatalf("reading sig %d: %v", i, err)
+			}
+			sigs[i] = raw
+		}
+		req.Sigs = sigs
+		t.Logf("Loaded %d ECDSA signatures", n)
+	}
+
+	return req
 }
 
 func numericSuffix(path string) int {
