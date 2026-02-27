@@ -12,12 +12,7 @@ circuit/target/
 # circuit/elf/circuit.elf  ← intentionally tracked
 
 # ── Generated / runtime data ─────────────────────────────────────────────────
-# ZisK binary inputs (regenerated via `make gen-input`)
-data/*/aggregated_bn254/zisk_full_verify_input.bin
-# Proof output directories produced by cargo-zisk prove
-data/*/aggregated_bn254/zisk_proof_*/
-data/*/aggregated_bn254/*.bin
-data/*/aggregated_bn254/summary.json
+data/
 
 # ── Proving key ──────────────────────────────────────────────────────────────
 # Too large (~36 GB) to track; mounted as a volume at runtime.
