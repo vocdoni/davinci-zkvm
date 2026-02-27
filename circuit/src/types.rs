@@ -15,6 +15,9 @@ pub type FrRaw = [u64; 4];
 /// Magic bytes `"GROTH16B"` in little-endian ASCII — identifies the binary input format.
 pub const MAGIC: u64 = 0x423631484f545247u64;
 
+/// Magic bytes `"SMTBLK!!"` — identifies the optional SMT block appended after ECDSA data.
+pub const SMT_MAGIC: u64 = u64::from_le_bytes(*b"SMTBLK!!");
+
 /// BN254 scalar field modulus r as [u64; 4] little-endian.
 #[allow(dead_code)]
 pub const BN254_FR_MODULUS: FrRaw = [
@@ -46,4 +49,27 @@ pub struct EcdsaEntry {
     pub s: FrRaw,
     pub px: FrRaw,
     pub py: FrRaw,
+}
+
+/// One Arbo-compatible SMT state-transition proof.
+///
+/// All `FrRaw` fields use LE word order (same convention as the rest of the circuit).
+/// The SMT verifier converts them to big-endian bytes for hashing, matching Arbo's
+/// `HashFunctionSha256` byte layout.
+#[derive(Clone)]
+pub struct SmtTransition {
+    pub old_root: FrRaw,
+    pub new_root: FrRaw,
+    pub old_key: FrRaw,
+    pub old_value: FrRaw,
+    /// `true` when the old leaf slot was empty (pure insert into an unoccupied position).
+    pub is_old0: bool,
+    pub new_key: FrRaw,
+    pub new_value: FrRaw,
+    /// `fnc0=true` → insert (or delete if also fnc1=true).
+    pub fnc0: bool,
+    /// `fnc1=true` → update (or delete if also fnc0=true).
+    pub fnc1: bool,
+    /// Merkle siblings, root→leaf order, padded to `n_levels` with zeros.
+    pub siblings: Vec<FrRaw>,
 }

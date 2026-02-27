@@ -3,7 +3,7 @@
 use crate::api::AppState;
 use crate::types::{ProveRequest, ProveResponse};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use davinci_zkvm_input_gen::generate_input;
+use davinci_zkvm_input_gen::{generate_input, write_smt_block, SmtEntry};
 use tracing::{error, info};
 
 pub async fn submit_prove(
@@ -27,8 +27,33 @@ pub async fn submit_prove(
     let proofs = req.proofs.clone();
     let public_inputs = req.public_inputs.clone();
     let sigs = req.sigs.clone();
+    let smt_json = req.smt.clone();
     let input_bytes = match tokio::task::spawn_blocking(move || {
-        generate_input(&vk, &proofs, &public_inputs, &sigs)
+        let mut bytes = generate_input(&vk, &proofs, &public_inputs, &sigs)?;
+        // Append optional SMT block.
+        if !smt_json.is_empty() {
+            let entries = smt_json.iter()
+                .map(|e| -> anyhow::Result<SmtEntry> {
+                    let siblings = e.siblings.iter()
+                        .map(|s| davinci_zkvm_input_gen::hex32_to_smt_fr(s))
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+                    Ok(SmtEntry {
+                        old_root:  davinci_zkvm_input_gen::hex32_to_smt_fr(&e.old_root)?,
+                        new_root:  davinci_zkvm_input_gen::hex32_to_smt_fr(&e.new_root)?,
+                        old_key:   davinci_zkvm_input_gen::hex32_to_smt_fr(&e.old_key)?,
+                        old_value: davinci_zkvm_input_gen::hex32_to_smt_fr(&e.old_value)?,
+                        is_old0:   e.is_old0 != 0,
+                        new_key:   davinci_zkvm_input_gen::hex32_to_smt_fr(&e.new_key)?,
+                        new_value: davinci_zkvm_input_gen::hex32_to_smt_fr(&e.new_value)?,
+                        fnc0:      e.fnc0 != 0,
+                        fnc1:      e.fnc1 != 0,
+                        siblings,
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            bytes.extend(write_smt_block(&entries)?);
+        }
+        anyhow::Ok(bytes)
     }).await {
         Ok(Ok(bytes)) => bytes,
         Ok(Err(e)) => {

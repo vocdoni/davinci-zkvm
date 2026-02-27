@@ -11,9 +11,12 @@
 //! Proofs : nproofs(u64) [a(G1) b(G2) c(G1) pubs[..](FrRaw each)] × nproofs
 //! Hints  : scaled_a[..](G1 each) neg_alpha_rsum(G1) neg_g_ic(G1) neg_acc_c(G1)
 //! ECDSA  : [r s px py](FrRaw each) × nproofs  (mandatory)
+//! SMT    : [optional] SMT_MAGIC(u64) n_transitions(u64) n_levels(u64)
+//!          then for each transition:
+//!            old_root new_root old_key old_value (FrRaw each)
+//!            is_old0 new_key new_value fnc0 fnc1 (u64 each, values 0/1)
+//!            siblings[n_levels] (FrRaw each)
 //! ```
-//!
-//! The ECDSA block must be present; its expected size is `nproofs × 4 × 32` bytes.
 
 use crate::bn254::{g1_identity, g2_identity};
 use crate::types::*;
@@ -51,6 +54,8 @@ pub struct ParsedInput {
     pub neg_acc_c: G1,
     /// ECDSA entries; one per proof (mandatory).
     pub ecdsa: Vec<EcdsaEntry>,
+    /// SMT state-transition proofs (empty if SMT block is absent).
+    pub smt: Vec<SmtTransition>,
     /// Number of bytes consumed (equals `input.len()` on success).
     pub bytes_consumed: usize,
 }
@@ -134,9 +139,9 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
     let neg_acc_c      = read_g1!(&mut off);
 
     // --- ECDSA block (mandatory) ---
-    // Must be present: exactly nproofs × (r + s + px + py) × 32 bytes remaining.
+    // Must be present: exactly nproofs × (r + s + px + py) × 32 bytes follow.
     let ecdsa_block_size = nproofs * 4 * 32;
-    if *fail_mask == 0 && off + ecdsa_block_size != input.len() {
+    if *fail_mask == 0 && off + ecdsa_block_size > input.len() {
         *fail_mask |= 1 << 31;
     }
 
@@ -149,11 +154,52 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
         ecdsa.push(EcdsaEntry { r, s, px, py });
     }
 
+    // --- SMT block (optional) ---
+    // Detected by the SMT_MAGIC sentinel; absent = empty Vec, not an error.
+    let mut smt: Vec<SmtTransition> = Vec::new();
+    if off + 8 <= input.len() {
+        let maybe_magic = u64::from_le_bytes(input[off..off + 8].try_into().unwrap());
+        if maybe_magic == SMT_MAGIC {
+            off += 8;
+            let n_transitions = read1!(&mut off, 0) as usize;
+            let n_levels      = read1!(&mut off, 0) as usize;
+            if n_transitions > 4096 || n_levels > 256 { *fail_mask |= 1 << 31; }
+            smt.reserve(n_transitions);
+            for _ in 0..n_transitions {
+                let old_root  = read_fr!(&mut off);
+                let new_root  = read_fr!(&mut off);
+                let old_key   = read_fr!(&mut off);
+                let old_value = read_fr!(&mut off);
+                let is_old0   = read1!(&mut off, 0) != 0;
+                let new_key   = read_fr!(&mut off);
+                let new_value = read_fr!(&mut off);
+                let fnc0      = read1!(&mut off, 0) != 0;
+                let fnc1      = read1!(&mut off, 0) != 0;
+                let mut siblings = Vec::with_capacity(n_levels);
+                for _ in 0..n_levels {
+                    siblings.push(read_fr!(&mut off));
+                }
+                smt.push(SmtTransition {
+                    old_root, new_root,
+                    old_key, old_value, is_old0,
+                    new_key, new_value,
+                    fnc0, fnc1,
+                    siblings,
+                });
+            }
+        }
+    }
+
+    // All input bytes must be consumed.
+    if off != input.len() {
+        *fail_mask |= 1 << 31;
+    }
+
     ParsedInput {
         log_n, nproofs, n_public,
         vk_alpha_g1, vk_beta_g2, vk_gamma_g2, vk_delta_g2, vk_gamma_abc,
         proofs, scaled_a, neg_alpha_rsum, neg_g_ic, neg_acc_c,
-        ecdsa,
+        ecdsa, smt,
         bytes_consumed: off,
     }
 }
