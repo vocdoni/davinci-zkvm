@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	arbo "github.com/vocdoni/arbo"
 	"github.com/vocdoni/arbo/memdb"
@@ -28,6 +29,16 @@ import (
 )
 
 const smtLevels = 256 // 32-byte keys need maxLevels≥256 (ceil(256/8)=32)
+
+// proofTimeout returns the configured proof timeout (default 20 minutes).
+func proofTimeout() time.Duration {
+	if d := os.Getenv("DAVINCI_PROOF_TIMEOUT"); d != "" {
+		if dur, err := time.ParseDuration(d); err == nil {
+			return dur
+		}
+	}
+	return 20 * time.Minute
+}
 
 // TestSMTInsertTransition submits a ProveRequest that includes a valid SMT
 // insert transition.  The job must complete successfully.
@@ -78,7 +89,7 @@ func TestSMTInsertTransition(t *testing.T) {
 	}
 	t.Logf("Queued job %s (with SMT transition)", jobID)
 
-	proof, err := client.WaitForJob(jobID, 0)
+	proof, err := client.WaitForJob(jobID, proofTimeout())
 	if err != nil {
 		t.Fatalf("WaitForJob %s: %v", jobID, err)
 	}
@@ -183,7 +194,7 @@ func TestSMTUpdateTransition(t *testing.T) {
 	}
 	t.Logf("Queued job %s (SMT update)", jobID)
 
-	proof, err := client.WaitForJob(jobID, 0)
+	proof, err := client.WaitForJob(jobID, proofTimeout())
 	if err != nil {
 		t.Fatalf("WaitForJob %s: %v", jobID, err)
 	}
