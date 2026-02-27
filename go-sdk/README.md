@@ -1,6 +1,6 @@
 # davinci-zkvm Go SDK
 
-Go client library for the [davinci-zkvm](https://github.com/vocdoni/davinci-zkvm) service — a ZisK zkVM prover that batch-verifies Groth16 BN254 ballot proofs together with Ethereum ECDSA signatures inside a STARK proof.
+Go client library for the [davinci-zkvm](https://github.com/vocdoni/davinci-zkvm) service — a ZisK zkVM prover that batch-verifies Groth16 BN254 ballot proofs together with Ethereum ECDSA signatures and optionally verifies Arbo SHA-256 Sparse Merkle Tree (SMT) state transitions, all inside a STARK proof.
 
 ## Install
 
@@ -37,6 +37,7 @@ A `ProveRequest` contains:
 - `Proofs` — array of snarkjs Groth16 proof objects (JSON)
 - `PublicInputs` — public signals for each proof, in the same order
 - `Sigs` — one Ethereum ECDSA signature per proof, in the same order (mandatory)
+- `Smt` — optional SMT state transitions (see [SMT transitions](#smt-state-transitions))
 
 ```go
 req := &davinci.ProveRequest{
@@ -52,6 +53,34 @@ if err != nil {
 }
 fmt.Println("job submitted:", jobID)
 ```
+
+### SMT state transitions
+
+Optionally pass one or more Arbo SHA-256 SMT transitions to be verified inside the circuit. All hex strings are **little-endian** (matching arbo's `BigIntToBytes` format):
+
+```go
+req.Smt = []davinci.SmtEntry{
+    {
+        OldRoot:  "0x...", // 32-byte LE hex of old root
+        NewRoot:  "0x...", // 32-byte LE hex of new root
+        OldKey:   "0x...", // displaced leaf key (all zeros if IsOld0=1)
+        OldValue: "0x...", // displaced leaf value (all zeros if IsOld0=1)
+        IsOld0:   1,       // 1 = empty slot, 0 = displaced leaf
+        NewKey:   "0x...", // inserted key (arbo.BigIntToBytes LE)
+        NewValue: "0x...", // inserted value
+        Fnc0:     1,       // 1=insert/delete, 0=update
+        Fnc1:     0,       // 0=insert/update, 1=update/delete
+        Siblings: []string{"0x...", ...}, // LE hex siblings, padded to maxLevels
+    },
+}
+```
+
+The circuit output `output[9]` reflects SMT verification:
+- `1` — all transitions valid
+- `0` — at least one invalid
+- `2` — no SMT block present (backward compatible)
+
+Use `arbo.UnpackSiblings` + `arbo.GenProof` to generate the sibling list from a `vocdoni/arbo` tree.
 
 ### Poll for completion
 
@@ -84,6 +113,7 @@ proofBytes, err := client.GetProof(jobID)
 | `ProveResponse` | POST /prove response (job_id + status) |
 | `JobResponse` | GET /jobs/{id} response |
 | `HealthResponse` | GET /health response |
+| `SmtEntry` | One SMT state transition (arbo SHA-256 LE format) |
 
 ## API reference
 
@@ -112,6 +142,23 @@ Each ballot proof requires:
    The circuit verifies `secp256k1.Verify(pk, keccak256(ethSignedMessage(vote_id)), r, s)` and that the public key hashes to the declared address.
 
 The circuit accepts exactly 128 proofs (must be a power of two ≥ 2).
+
+## Circuit outputs
+
+The ZisK circuit produces 10 output values (`output[0..9]`):
+
+| Index | Description |
+|---|---|
+| `output[0]` | `1` = overall verification passed, `0` = failed |
+| `output[1]` | fail mask bits (bit N set → check N failed) |
+| `output[2]` | number of proofs processed |
+| `output[3]` | Groth16 batch verification result flags |
+| `output[4]` | number of ECDSA signatures verified |
+| `output[5]` | aggregated nullifier accumulator (low 64 bits) |
+| `output[6]` | aggregated nullifier accumulator (high 64 bits) |
+| `output[7]` | ECDSA batch result |
+| `output[8]` | reserved |
+| `output[9]` | SMT result: `1`=valid, `0`=failed, `2`=not present |
 
 ## Integration tests
 
