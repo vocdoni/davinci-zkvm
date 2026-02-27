@@ -18,6 +18,97 @@ use std::path::{Path, PathBuf};
 
 // "GROTH16B" in little-endian ASCII — matches guest magic constant
 const MAGIC: u64 = 0x423631484f545247u64;
+// "SMTBLK!!" in little-endian ASCII — matches circuit SMT_MAGIC constant
+const SMT_MAGIC: u64 = u64::from_le_bytes(*b"SMTBLK!!");
+
+/// One Arbo-compatible SMT state-transition entry for binary encoding.
+///
+/// All `[u64; 4]` fields use little-endian word order (word[0] = least-significant 64 bits),
+/// matching the circuit's `FrRaw` convention.  The values are big-endian 32-byte numbers
+/// as understood by Arbo; the circuit converts them internally for SHA-256 hashing.
+#[derive(Debug, Clone)]
+pub struct SmtEntry {
+    pub old_root:  [u64; 4],
+    pub new_root:  [u64; 4],
+    pub old_key:   [u64; 4],
+    pub old_value: [u64; 4],
+    /// `true` when the old leaf slot was empty (pure insert into unoccupied position).
+    pub is_old0:   bool,
+    pub new_key:   [u64; 4],
+    pub new_value: [u64; 4],
+    /// `true` for insert (or delete when also `fnc1=true`).
+    pub fnc0: bool,
+    /// `true` for update (or delete when also `fnc0=true`).
+    pub fnc1: bool,
+    /// Merkle siblings root→leaf, padded to `n_levels` with zeros.
+    pub siblings: Vec<[u64; 4]>,
+}
+
+/// Encode a slice of SMT transitions into the optional SMT binary block.
+///
+/// Returns an empty `Vec` if `entries` is empty (no block written).
+/// Returns an error if entries have inconsistent sibling counts.
+///
+/// The returned bytes should be appended to the output of `generate_input`.
+pub fn write_smt_block(entries: &[SmtEntry]) -> Result<Vec<u8>> {
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let n_levels = entries[0].siblings.len();
+    for (i, e) in entries.iter().enumerate() {
+        if e.siblings.len() != n_levels {
+            bail!("SMT entry {} has {} siblings, expected {}", i, e.siblings.len(), n_levels);
+        }
+    }
+    let n_transitions = entries.len();
+    // Header: magic(u64) + n_transitions(u64) + n_levels(u64) = 24 bytes
+    // Per transition: 4+4+4+4 FrRaw + 1+4+4+1+1 u64 scalars + n_levels FrRaw
+    //   = (4*4 + 1+1+1 + n_levels*4) × 8 bytes
+    let entry_bytes = (4 * 4 + 5 + n_levels * 4) * 8;
+    let mut buf = Vec::with_capacity(24 + n_transitions * entry_bytes);
+
+    buf.extend_from_slice(&SMT_MAGIC.to_le_bytes());
+    buf.extend_from_slice(&(n_transitions as u64).to_le_bytes());
+    buf.extend_from_slice(&(n_levels as u64).to_le_bytes());
+
+    for e in entries {
+        write_u64_slice(&mut buf, &e.old_root);
+        write_u64_slice(&mut buf, &e.new_root);
+        write_u64_slice(&mut buf, &e.old_key);
+        write_u64_slice(&mut buf, &e.old_value);
+        buf.extend_from_slice(&(e.is_old0 as u64).to_le_bytes());
+        write_u64_slice(&mut buf, &e.new_key);
+        write_u64_slice(&mut buf, &e.new_value);
+        buf.extend_from_slice(&(e.fnc0 as u64).to_le_bytes());
+        buf.extend_from_slice(&(e.fnc1 as u64).to_le_bytes());
+        for sib in &e.siblings {
+            write_u64_slice(&mut buf, sib);
+        }
+    }
+    Ok(buf)
+}
+
+/// Parse a 0x-prefixed 32-byte big-endian hex string into `[u64; 4]` (LE word order).
+///
+/// Convert a 0x-prefixed **little-endian** hex string to `[u64; 4]` LE words.
+/// Arbo stores all values (keys, values, roots, siblings) in little-endian byte
+/// order (`BigIntToBytes` = LE), so the hex bytes map directly to LE words.
+pub fn hex32_to_smt_fr(s: &str) -> Result<[u64; 4]> {
+    let hex = s.strip_prefix("0x").unwrap_or(s);
+    let bytes = hex::decode(hex)
+        .with_context(|| format!("invalid hex: {}", s))?;
+    if bytes.len() != 32 {
+        bail!("expected 32-byte hex, got {} bytes: {}", bytes.len(), s);
+    }
+    // Input is little-endian (arbo format); words map directly to bytes.
+    let mut out = [0u64; 4];
+    for i in 0..4 {
+        out[i] = u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap());
+    }
+    Ok(out)
+}
+
+
 
 /// ECDSA signature + public key for one ballot, as produced by davinci-circom.
 ///
