@@ -17,7 +17,7 @@
 use ark_bn254::Fr;
 use ark_ff::{BigInteger256, Field, PrimeField, Zero};
 use crate::poseidon::poseidon1;
-use crate::types::{FrRaw, BjjCiphertext, ReencEntry};
+use crate::types::{FrRaw, BjjCiphertext, ReencEntry, FAIL_REENC};
 
 // ─── Fr helpers ────────────────────────────────────────────────────────────
 
@@ -202,7 +202,7 @@ pub fn verify_batch_from_parsed(
             &entry.original,
             &entry.reencrypted,
         ) {
-            *fail_mask |= 1 << 14;
+            *fail_mask |= FAIL_REENC;
             return false;
         }
     }

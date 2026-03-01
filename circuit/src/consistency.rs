@@ -20,6 +20,8 @@ const BALLOT_MAX: u64 = 0x7FFF_FFFF_FFFF_FFFF; // VoteIDMin - 1
 const PUB_ADDRESS: usize = 0;
 const PUB_VOTE_ID: usize = 1;
 
+use crate::types::{FAIL_CONSISTENCY, FAIL_BALLOT_NS};
+
 pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     let state = match &parsed.state {
         None => return true, // STATETX absent — no consistency checks to perform
@@ -37,22 +39,30 @@ pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     for i in 0..n_voters {
         if i >= state.vote_id_chain.len() {
             // More voters declared than voteID SMT entries.
-            *fail_mask |= 1 << 14;
+            *fail_mask |= FAIL_CONSISTENCY;
             return false;
         }
         let vid_key = state.vote_id_chain[i].new_key[0];
 
-        // Namespace check: key must be in [VoteIDMin, VoteIDMax].
+        // Namespace check: key must be in [VoteIDMin, u64::MAX].
+        // The entire high-bit range [0x8000_0000_0000_0000, 0xFFFF_FFFF_FFFF_FFFF]
+        // is the valid VoteID namespace; u64 can never exceed the upper bound.
         if vid_key < VOTE_ID_MIN {
-            *fail_mask |= 1 << 14;
+            *fail_mask |= FAIL_CONSISTENCY;
             ok = false;
         }
 
         // Binding check: matches Groth16 public input[1] (voteID) for proof i.
         if i < parsed.proofs.len() && parsed.n_public > PUB_VOTE_ID {
-            let pub_vote_id = parsed.proofs[i].public_inputs[PUB_VOTE_ID][0];
+            let pubs = &parsed.proofs[i].public_inputs[PUB_VOTE_ID];
+            let pub_vote_id = pubs[0];
+            // VoteIDs are 64-bit values; upper limbs must be zero.
+            if pubs[1] != 0 || pubs[2] != 0 || pubs[3] != 0 {
+                *fail_mask |= FAIL_CONSISTENCY;
+                ok = false;
+            }
             if pub_vote_id != vid_key {
-                *fail_mask |= 1 << 14;
+                *fail_mask |= FAIL_CONSISTENCY;
                 ok = false;
             }
         }
@@ -64,14 +74,14 @@ pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     if !state.ballot_chain.is_empty() {
         for i in 0..n_voters {
             if i >= state.ballot_chain.len() {
-                *fail_mask |= 1 << 15;
+                *fail_mask |= FAIL_BALLOT_NS;
                 return false;
             }
             let ballot_key = state.ballot_chain[i].new_key[0];
 
             // Namespace check: key must be in [BallotMin, BallotMax].
             if ballot_key < BALLOT_MIN || ballot_key > BALLOT_MAX {
-                *fail_mask |= 1 << 15;
+                *fail_mask |= FAIL_BALLOT_NS;
                 ok = false;
             }
 
@@ -81,7 +91,7 @@ pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
                 let pub_addr_lo16 = parsed.proofs[i].public_inputs[PUB_ADDRESS][0] & 0xFFFF;
                 let key_addr_lo16 = (ballot_key.wrapping_sub(BALLOT_MIN)) & 0xFFFF;
                 if pub_addr_lo16 != key_addr_lo16 {
-                    *fail_mask |= 1 << 15;
+                    *fail_mask |= FAIL_BALLOT_NS;
                     ok = false;
                 }
             }
