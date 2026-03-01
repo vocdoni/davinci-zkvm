@@ -54,8 +54,15 @@ pub struct ParsedInput {
     pub neg_acc_c: G1,
     /// ECDSA entries; one per proof (mandatory).
     pub ecdsa: Vec<EcdsaEntry>,
-    /// SMT state-transition proofs (empty if SMT block is absent).
+    /// Legacy simple SMT batch (SMTBLK!! magic). Empty if absent.
     pub smt: Vec<SmtTransition>,
+    /// Full state-transition data (STATETX! magic). None if absent.
+    pub state: Option<StateBlock>,
+    /// Census lean-IMT Poseidon proofs (CENSUS!! magic). Empty if absent.
+    pub census_proofs: Vec<CensusProofEntry>,
+    /// Re-encryption verification entries (REENCBLK magic). Empty if absent.
+    pub reenc_pub_key: Option<(FrRaw, FrRaw)>,
+    pub reenc_entries: Vec<ReencEntry>,
     /// Number of bytes consumed (equals `input.len()` on success).
     pub bytes_consumed: usize,
 }
@@ -154,9 +161,14 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
         ecdsa.push(EcdsaEntry { r, s, px, py });
     }
 
-    // --- SMT block (optional) ---
+    // --- SMT block (optional, legacy) ---
     // Detected by the SMT_MAGIC sentinel; absent = empty Vec, not an error.
     let mut smt: Vec<SmtTransition> = Vec::new();
+    let mut state: Option<StateBlock> = None;
+    let mut census_proofs: Vec<CensusProofEntry> = Vec::new();
+    let mut reenc_pub_key: Option<(FrRaw, FrRaw)> = None;
+    let mut reenc_entries: Vec<ReencEntry> = Vec::new();
+
     if off + 8 <= input.len() {
         let maybe_magic = u64::from_le_bytes(input[off..off + 8].try_into().unwrap());
         if maybe_magic == SMT_MAGIC {
@@ -187,10 +199,69 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
                     siblings,
                 });
             }
+        } else if maybe_magic == STATE_MAGIC {
+            off += 8;
+            state = Some(parse_state_block(input, &mut off, fail_mask));
         }
     }
 
-    // All input bytes must be consumed.
+    // --- Census block (optional, after state block) ---
+    if off + 8 <= input.len() {
+        let maybe_magic = u64::from_le_bytes(input[off..off + 8].try_into().unwrap());
+        if maybe_magic == CENSUS_MAGIC {
+            off += 8;
+            let n_proofs = read1!(&mut off, 0) as usize;
+            if n_proofs > 4096 { *fail_mask |= 1 << 31; }
+            census_proofs.reserve(n_proofs);
+            for _ in 0..n_proofs {
+                let root = read_fr!(&mut off);
+                let leaf = read_fr!(&mut off);
+                let index = read1!(&mut off, 0);
+                let n_siblings = read1!(&mut off, 0) as usize;
+                if n_siblings > 64 { *fail_mask |= 1 << 31; }
+                let mut siblings = Vec::with_capacity(n_siblings);
+                for _ in 0..n_siblings {
+                    siblings.push(read_fr!(&mut off));
+                }
+                census_proofs.push(CensusProofEntry { root, leaf, index, siblings });
+            }
+        }
+    }
+
+    // --- Re-encryption block (optional, after census block) ---
+    if off + 8 <= input.len() {
+        let maybe_magic = u64::from_le_bytes(input[off..off + 8].try_into().unwrap());
+        if maybe_magic == REENC_MAGIC {
+            off += 8;
+            let n_voters = read1!(&mut off, 0) as usize;
+            let pub_key_x = read_fr!(&mut off);
+            let pub_key_y = read_fr!(&mut off);
+            reenc_pub_key = Some((pub_key_x, pub_key_y));
+            reenc_entries.reserve(n_voters);
+            for _ in 0..n_voters {
+                let k = read_fr!(&mut off);
+                let mut original: [BjjCiphertext; 8] = Default::default();
+                let mut reencrypted: [BjjCiphertext; 8] = Default::default();
+                for j in 0..8 {
+                    original[j] = BjjCiphertext {
+                        c1x: read_fr!(&mut off),
+                        c1y: read_fr!(&mut off),
+                        c2x: read_fr!(&mut off),
+                        c2y: read_fr!(&mut off),
+                    };
+                }
+                for j in 0..8 {
+                    reencrypted[j] = BjjCiphertext {
+                        c1x: read_fr!(&mut off),
+                        c1y: read_fr!(&mut off),
+                        c2x: read_fr!(&mut off),
+                        c2y: read_fr!(&mut off),
+                    };
+                }
+                reenc_entries.push(ReencEntry { k, original, reencrypted });
+            }
+        }
+    }
     if off != input.len() {
         *fail_mask |= 1 << 31;
     }
@@ -199,7 +270,119 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
         log_n, nproofs, n_public,
         vk_alpha_g1, vk_beta_g2, vk_gamma_g2, vk_delta_g2, vk_gamma_abc,
         proofs, scaled_a, neg_alpha_rsum, neg_g_ic, neg_acc_c,
-        ecdsa, smt,
+        ecdsa, smt, state, census_proofs,
+        reenc_pub_key, reenc_entries,
         bytes_consumed: off,
+    }
+}
+
+/// Parse an SMT transition (n_levels siblings) from `input` at `*off`.
+fn parse_smt_transition(input: &[u8], off: &mut usize, n_levels: usize, fail_mask: &mut u32) -> SmtTransition {
+    macro_rules! read1 {
+        ($default:expr) => {
+            read_words_le::<1>(input, off)
+                .map(|x| x[0])
+                .unwrap_or_else(|| { *fail_mask |= 1 << 31; $default })
+        };
+    }
+    macro_rules! read_fr {
+        () => {
+            read_words_le::<4>(input, off)
+                .unwrap_or_else(|| { *fail_mask |= 1 << 31; ZERO_FR })
+        };
+    }
+    let old_root  = read_fr!();
+    let new_root  = read_fr!();
+    let old_key   = read_fr!();
+    let old_value = read_fr!();
+    let is_old0   = read1!(0) != 0;
+    let new_key   = read_fr!();
+    let new_value = read_fr!();
+    let fnc0      = read1!(0) != 0;
+    let fnc1      = read1!(0) != 0;
+    let mut siblings = Vec::with_capacity(n_levels);
+    for _ in 0..n_levels {
+        siblings.push(read_fr!());
+    }
+    SmtTransition { old_root, new_root, old_key, old_value, is_old0, new_key, new_value, fnc0, fnc1, siblings }
+}
+
+/// Parse the STATETX block (magic already consumed) into a `StateBlock`.
+fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> StateBlock {
+    macro_rules! read1 {
+        ($default:expr) => {
+            read_words_le::<1>(input, off)
+                .map(|x| x[0])
+                .unwrap_or_else(|| { *fail_mask |= 1 << 31; $default })
+        };
+    }
+    macro_rules! read_fr {
+        () => {
+            read_words_le::<4>(input, off)
+                .unwrap_or_else(|| { *fail_mask |= 1 << 31; ZERO_FR })
+        };
+    }
+
+    let n_voters      = read1!(0) as usize;
+    let n_overwritten = read1!(0) as usize;
+    let process_id    = read_fr!();
+    let old_state_root = read_fr!();
+    let new_state_root = read_fr!();
+
+    // VoteID chain
+    let vote_id_n      = read1!(0) as usize;
+    let n_levels       = read1!(0) as usize;
+    if n_levels > 256 { *fail_mask |= 1 << 31; }
+    let mut vote_id_chain = Vec::with_capacity(vote_id_n);
+    for _ in 0..vote_id_n {
+        vote_id_chain.push(parse_smt_transition(input, off, n_levels, fail_mask));
+    }
+
+    // Ballot chain
+    let ballot_n       = read1!(0) as usize;
+    let ballot_n_levels = read1!(0) as usize;
+    if ballot_n_levels > 256 { *fail_mask |= 1 << 31; }
+    let mut ballot_chain = Vec::with_capacity(ballot_n);
+    for _ in 0..ballot_n {
+        ballot_chain.push(parse_smt_transition(input, off, ballot_n_levels, fail_mask));
+    }
+
+    // ResultsAdd (0 or 1)
+    let has_results_add  = read1!(0) != 0;
+    let results_n_levels = read1!(0) as usize;
+    if results_n_levels > 256 { *fail_mask |= 1 << 31; }
+    let results_add = if has_results_add {
+        Some(parse_smt_transition(input, off, results_n_levels, fail_mask))
+    } else {
+        None
+    };
+
+    // ResultsSub (0 or 1, same n_levels)
+    let has_results_sub = read1!(0) != 0;
+    let results_sub = if has_results_sub {
+        Some(parse_smt_transition(input, off, results_n_levels, fail_mask))
+    } else {
+        None
+    };
+
+    // Process read-proofs: n (0 or 4), then n_levels + entries only when n>0.
+    let process_n = read1!(0) as usize;
+    if process_n != 0 && process_n != 4 { *fail_mask |= 1 << 31; }
+    let mut process_proofs = Vec::with_capacity(process_n);
+    if process_n > 0 {
+        let process_n_levels = read1!(0) as usize;
+        if process_n_levels > 256 { *fail_mask |= 1 << 31; }
+        for _ in 0..process_n {
+            process_proofs.push(parse_smt_transition(input, off, process_n_levels, fail_mask));
+        }
+    }
+
+    StateBlock {
+        n_voters, n_overwritten,
+        process_id, old_state_root, new_state_root,
+        vote_id_chain, ballot_chain,
+        results_add, results_sub,
+        process_proofs,
+        n_levels,
     }
 }

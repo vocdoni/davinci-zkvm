@@ -502,3 +502,39 @@ func TestSMTEmulator(t *testing.T) {
 		t.Errorf("output[9] (smt_ok) = %d, want 1", get(9))
 	}
 }
+
+// runZiskEmu writes input bytes to a temp file, executes ziskemu, and returns
+// parsed uint32 outputs. Returns an error if ziskemu is not in PATH or fails.
+func runZiskEmu(inputBytes []byte) ([]uint32, error) {
+ziskemuBin, err := exec.LookPath("ziskemu")
+if err != nil {
+return nil, fmt.Errorf("ziskemu not in PATH: %w", err)
+}
+elfPath := os.Getenv("CIRCUIT_ELF_PATH")
+if elfPath == "" {
+elfPath = "/home/p4u/davinci-zkvm/circuit/elf/circuit.elf"
+}
+tmp, err := os.CreateTemp("", "statetx-*.bin")
+if err != nil {
+return nil, err
+}
+defer os.Remove(tmp.Name())
+if _, err := tmp.Write(inputBytes); err != nil {
+return nil, err
+}
+tmp.Close()
+
+cmd := exec.Command(ziskemuBin, "-e", elfPath, "-i", tmp.Name())
+out, err := cmd.Output()
+if err != nil {
+return nil, fmt.Errorf("ziskemu failed: %w\noutput: %s", err, out)
+}
+lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+var outputs []uint32
+for _, l := range lines {
+var v uint32
+fmt.Sscanf(strings.TrimSpace(l), "%x", &v)
+outputs = append(outputs, v)
+}
+return outputs, nil
+}

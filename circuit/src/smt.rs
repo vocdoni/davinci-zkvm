@@ -14,7 +14,7 @@
 
 use crate::hash::sha256_once;
 use crate::io::ParsedInput;
-use crate::types::{FrRaw, SmtTransition};
+use crate::types::{FrRaw, SmtTransition, ZERO_FR};
 
 // ─── Byte-order helpers ────────────────────────────────────────────────────
 
@@ -343,4 +343,147 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> u32 {
         }
     }
     all_ok as u32
+}
+
+// ─── Chain verifier ──────────────────────────────────────────────────────────
+
+/// Verify a sequence of SMT transitions forms a consistent chain:
+/// - `transitions[0].old_root == declared_old_root`
+/// - `transitions[i].new_root == transitions[i+1].old_root` for all i
+/// - `transitions[N-1].new_root == declared_new_root`
+/// - Each individual transition is valid
+///
+/// Returns `true` if the chain is valid, `false` otherwise.
+/// Sets bit `fail_bit` in `fail_mask` on failure.
+pub fn verify_chain(
+    transitions: &[SmtTransition],
+    declared_old: &FrRaw,
+    declared_new: &FrRaw,
+    fail_mask: &mut u32,
+    fail_bit: u8,
+) -> bool {
+    if transitions.is_empty() {
+        // Empty chain: old root must equal new root.
+        let ok = declared_old == declared_new;
+        if !ok { *fail_mask |= 1 << fail_bit; }
+        return ok;
+    }
+
+    // Check first transition's old root.
+    if &transitions[0].old_root != declared_old {
+        *fail_mask |= 1 << fail_bit;
+        return false;
+    }
+
+    // Verify each transition and check chaining.
+    for i in 0..transitions.len() {
+        if !verify_transition(&transitions[i]) {
+            *fail_mask |= 1 << fail_bit;
+            return false;
+        }
+        if i + 1 < transitions.len() {
+            if transitions[i].new_root != transitions[i + 1].old_root {
+                *fail_mask |= 1 << fail_bit;
+                return false;
+            }
+        }
+    }
+
+    // Check last transition's new root.
+    let last_new = &transitions[transitions.len() - 1].new_root;
+    if last_new != declared_new {
+        *fail_mask |= 1 << fail_bit;
+        return false;
+    }
+
+    true
+}
+
+// ─── State-transition verifier ───────────────────────────────────────────────
+
+/// Verify the full DAVINCI state-transition block (STATETX).
+///
+/// Returns `(ok, old_root_lo, old_root_hi, new_root_lo, new_root_hi, voters, overwritten)`.
+/// When no state block is present, returns `(true, 0, 0, 0, 0, 0, 0)` — absence is not a failure.
+pub fn verify_state(
+    parsed: &ParsedInput,
+    fail_mask: &mut u32,
+) -> (bool, u64, u64, u64, u64, u64, u64) {
+    let state = match &parsed.state {
+        None => return (true, 0, 0, 0, 0, 0, 0),
+        Some(s) => s,
+    };
+
+    let mut ok = true;
+
+    // Verify VoteID chain: OldStateRoot → intermediate → NewStateRoot via voteIDs.
+    // The full state root changes with every chain so each sub-chain shares roots
+    // interleaved. For Step 2 we verify the chains independently with their declared roots.
+    ok &= verify_chain(
+        &state.vote_id_chain,
+        &state.old_state_root,
+        // After all voteID insertions the intermediate root is the start of ballot chain.
+        if state.ballot_chain.is_empty() { &state.new_state_root }
+        else { &state.ballot_chain[0].old_root },
+        fail_mask, 10,
+    );
+
+    ok &= verify_chain(
+        &state.ballot_chain,
+        if state.vote_id_chain.is_empty() { &state.old_state_root }
+        else { state.vote_id_chain.last().map(|t| &t.new_root).unwrap_or(&ZERO_FR) },
+        // After ballot chain: start of resultsAdd/Sub (or new_state_root if absent).
+        // Process read-proofs are NOT part of the chain (they're separate inclusion checks).
+        match &state.results_add {
+            Some(r) => &r.old_root,
+            None => match &state.results_sub {
+                Some(r) => &r.old_root,
+                None => &state.new_state_root,
+            },
+        },
+        fail_mask, 11,
+    );
+
+    // Verify resultsAdd transition (single transition, not a chain).
+    if let Some(r) = &state.results_add {
+        if !verify_transition(r) {
+            *fail_mask |= 1 << 12;
+            ok = false;
+        }
+    }
+
+    // Verify resultsSub transition.
+    if let Some(r) = &state.results_sub {
+        if !verify_transition(r) {
+            *fail_mask |= 1 << 12;
+            ok = false;
+        }
+    }
+
+    // Verify process read-proofs (fnc0=0, fnc1=0 → no mutation, just inclusion).
+    // These all share the OldStateRoot (config keys don't change this batch).
+    for p in &state.process_proofs {
+        // Read proof: old_root == new_root (no change), both equal OldStateRoot.
+        if p.old_root != state.old_state_root {
+            *fail_mask |= 1 << 13;
+            ok = false;
+            break;
+        }
+        if !verify_transition(p) {
+            *fail_mask |= 1 << 13;
+            ok = false;
+            break;
+        }
+    }
+
+    let old = &state.old_state_root;
+    let new = &state.new_state_root;
+
+    (
+        ok,
+        old[0], old[1],
+        new[0], new[1],
+        state.n_voters as u64,
+        state.n_overwritten as u64,
+    )
 }
