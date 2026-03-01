@@ -159,18 +159,21 @@ func zeroSMTEntry(nLevels int) []byte {
 
 // leHexToFr parses a 0x-prefixed 32-byte little-endian hex string
 // into 4 little-endian u64 words ([4]uint64, stored as 32 bytes LE).
+// The input must be either empty/"0x" (zero) or exactly 64 hex characters
+// (32 bytes) after stripping the "0x" prefix.
 func leHexToFr(s string) ([4]uint64, error) {
 	var out [4]uint64
 	h := strings.TrimPrefix(s, "0x")
 	if len(h) == 0 {
-		return out, nil // zero value
+		// Treat empty or bare "0x" as zero.
+		return out, nil
+	}
+	if len(h) != 64 {
+		return out, fmt.Errorf("leHexToFr: expected 64 hex chars (32 bytes), got %d in %q", len(h), s)
 	}
 	b, err := hex.DecodeString(h)
 	if err != nil {
-		return out, fmt.Errorf("invalid hex %q: %w", s, err)
-	}
-	if len(b) != 32 {
-		return out, fmt.Errorf("expected 32 bytes, got %d: %q", len(b), s)
+		return out, fmt.Errorf("leHexToFr: invalid hex %q: %w", s, err)
 	}
 	for i := 0; i < 4; i++ {
 		out[i] = binary.LittleEndian.Uint64(b[i*8 : i*8+8])

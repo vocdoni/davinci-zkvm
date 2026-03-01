@@ -20,7 +20,7 @@
 
 use crate::hash::keccak256_short;
 use crate::io::ParsedInput;
-use crate::types::FrRaw;
+use crate::types::{FrRaw, FAIL_ECDSA};
 use ziskos::syscalls::SyscallPoint256;
 use ziskos::zisklib::secp256k1_ecdsa_verify;
 
@@ -74,31 +74,43 @@ fn address_matches(addr_bytes: &[u8; 20], pubs_addr: &FrRaw) -> bool {
 /// Returns `ecdsa_ok = false` when any signature or address binding check fails.
 ///
 /// # Fail-mask bits
-/// - Bit 3 — ECDSA signature or address-binding check failed (or ECDSA block missing)
+/// - `FAIL_ECDSA` (bit 3) — signature or address-binding check failed, or block absent
 pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     if parsed.ecdsa.is_empty() {
-        // ECDSA block is mandatory; treat absence as failure
-        *fail_mask |= 1 << 3;
+        // ECDSA block is mandatory; treat absence as failure.
+        *fail_mask |= FAIL_ECDSA;
         return false;
     }
     // Public input layout: pubs[0] = address (uint160), pubs[1] = vote_id (uint64)
     if parsed.n_public < 2 {
-        *fail_mask |= 1 << 3;
+        *fail_mask |= FAIL_ECDSA;
+        return false;
+    }
+    // ECDSA count must match proof count (guaranteed by io.rs, checked defensively).
+    if parsed.ecdsa.len() != parsed.proofs.len() {
+        *fail_mask |= FAIL_ECDSA;
         return false;
     }
     for (i, sig) in parsed.ecdsa.iter().enumerate() {
-        let pubs    = &parsed.proofs[i].public_inputs;
-        let vote_id = pubs[1][0]; // vote_id fits in u64; upper limbs are 0
+        let pubs = &parsed.proofs[i].public_inputs;
+        // VoteID is a uint64; upper limbs must be zero.  An attacker who crafts
+        // a proof with non-zero upper limbs would bypass the ECDSA binding, so we
+        // reject explicitly rather than silently truncating.
+        if pubs[1][1] != 0 || pubs[1][2] != 0 || pubs[1][3] != 0 {
+            *fail_mask |= FAIL_ECDSA;
+            return false;
+        }
+        let vote_id = pubs[1][0];
         let pk      = SyscallPoint256 { x: sig.px, y: sig.py };
         let z       = eth_message_hash(vote_id);
 
         if !secp256k1_ecdsa_verify(&pk, &z, &sig.r, &sig.s) {
-            *fail_mask |= 1 << 3;
+            *fail_mask |= FAIL_ECDSA;
             return false;
         }
         let addr = eth_address_from_pk(&sig.px, &sig.py);
         if !address_matches(&addr, &pubs[0]) {
-            *fail_mask |= 1 << 3;
+            *fail_mask |= FAIL_ECDSA;
             return false;
         }
     }

@@ -42,8 +42,12 @@ fn main() {
     );
 
     // overall_ok: all mandatory verifications pass.
-    // smt_ok==2 = absent (legacy block not provided), not a failure.
-    let overall_ok = fail_mask == 0 && batch_ok && ecdsa_ok
+    // smt_ok semantics: 1 = valid, 0 = invalid, 2 = absent (legacy SMTBLK not provided).
+    // The legacy SMTBLK and the full STATETX block are independent; absence of SMTBLK
+    // is normal when using STATETX. state_ok covers STATETX validity.
+    let overall_ok = fail_mask == 0
+        && batch_ok
+        && ecdsa_ok
         && (smt_ok == 1 || smt_ok == 2)
         && state_ok
         && consistency_ok

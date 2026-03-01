@@ -57,11 +57,11 @@ fn challenge_fr(digest: &[u8; 32]) -> Option<FrRaw> {
 /// Verify a Groth16 batch.  Returns `true` if the batch passes.
 ///
 /// # Fail-mask bits
-/// - Bit 1 — a curve/subgroup check failed on a VK or proof point
-/// - Bit 2 — the batch pairing equation did not hold
+/// - `FAIL_CURVE` (bit 1) — a curve/subgroup check failed on a VK or proof point
+/// - `FAIL_PAIRING` (bit 2) — the batch pairing equation did not hold
 pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     // Skip expensive work if we already know the input is malformed.
-    if *fail_mask & (1 << 31) != 0 {
+    if *fail_mask & FAIL_PARSE != 0 {
         return false;
     }
 
@@ -81,7 +81,7 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
         points_ok &= is_on_curve_bn254(&parsed.scaled_a[i]);
     }
     if !points_ok {
-        *fail_mask |= 1 << 1;
+        *fail_mask |= FAIL_CURVE;
         return false;
     }
 
@@ -111,7 +111,7 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
 
     let r_shift = match challenge_fr(&digest) {
         Some(r) if !fr_eq(&r, &ZERO_FR) => r,
-        _ => { *fail_mask |= 1 << 2; return false; }
+        _ => { *fail_mask |= FAIL_PAIRING; return false; }
     };
 
     // --- Batch pairing equation ---
@@ -133,6 +133,6 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     }
 
     let ok = gt_eq(&pairing_batch_bn254(&eq_g1, &eq_g2), &gt_one());
-    if !ok { *fail_mask |= 1 << 2; }
+    if !ok { *fail_mask |= FAIL_PAIRING; }
     ok
 }

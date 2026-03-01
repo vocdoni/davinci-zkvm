@@ -1,4 +1,22 @@
 //! Primitive type aliases and constants shared across the circuit.
+//!
+//! # Fail-mask bit assignments (output\[1\])
+//!
+//! | Bit | Name                    | Set by         | Meaning                                    |
+//! |-----|-------------------------|----------------|--------------------------------------------|
+//! |   1 | `FAIL_CURVE`            | groth16.rs     | Proof point not on curve                   |
+//! |   2 | `FAIL_PAIRING`          | groth16.rs     | Batch pairing check failed                 |
+//! |   3 | `FAIL_ECDSA`            | ecdsa.rs       | ECDSA signature or address binding failed  |
+//! |   9 | `FAIL_SMT_BATCH`        | smt.rs         | Legacy SMTBLK transition invalid           |
+//! |  10 | `FAIL_SMT_VOTEID`       | smt.rs         | VoteID insertion chain invalid             |
+//! |  11 | `FAIL_SMT_BALLOT`       | smt.rs         | Ballot insertion chain invalid             |
+//! |  12 | `FAIL_SMT_RESULTS`      | smt.rs         | ResultsAdd/Sub transition invalid          |
+//! |  13 | `FAIL_SMT_PROCESS`      | smt.rs         | Process read-proof invalid                 |
+//! |  14 | `FAIL_CONSISTENCY`      | consistency.rs | VoteID namespace / proof binding mismatch  |
+//! |  15 | `FAIL_BALLOT_NS`        | consistency.rs | Ballot namespace / address binding mismatch|
+//! |  16 | `FAIL_CENSUS`           | census.rs      | Census membership proof failed             |
+//! |  17 | `FAIL_REENC`            | babyjubjub.rs  | Re-encryption verification failed          |
+//! |  31 | `FAIL_PARSE`            | io.rs          | Binary format / parse error                |
 
 /// BN254 G1 affine point: (x[4], y[4]) in 256-bit little-endian limbs.
 pub type G1 = [u64; 8];
@@ -31,6 +49,22 @@ pub const ZERO_FR: FrRaw = [0, 0, 0, 0];
 /// The value 1 in the BN254 scalar field (raw LE limbs).
 #[allow(dead_code)]
 pub const ONE_FR: FrRaw = [1, 0, 0, 0];
+
+// ─── Fail-mask bit constants ────────────────────────────────────────────────
+// See the module-level table for a complete description of each bit.
+pub const FAIL_PARSE:       u32 = 1 << 31;
+pub const FAIL_CURVE:       u32 = 1 << 1;
+pub const FAIL_PAIRING:     u32 = 1 << 2;
+pub const FAIL_ECDSA:       u32 = 1 << 3;
+pub const FAIL_SMT_BATCH:   u32 = 1 << 9;
+pub const FAIL_SMT_VOTEID:  u32 = 1 << 10;
+pub const FAIL_SMT_BALLOT:  u32 = 1 << 11;
+pub const FAIL_SMT_RESULTS: u32 = 1 << 12;
+pub const FAIL_SMT_PROCESS: u32 = 1 << 13;
+pub const FAIL_CONSISTENCY: u32 = 1 << 14;
+pub const FAIL_BALLOT_NS:   u32 = 1 << 15;
+pub const FAIL_CENSUS:      u32 = 1 << 16;
+pub const FAIL_REENC:       u32 = 1 << 17;
 
 /// One Groth16 proof and its associated public inputs.
 #[derive(Clone)]
