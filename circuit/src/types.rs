@@ -73,3 +73,72 @@ pub struct SmtTransition {
     /// Merkle siblings, root→leaf order, padded to `n_levels` with zeros.
     pub siblings: Vec<FrRaw>,
 }
+
+/// Magic bytes `"STATETX!"` — identifies the full state-transition block.
+pub const STATE_MAGIC: u64 = u64::from_le_bytes(*b"STATETX!");
+
+/// Magic bytes `"CENSUS!!"` — identifies the optional census proof block.
+pub const CENSUS_MAGIC: u64 = u64::from_le_bytes(*b"CENSUS!!");
+
+/// Magic bytes `"REENCBLK"` — identifies the optional re-encryption verification block.
+pub const REENC_MAGIC: u64 = u64::from_le_bytes(*b"REENCBLK");
+
+/// One ElGamal ciphertext: (C1.x, C1.y, C2.x, C2.y) in BN254 Fr.
+#[derive(Clone, Default)]
+pub struct BjjCiphertext {
+    pub c1x: FrRaw,
+    pub c1y: FrRaw,
+    pub c2x: FrRaw,
+    pub c2y: FrRaw,
+}
+
+/// Re-encryption entry for one voter: seed k, original ballot, re-encrypted ballot.
+#[derive(Clone)]
+pub struct ReencEntry {
+    /// The re-encryption seed k (before Poseidon hash).
+    pub k: FrRaw,
+    /// Original 8 ciphertexts from the voter's ballot proof.
+    pub original: [BjjCiphertext; 8],
+    /// Re-encrypted 8 ciphertexts stored in the state tree.
+    pub reencrypted: [BjjCiphertext; 8],
+}
+
+/// One lean-IMT Poseidon membership proof for a census voter.
+#[derive(Clone)]
+pub struct CensusProofEntry {
+    /// Tree root at the time of the proof.
+    pub root: FrRaw,
+    /// Leaf value: `PackAddressWeight(address, weight)` = `(address << 88) | weight`.
+    pub leaf: FrRaw,
+    /// Packed path bits (bit `i` = `(index >> i) & 1`; 1 = node is right child).
+    pub index: u64,
+    /// Merkle siblings (variable length; absent levels are omitted by lean-IMT).
+    pub siblings: Vec<FrRaw>,
+}
+
+/// Full DAVINCI state-transition data, parsed from the STATETX binary block.
+/// Present when the prover includes a `state` field in the ProveRequest.
+pub struct StateBlock {
+    /// Number of real (non-dummy) votes in this batch.
+    pub n_voters: usize,
+    /// Number of votes that replaced an existing ballot.
+    pub n_overwritten: usize,
+    /// Process identifier (arbo state tree key 0x0).
+    pub process_id: FrRaw,
+    /// Arbo SHA-256 state root before all transitions.
+    pub old_state_root: FrRaw,
+    /// Arbo SHA-256 state root after all transitions.
+    pub new_state_root: FrRaw,
+    /// VoteID SMT insertion chain (one transition per real vote).
+    pub vote_id_chain: Vec<SmtTransition>,
+    /// Ballot SMT insertion/update chain (one transition per real vote).
+    pub ballot_chain: Vec<SmtTransition>,
+    /// ResultsAdd SMT transition (one update per batch; None if all dummy).
+    pub results_add: Option<SmtTransition>,
+    /// ResultsSub SMT transition (present only when overwritten votes > 0).
+    pub results_sub: Option<SmtTransition>,
+    /// Process config read-proofs (exactly 4: processID, ballotMode, encKey, censusOrigin).
+    pub process_proofs: Vec<SmtTransition>,
+    /// Shared n_levels for vote_id_chain and ballot_chain.
+    pub n_levels: usize,
+}

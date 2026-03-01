@@ -32,6 +32,93 @@ type SmtEntry struct {
 	Siblings []string `json:"siblings"`
 }
 
+// StateTransitionData holds all state-transition fields for the full DAVINCI protocol.
+// When non-nil, the ZisK circuit will verify the full state-transition in addition
+// to Groth16 proofs and ECDSA signatures.
+//
+// All 32-byte field values are 64-character hex strings (with "0x" prefix).
+// All SMT sibling slices must be padded to the same n_levels with zero entries.
+type StateTransitionData struct {
+	// VotersCount is the number of real (non-dummy) votes in this batch.
+	VotersCount uint64 `json:"voters_count"`
+	// OverwrittenCount is the number of votes that replaced an existing ballot.
+	OverwrittenCount uint64 `json:"overwritten_count"`
+
+	// ProcessID is the 32-byte process identifier (arbo SHA-256 state tree key 0x0).
+	ProcessID string `json:"process_id"`
+	// OldStateRoot is the arbo SHA-256 state root before all transitions.
+	OldStateRoot string `json:"old_state_root"`
+	// NewStateRoot is the arbo SHA-256 state root after all transitions.
+	NewStateRoot string `json:"new_state_root"`
+
+	// VoteIDSmt is the chain of VoteID insertion proofs (one per real vote).
+	// Keys are in [VoteIDMin, VoteIDMax] = [0x8000000000000000, 0xFFFFFFFFFFFFFFFF].
+	VoteIDSmt []SmtEntry `json:"vote_id_smt"`
+
+	// BallotSmt is the chain of ballot insertion/update proofs (one per real vote).
+	// Keys are in [BallotMin, BallotMax] = [0x10, 0x7FFFFFFFFFFFFFFF].
+	BallotSmt []SmtEntry `json:"ballot_smt"`
+
+	// ResultsAddSmt is the transition that accumulates the homomorphic sum of ballots.
+	// Nil if no accumulator update (e.g. all dummy votes).
+	ResultsAddSmt *SmtEntry `json:"results_add_smt,omitempty"`
+
+	// ResultsSubSmt is the transition that records re-encrypted ballots to subtract.
+	// Nil when there are no overwritten votes.
+	ResultsSubSmt *SmtEntry `json:"results_sub_smt,omitempty"`
+
+	// ProcessSmt holds exactly 4 read-proofs for config entries in OldStateRoot.
+	// Order: processID (0x0), ballotMode (0x2), encryptionKey (0x3), censusOrigin (0x6).
+	ProcessSmt []SmtEntry `json:"process_smt"`
+}
+
+// CensusProof is a lean-IMT Poseidon membership proof for a census voter.
+// The leaf value is PackAddressWeight(address, weight) = (address << 88) | weight.
+// Siblings are the actual non-empty siblings in the Merkle path (lean-IMT omits empty levels).
+type CensusProof struct {
+	// Root is the 32-byte big-endian hex-encoded census tree root.
+	Root string `json:"root"`
+	// Leaf is the 32-byte big-endian hex-encoded leaf: PackAddressWeight(address, weight).
+	Leaf string `json:"leaf"`
+	// Index contains the packed path bits (bit i = (index >> i) & 1; 1 = right child).
+	Index uint64 `json:"index"`
+	// Siblings are the non-empty Merkle siblings in the path (variable length).
+	Siblings []string `json:"siblings"`
+}
+
+// BjjPoint is an ElGamal ciphertext point (x, y) on BabyJubJub in BN254 Fr.
+// Coordinates are 32-byte big-endian hex strings.
+type BjjPoint struct {
+	X string `json:"x"`
+	Y string `json:"y"`
+}
+
+// BjjCiphertext is one ElGamal ciphertext (C1, C2) on BabyJubJub.
+type BjjCiphertext struct {
+	C1 BjjPoint `json:"c1"`
+	C2 BjjPoint `json:"c2"`
+}
+
+// ReencryptionEntry holds the re-encryption data for one voter.
+type ReencryptionEntry struct {
+	// K is the re-encryption seed (before Poseidon hash), 32-byte BE hex.
+	K string `json:"k"`
+	// Original contains the 8 original ciphertexts from the ballot proof.
+	Original [8]BjjCiphertext `json:"original"`
+	// Reencrypted contains the 8 re-encrypted ciphertexts stored in the state tree.
+	Reencrypted [8]BjjCiphertext `json:"reencrypted"`
+}
+
+// ReencryptionData holds the re-encryption verification data for the full batch.
+type ReencryptionData struct {
+	// EncryptionKeyX is the x-coordinate of the ElGamal encryption public key.
+	EncryptionKeyX string `json:"encryption_key_x"`
+	// EncryptionKeyY is the y-coordinate of the ElGamal encryption public key.
+	EncryptionKeyY string `json:"encryption_key_y"`
+	// Entries holds one entry per real voter.
+	Entries []ReencryptionEntry `json:"entries"`
+}
+
 // ProveRequest is the HTTP request body for POST /prove.
 type ProveRequest struct {
 	// VK is the snarkjs verification key (JSON object).
@@ -42,9 +129,19 @@ type ProveRequest struct {
 	PublicInputs [][]string `json:"public_inputs"`
 	// Sigs contains one ECDSA signature per proof (same order as Proofs). Mandatory.
 	Sigs []json.RawMessage `json:"sigs"`
-	// Smt contains optional SMT state-transition proofs. When present, the circuit
-	// verifies each transition and sets output[9]=1 on success.
+	// Smt contains optional simple SMT state-transition proofs (legacy / testing).
+	// For the full DAVINCI protocol, use State instead.
 	Smt []SmtEntry `json:"smt,omitempty"`
+	// State contains the full state-transition data for the DAVINCI protocol.
+	// When non-nil, the circuit verifies chained SMT transitions and outputs
+	// the old/new state roots and vote counts (outputs 10-15).
+	State *StateTransitionData `json:"state,omitempty"`
+	// CensusProofs contains one lean-IMT Poseidon membership proof per voter.
+	// When non-empty, the circuit verifies each proof against the census root.
+	CensusProofs []CensusProof `json:"census_proofs,omitempty"`
+	// Reencryption contains the re-encryption verification data.
+	// When non-nil, the circuit verifies ElGamal re-encryption for each voter.
+	Reencryption *ReencryptionData `json:"reencryption,omitempty"`
 }
 
 // JobResponse is the response body for GET /jobs/{id}.

@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 const MAGIC: u64 = 0x423631484f545247u64;
 // "SMTBLK!!" in little-endian ASCII — matches circuit SMT_MAGIC constant
 const SMT_MAGIC: u64 = u64::from_le_bytes(*b"SMTBLK!!");
+const STATE_MAGIC: u64 = u64::from_le_bytes(*b"STATETX!");
 
 /// One Arbo-compatible SMT state-transition entry for binary encoding.
 ///
@@ -72,18 +73,7 @@ pub fn write_smt_block(entries: &[SmtEntry]) -> Result<Vec<u8>> {
     buf.extend_from_slice(&(n_levels as u64).to_le_bytes());
 
     for e in entries {
-        write_u64_slice(&mut buf, &e.old_root);
-        write_u64_slice(&mut buf, &e.new_root);
-        write_u64_slice(&mut buf, &e.old_key);
-        write_u64_slice(&mut buf, &e.old_value);
-        buf.extend_from_slice(&(e.is_old0 as u64).to_le_bytes());
-        write_u64_slice(&mut buf, &e.new_key);
-        write_u64_slice(&mut buf, &e.new_value);
-        buf.extend_from_slice(&(e.fnc0 as u64).to_le_bytes());
-        buf.extend_from_slice(&(e.fnc1 as u64).to_le_bytes());
-        for sib in &e.siblings {
-            write_u64_slice(&mut buf, sib);
-        }
+        write_smt_entry_body(&mut buf, e);
     }
     Ok(buf)
 }
@@ -110,11 +100,137 @@ pub fn hex32_to_smt_fr(s: &str) -> Result<[u64; 4]> {
 
 
 
-/// ECDSA signature + public key for one ballot, as produced by davinci-circom.
+/// Full DAVINCI state-transition data for binary serialization.
 ///
-/// All hex strings are 32-byte big-endian with "0x" prefix.
-/// The circuit verifies: secp256k1_ecdsa_verify(pk, z, r, s)
-/// where z = keccak256(Ethereum-signed-message hash of vote_id).
+/// Matches the `StateTransitionData` JSON type in go-sdk/types.go.
+/// All `[u64;4]` fields use little-endian word order (arbo convention).
+#[derive(Debug, Clone, Default)]
+pub struct StateData {
+    pub n_voters: u64,
+    pub n_overwritten: u64,
+    pub process_id: [u64; 4],
+    pub old_state_root: [u64; 4],
+    pub new_state_root: [u64; 4],
+    pub vote_id_chain: Vec<SmtEntry>,
+    pub ballot_chain: Vec<SmtEntry>,
+    pub results_add: Option<SmtEntry>,
+    pub results_sub: Option<SmtEntry>,
+    /// Exactly 4 read-proofs: processID(0x0), ballotMode(0x2), encKey(0x3), censusOrigin(0x6).
+    pub process_proofs: Vec<SmtEntry>,
+}
+
+/// Serialize a `StateData` into the STATETX binary block.
+///
+/// Returns an empty `Vec` if not needed (n_voters==0 and no transitions).
+/// All SMT chains are serialized with their own n_levels (inferred from the first entry's siblings).
+pub fn write_state_block(sd: &StateData) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&STATE_MAGIC.to_le_bytes());
+    buf.extend_from_slice(&sd.n_voters.to_le_bytes());
+    buf.extend_from_slice(&sd.n_overwritten.to_le_bytes());
+    write_u64_slice(&mut buf, &sd.process_id);
+    write_u64_slice(&mut buf, &sd.old_state_root);
+    write_u64_slice(&mut buf, &sd.new_state_root);
+
+    // VoteID chain
+    write_smt_chain(&mut buf, &sd.vote_id_chain)?;
+
+    // Ballot chain
+    write_smt_chain(&mut buf, &sd.ballot_chain)?;
+
+    // ResultsAdd (0 or 1)
+    write_optional_smt(&mut buf, sd.results_add.as_ref())?;
+
+    // ResultsSub (0 or 1, same n_levels as resultsAdd)
+    let results_n_levels = sd.results_add.as_ref()
+        .map(|r| r.siblings.len())
+        .or_else(|| sd.results_sub.as_ref().map(|r| r.siblings.len()))
+        .unwrap_or(0);
+    let has_sub = sd.results_sub.is_some();
+    buf.extend_from_slice(&(has_sub as u64).to_le_bytes());
+    if let Some(r) = &sd.results_sub {
+        if r.siblings.len() != results_n_levels && results_n_levels > 0 {
+            bail!("results_sub sibling count {} != results_add {}", r.siblings.len(), results_n_levels);
+        }
+        write_smt_entry_body(&mut buf, r);
+    }
+
+    // Process read-proofs: write n (0 or 4), then n_levels + entries only when n>0.
+    if !sd.process_proofs.is_empty() && sd.process_proofs.len() != 4 {
+        bail!("process_proofs must have exactly 4 entries, got {}", sd.process_proofs.len());
+    }
+    buf.extend_from_slice(&(sd.process_proofs.len() as u64).to_le_bytes()); // 0 or 4
+    if !sd.process_proofs.is_empty() {
+        let proc_n_levels = sd.process_proofs[0].siblings.len();
+        buf.extend_from_slice(&(proc_n_levels as u64).to_le_bytes());
+        for p in &sd.process_proofs {
+            if p.siblings.len() != proc_n_levels {
+                bail!("process proof sibling count mismatch");
+            }
+            write_smt_entry_body(&mut buf, p);
+        }
+    }
+
+    Ok(buf)
+}
+
+/// Serialize a chain of SMT entries: u64 len + u64 n_levels + entries.
+fn write_smt_chain(buf: &mut Vec<u8>, entries: &[SmtEntry]) -> Result<()> {
+    let n = entries.len() as u64;
+    let n_levels = entries.first().map(|e| e.siblings.len()).unwrap_or(0);
+    for (i, e) in entries.iter().enumerate() {
+        if e.siblings.len() != n_levels {
+            bail!("chain entry {} has {} siblings, expected {}", i, e.siblings.len(), n_levels);
+        }
+    }
+    buf.extend_from_slice(&n.to_le_bytes());
+    buf.extend_from_slice(&(n_levels as u64).to_le_bytes());
+    for e in entries {
+        write_smt_entry_body(buf, e);
+    }
+    Ok(())
+}
+
+/// Serialize has_results + n_levels + optional entry body.
+fn write_optional_smt(buf: &mut Vec<u8>, entry: Option<&SmtEntry>) -> Result<()> {
+    let has = entry.is_some();
+    let n_levels = entry.map(|e| e.siblings.len()).unwrap_or(0);
+    buf.extend_from_slice(&(has as u64).to_le_bytes());
+    buf.extend_from_slice(&(n_levels as u64).to_le_bytes());
+    if let Some(e) = entry {
+        write_smt_entry_body(buf, e);
+    }
+    Ok(())
+}
+
+/// Serialize a single SMT entry body (no length prefix).
+fn write_smt_entry_body(buf: &mut Vec<u8>, e: &SmtEntry) {
+    write_u64_slice(buf, &e.old_root);
+    write_u64_slice(buf, &e.new_root);
+    write_u64_slice(buf, &e.old_key);
+    write_u64_slice(buf, &e.old_value);
+    buf.extend_from_slice(&(e.is_old0 as u64).to_le_bytes());
+    write_u64_slice(buf, &e.new_key);
+    write_u64_slice(buf, &e.new_value);
+    buf.extend_from_slice(&(e.fnc0 as u64).to_le_bytes());
+    buf.extend_from_slice(&(e.fnc1 as u64).to_le_bytes());
+    for sib in &e.siblings {
+        write_u64_slice(buf, sib);
+    }
+}
+
+/// Write a zero-filled SMT entry (for padding).
+fn write_zero_smt_entry(buf: &mut Vec<u8>, n_levels: usize) {
+    let zero = [0u64; 4];
+    for _ in 0..4 { write_u64_slice(buf, &zero); } // old_root, new_root, old_key, old_value
+    buf.extend_from_slice(&0u64.to_le_bytes()); // is_old0
+    for _ in 0..2 { write_u64_slice(buf, &zero); } // new_key, new_value
+    buf.extend_from_slice(&0u64.to_le_bytes()); // fnc0
+    buf.extend_from_slice(&0u64.to_le_bytes()); // fnc1
+    for _ in 0..n_levels { write_u64_slice(buf, &zero); }
+}
+
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct EcdsaSig {
     pub public_key_x: String,  // 0x-prefixed 32-byte big-endian hex
@@ -505,4 +621,122 @@ fn hex32_to_u64x4(s: &str) -> Result<[u64; 4]> {
         out[i] = u64::from_be_bytes(bytes[start..start + 8].try_into().unwrap());
     }
     Ok(out)
+}
+
+/// Census proof data for one voter in lean-IMT format.
+pub struct CensusProofData {
+    /// Census tree root as [u64; 4] LE.
+    pub root: [u64; 4],
+    /// Leaf = PackAddressWeight(address, weight) as [u64; 4] LE.
+    pub leaf: [u64; 4],
+    /// Packed path bits (bit i = (index >> i) & 1).
+    pub index: u64,
+    /// Non-empty Merkle siblings (variable length).
+    pub siblings: Vec<[u64; 4]>,
+}
+
+/// Serialize census membership proofs into the CENSUS binary block.
+///
+/// Format:
+/// ```
+/// magic:    u64 = "CENSUS!!"
+/// n_proofs: u64
+/// Per proof:
+///   root:       [u64; 4]
+///   leaf:       [u64; 4]
+///   index:      u64
+///   n_siblings: u64
+///   siblings:   [[u64; 4]; n_siblings]
+/// ```
+pub fn write_census_block(proofs: &[CensusProofData]) -> Result<Vec<u8>> {
+    if proofs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let magic: u64 = u64::from_le_bytes(*b"CENSUS!!");
+    let mut buf = Vec::with_capacity(8 + 8 + proofs.len() * (32 + 32 + 8 + 8));
+    buf.extend_from_slice(&magic.to_le_bytes());
+    buf.extend_from_slice(&(proofs.len() as u64).to_le_bytes());
+    for p in proofs {
+        for w in &p.root     { buf.extend_from_slice(&w.to_le_bytes()); }
+        for w in &p.leaf     { buf.extend_from_slice(&w.to_le_bytes()); }
+        buf.extend_from_slice(&p.index.to_le_bytes());
+        buf.extend_from_slice(&(p.siblings.len() as u64).to_le_bytes());
+        for s in &p.siblings {
+            for w in s { buf.extend_from_slice(&w.to_le_bytes()); }
+        }
+    }
+    Ok(buf)
+}
+
+/// Parse a 0x-prefixed hex big-endian string into CensusProofData.
+pub fn census_proof_from_hex(
+    root: &str, leaf: &str, index: u64, siblings: &[String],
+) -> Result<CensusProofData> {
+    let root = hex32_to_u64x4(root)?;
+    let leaf = hex32_to_u64x4(leaf)?;
+    let mut sibs = Vec::with_capacity(siblings.len());
+    for s in siblings {
+        sibs.push(hex32_to_u64x4(s)?);
+    }
+    Ok(CensusProofData { root, leaf, index, siblings: sibs })
+}
+
+/// One ElGamal ciphertext (C1.x, C1.y, C2.x, C2.y) in BN254 Fr as LE u64 limbs.
+pub struct BjjCiphertextData {
+    pub c1x: [u64; 4],
+    pub c1y: [u64; 4],
+    pub c2x: [u64; 4],
+    pub c2y: [u64; 4],
+}
+
+/// Re-encryption data for one voter: seed k, 8 original ciphertexts, 8 re-encrypted ciphertexts.
+pub struct ReencEntryData {
+    pub k: [u64; 4],
+    pub original: [BjjCiphertextData; 8],
+    pub reencrypted: [BjjCiphertextData; 8],
+}
+
+/// Serialize re-encryption entries into the REENCBLK binary block.
+///
+/// Format:
+/// ```
+/// magic:     u64 = "REENCBLK"
+/// n_voters:  u64
+/// pub_key_x: [u64; 4]
+/// pub_key_y: [u64; 4]
+/// Per voter:
+///   k:             [u64; 4]
+///   original[8]:   8 × (c1x, c1y, c2x, c2y)  each [u64; 4]
+///   reencrypted[8]: 8 × (c1x, c1y, c2x, c2y)  each [u64; 4]
+/// ```
+pub fn write_reenc_block(
+    pub_key_x: [u64; 4],
+    pub_key_y: [u64; 4],
+    entries: &[ReencEntryData],
+) -> Result<Vec<u8>> {
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let magic: u64 = u64::from_le_bytes(*b"REENCBLK");
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&magic.to_le_bytes());
+    buf.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+    for w in &pub_key_x { buf.extend_from_slice(&w.to_le_bytes()); }
+    for w in &pub_key_y { buf.extend_from_slice(&w.to_le_bytes()); }
+    for e in entries {
+        for w in &e.k { buf.extend_from_slice(&w.to_le_bytes()); }
+        for ct in &e.original {
+            for w in &ct.c1x { buf.extend_from_slice(&w.to_le_bytes()); }
+            for w in &ct.c1y { buf.extend_from_slice(&w.to_le_bytes()); }
+            for w in &ct.c2x { buf.extend_from_slice(&w.to_le_bytes()); }
+            for w in &ct.c2y { buf.extend_from_slice(&w.to_le_bytes()); }
+        }
+        for ct in &e.reencrypted {
+            for w in &ct.c1x { buf.extend_from_slice(&w.to_le_bytes()); }
+            for w in &ct.c1y { buf.extend_from_slice(&w.to_le_bytes()); }
+            for w in &ct.c2x { buf.extend_from_slice(&w.to_le_bytes()); }
+            for w in &ct.c2y { buf.extend_from_slice(&w.to_le_bytes()); }
+        }
+    }
+    Ok(buf)
 }
