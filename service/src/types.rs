@@ -100,6 +100,23 @@ pub struct ReencryptionDataJson {
     pub entries: Vec<ReencryptionEntryJson>,
 }
 
+/// KZG EIP-4844 blob barycentric evaluation data in JSON format.
+///
+/// All hex strings use the "0x"-prefixed big-endian convention.
+#[derive(Debug, Deserialize, Clone)]
+pub struct KzgEvalJson {
+    /// 32-byte big-endian hex — BN254 Fr process identifier.
+    pub process_id: String,
+    /// 32-byte big-endian hex — Arbo state root before the batch.
+    pub root_hash_before: String,
+    /// 48-byte big-endian hex — compressed BLS12-381 G1 KZG commitment.
+    pub commitment: String,
+    /// 32-byte big-endian hex — claimed evaluation Y = P(Z).
+    pub y_claimed: String,
+    /// 131072-byte big-endian hex — full EIP-4844 blob (4096 × 32-byte cells).
+    pub blob: String,
+}
+
 /// HTTP request body for POST /prove
 #[derive(Debug, Deserialize)]
 pub struct ProveRequest {
@@ -123,6 +140,9 @@ pub struct ProveRequest {
     /// ElGamal re-encryption verification data.
     #[serde(default)]
     pub reencryption: Option<ReencryptionDataJson>,
+    /// KZG EIP-4844 blob barycentric evaluation data.
+    #[serde(default)]
+    pub kzg: Option<KzgEvalJson>,
 }
 
 /// Job status enum

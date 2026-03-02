@@ -2,6 +2,34 @@
 //!
 //! Constants extracted from go-iden3-crypto v0.0.17 (index 1 = t=3).
 //! Algorithm: HashWithStateEx with initState=0, nRoundsF=8, nRoundsP=57.
+//!
+//! # Why not use `ark-crypto-primitives`?
+//!
+//! The `ark-crypto-primitives` crate provides a `PoseidonSponge` implementation,
+//! but it uses the **Fractal/COS** parameterization (IACR 2019/1076) with round
+//! constants derived via a Grain LFSR.  The **iden3/circom** Poseidon variant —
+//! used by lean-imt-go, go-iden3-crypto, and the BallotCircuit — uses a different
+//! set of round constants and MDS matrices that are NOT compatible with the
+//! arkworks defaults.
+//!
+//! Producing the same hash outputs as the Go reference libraries requires the
+//! exact iden3 constants embedded here.  Injecting these constants into the
+//! arkworks framework would require custom `PoseidonConfig` construction with the
+//! same 81-entry `ark` table and 3×3 `mds` matrix, yielding no simplification
+//! while adding a dependency on `ark-crypto-primitives`.
+//!
+//! The custom implementation is verified by the end-to-end census proof tests,
+//! which check against the Go lean-imt-go output directly.
+//!
+//! # Future optimization
+//!
+//! The `exp5` function (x^5) and MDS matrix multiplications use `ark-bn254::Fr`
+//! for pure-software field arithmetic.  In principle, each BN254 Fr multiplication
+//! could be replaced with an `arith256_mod` precompile call (with the BN254 Fr
+//! modulus), similar to what `bls_fr.rs` does for BLS12-381.  This would reduce
+//! prover cost for Poseidon if census proof verification becomes a bottleneck.
+//! For now, the plain `ark-ff` path suffices given the small number of Poseidon
+//! calls per batch (≤ 128 voters × 1 call = 128 hash invocations).
 
 use ark_bn254::Fr;
 use ark_ff::{BigInteger256, Field, PrimeField};

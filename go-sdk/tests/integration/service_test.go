@@ -1,39 +1,18 @@
-package tests
+// service_test.go contains API service tests that submit jobs to a running
+// davinci-zkvm HTTP service. All tests in this file require the service to be
+// reachable at apiURL (default: http://localhost:8080).
+//
+// Start the service with: docker compose up -d --build
+package integration
 
 import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 )
-
-// apiURL is the base URL of the davinci-zkvm service under test.
-var apiURL = func() string {
-	if u := os.Getenv("DAVINCI_API_URL"); u != "" {
-		return strings.TrimRight(u, "/")
-	}
-	return "http://localhost:8080"
-}()
-
-// testDataDir returns the path to the ballot proof test fixtures.
-func testDataDir() string {
-	if d := os.Getenv("TEST_DATA_DIR"); d != "" {
-		return d
-	}
-	// Default: ../data/ballot_proof_bn254 relative to this file's directory
-	return filepath.Join("..", "data", "ballot_proof_bn254")
-}
-
-func newClient() *davinci.Client {
-	return davinci.NewClient(apiURL)
-}
-
-// ── Tests ──────────────────────────────────────────────────────────────────────
 
 func TestHealth(t *testing.T) {
 	h, err := newClient().Health()

@@ -220,6 +220,7 @@ fn write_smt_entry_body(buf: &mut Vec<u8>, e: &SmtEntry) {
 }
 
 /// Write a zero-filled SMT entry (for padding).
+#[allow(dead_code)]
 fn write_zero_smt_entry(buf: &mut Vec<u8>, n_levels: usize) {
     let zero = [0u64; 4];
     for _ in 0..4 { write_u64_slice(buf, &zero); } // old_root, new_root, old_key, old_value
@@ -739,4 +740,62 @@ pub fn write_reenc_block(
         }
     }
     Ok(buf)
+}
+
+/// KZG blob barycentric evaluation data for binary encoding.
+pub struct KzgData {
+    /// Process identifier as 4×u64 LE FrRaw (converted from big-endian).
+    pub process_id: [u64; 4],
+    /// State root before the batch as 4×u64 LE FrRaw.
+    pub root_hash_before: [u64; 4],
+    /// 48-byte compressed BLS12-381 G1 commitment (big-endian).
+    pub commitment: [u8; 48],
+    /// 32-byte big-endian BLS12-381 Fr claimed evaluation Y = P(Z).
+    pub y_claimed: [u8; 32],
+    /// Full EIP-4844 blob: 4096 × 32-byte big-endian cells (131072 bytes total).
+    pub blob: Vec<u8>,
+}
+
+/// Encode the KZG blob barycentric evaluation block.
+///
+/// Block format (binary, appended after the last optional block):
+///   "KZGBLK!!" (8 bytes LE magic)
+///   process_id      (32 bytes: 4×u64 LE words)
+///   root_hash_before (32 bytes: 4×u64 LE words)
+///   commitment      (48 raw bytes, big-endian compressed G1)
+///   y_claimed       (32 raw bytes, big-endian BLS12-381 Fr)
+///   blob            (131072 bytes = 4096 × 32-byte big-endian cells)
+pub fn write_kzg_block(d: &KzgData) -> Result<Vec<u8>> {
+    if d.blob.len() != 4096 * 32 {
+        bail!("blob must be exactly 131072 bytes, got {}", d.blob.len());
+    }
+    let magic: u64 = u64::from_le_bytes(*b"KZGBLK!!");
+    let mut buf = Vec::with_capacity(8 + 32 + 32 + 48 + 32 + 4096 * 32);
+    buf.extend_from_slice(&magic.to_le_bytes());
+    for w in &d.process_id      { buf.extend_from_slice(&w.to_le_bytes()); }
+    for w in &d.root_hash_before { buf.extend_from_slice(&w.to_le_bytes()); }
+    buf.extend_from_slice(&d.commitment);
+    buf.extend_from_slice(&d.y_claimed);
+    buf.extend_from_slice(&d.blob);
+    Ok(buf)
+}
+
+/// Convert a big-endian 32-byte hex string into a 4×u64 LE FrRaw word array.
+///
+/// Accepts optional "0x" prefix.  Pads with leading zeros if shorter than 32 bytes.
+/// word[0] = least-significant 64 bits = bytes[24..32] read as big-endian u64.
+pub fn be_hex32_to_fr_le(s: &str) -> Result<[u64; 4]> {
+    let hex = s.trim_start_matches("0x");
+    let bytes = hex::decode(hex).with_context(|| format!("invalid hex: {s}"))?;
+    if bytes.len() > 32 {
+        bail!("value too large: {} bytes (max 32)", bytes.len());
+    }
+    let mut padded = [0u8; 32];
+    padded[32 - bytes.len()..].copy_from_slice(&bytes);
+    Ok([
+        u64::from_be_bytes(padded[24..32].try_into().unwrap()),
+        u64::from_be_bytes(padded[16..24].try_into().unwrap()),
+        u64::from_be_bytes(padded[8..16].try_into().unwrap()),
+        u64::from_be_bytes(padded[0..8].try_into().unwrap()),
+    ])
 }

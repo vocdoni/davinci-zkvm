@@ -63,6 +63,8 @@ pub struct ParsedInput {
     /// Re-encryption verification entries (REENCBLK magic). Empty if absent.
     pub reenc_pub_key: Option<(FrRaw, FrRaw)>,
     pub reenc_entries: Vec<ReencEntry>,
+    /// KZG barycentric evaluation block (KZGBLK!! magic). None if absent.
+    pub kzg: Option<KZGBlock>,
     /// Number of bytes consumed (equals `input.len()` on success).
     pub bytes_consumed: usize,
 }
@@ -168,6 +170,7 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
     let mut census_proofs: Vec<CensusProofEntry> = Vec::new();
     let mut reenc_pub_key: Option<(FrRaw, FrRaw)> = None;
     let mut reenc_entries: Vec<ReencEntry> = Vec::new();
+    let mut kzg: Option<KZGBlock> = None;
 
     if off + 8 <= input.len() {
         let maybe_magic = u64::from_le_bytes(input[off..off + 8].try_into().unwrap());
@@ -262,6 +265,35 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
             }
         }
     }
+
+    // --- KZG block (optional, after re-encryption block) ---
+    // Format: KZGBLK!! (u64) | processID (FrRaw) | rootHashBefore (FrRaw) |
+    //         commitment (48 bytes) | y_claimed (32 bytes) | blob (131072 bytes)
+    const BLOB_BYTES: usize = 4096 * 32;
+    const KZG_BLOCK_SIZE: usize = 8 + 32 + 32 + 48 + 32 + BLOB_BYTES;
+    if off + KZG_BLOCK_SIZE <= input.len() {
+        let maybe_magic = u64::from_le_bytes(input[off..off + 8].try_into().unwrap());
+        if maybe_magic == KZG_MAGIC {
+            off += 8;
+            let process_id    = read_fr!(&mut off);
+            let root_hash_before = read_fr!(&mut off);
+
+            // commitment: 48 raw bytes
+            let commitment: [u8; 48] = input[off..off + 48].try_into().unwrap();
+            off += 48;
+
+            // y_claimed: 32 raw bytes
+            let y_claimed: [u8; 32] = input[off..off + 32].try_into().unwrap();
+            off += 32;
+
+            // blob: 4096 × 32 = 131072 raw bytes
+            let blob = input[off..off + BLOB_BYTES].to_vec();
+            off += BLOB_BYTES;
+
+            kzg = Some(KZGBlock { process_id, root_hash_before, commitment, y_claimed, blob });
+        }
+    }
+
     if off != input.len() {
         *fail_mask |= 1 << 31;
     }
@@ -271,7 +303,7 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
         vk_alpha_g1, vk_beta_g2, vk_gamma_g2, vk_delta_g2, vk_gamma_abc,
         proofs, scaled_a, neg_alpha_rsum, neg_g_ic, neg_acc_c,
         ecdsa, smt, state, census_proofs,
-        reenc_pub_key, reenc_entries,
+        reenc_pub_key, reenc_entries, kzg,
         bytes_consumed: off,
     }
 }

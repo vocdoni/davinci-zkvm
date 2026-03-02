@@ -1,15 +1,12 @@
 package tests
 
-// TestSMTTransition verifies that an Arbo SHA-256 SMT state-transition is
-// correctly validated by the davinci-zkvm circuit.
+// TestSMTEmulator exercises the SMT circuit using ziskemu directly
+// (no API service required). It builds an arbo SHA-256 SMT state-transition,
+// encodes the SMTBLK binary block, appends it to the pre-generated input.bin,
+// and runs ziskemu to verify output[0]=1.
 //
-// The test builds a real arbo tree, performs an insert transition, and
-// submits a full ProveRequest (128 Groth16 ballot proofs + 128 ECDSA sigs +
-// 1 SMT transition) to the running service.  The job must complete successfully
-// (indicating output[0]=1, which implies output[9]=1).
-//
-// TestSMTEmulator exercises the same logic but calls ziskemu directly
-// (no service required), using the pre-generated input.bin + appended SMT block.
+// TestSMTEmulator: reads the pre-generated input.bin + appended SMT block,
+// calls ziskemu directly.
 
 import (
 	"encoding/binary"
@@ -21,7 +18,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	arbo "github.com/vocdoni/arbo"
 	"github.com/vocdoni/arbo/memdb"
@@ -29,177 +25,6 @@ import (
 )
 
 const smtLevels = 256 // 32-byte keys need maxLevels≥256 (ceil(256/8)=32)
-
-// proofTimeout returns the configured proof timeout (default 20 minutes).
-func proofTimeout() time.Duration {
-	if d := os.Getenv("DAVINCI_PROOF_TIMEOUT"); d != "" {
-		if dur, err := time.ParseDuration(d); err == nil {
-			return dur
-		}
-	}
-	return 20 * time.Minute
-}
-
-// TestSMTInsertTransition submits a ProveRequest that includes a valid SMT
-// insert transition.  The job must complete successfully.
-func TestSMTInsertTransition(t *testing.T) {
-	// Load the 128 ballot proofs + ECDSA signatures.
-	req, err := loadProveRequestFromDir(testDataDir(), 128)
-	if err != nil {
-		t.Fatalf("load fixtures: %v", err)
-	}
-
-	// Build an arbo SHA-256 tree and insert 5 initial leaves.
-	db := memdb.New()
-	tree, err := arbo.NewTree(arbo.Config{
-		Database:     db,
-		MaxLevels:    smtLevels,
-		HashFunction: arbo.HashFunctionSha256,
-	})
-	if err != nil {
-		t.Fatalf("arbo.NewTree: %v", err)
-	}
-	bLen := arbo.HashFunctionSha256.Len() // 32
-
-	for i := int64(1); i <= 5; i++ {
-		k := arbo.BigIntToBytes(bLen, big.NewInt(i))
-		v := arbo.BigIntToBytes(bLen, big.NewInt(i*10))
-		if err := tree.Add(k, v); err != nil {
-			t.Fatalf("tree.Add(%d): %v", i, err)
-		}
-	}
-
-	// Build insert entry for key=42 using the correct helper.
-	smtEntry, err := buildArboInsertEntry(tree, big.NewInt(42), big.NewInt(420), smtLevels)
-	if err != nil {
-		t.Fatalf("buildArboInsertEntry: %v", err)
-	}
-
-	// Attach SMT entry to the ProveRequest.
-	req.Smt = []davinci.SmtEntry{smtEntry}
-
-	t.Logf("SMT insert: old_root=%s → new_root=%s", smtEntry.OldRoot[:10], smtEntry.NewRoot[:10])
-	t.Logf("  new_key=%s  is_old0=%d", smtEntry.NewKey[:10], smtEntry.IsOld0)
-
-	// Submit to the service and wait for completion.
-	client := davinci.NewClient(apiURL)
-	jobID, err := client.SubmitProve(req)
-	if err != nil {
-		t.Fatalf("SubmitProve: %v", err)
-	}
-	t.Logf("Queued job %s (with SMT transition)", jobID)
-
-	proof, err := client.WaitForJob(jobID, proofTimeout())
-	if err != nil {
-		t.Fatalf("WaitForJob %s: %v", jobID, err)
-	}
-	t.Logf("Job %s done (status: %s)", jobID, proof.Status)
-}
-
-// TestSMTUpdateTransition verifies that an SMT update (replace value for
-// existing key) is correctly validated.
-func TestSMTUpdateTransition(t *testing.T) {
-	req, err := loadProveRequestFromDir(testDataDir(), 128)
-	if err != nil {
-		t.Fatalf("load fixtures: %v", err)
-	}
-
-	bLen := arbo.HashFunctionSha256.Len()
-	db := memdb.New()
-	tree, err := arbo.NewTree(arbo.Config{
-		Database:     db,
-		MaxLevels:    smtLevels,
-		HashFunction: arbo.HashFunctionSha256,
-	})
-	if err != nil {
-		t.Fatalf("arbo.NewTree: %v", err)
-	}
-
-	// Insert the key we'll later update.
-	keyBI := big.NewInt(7)
-	keyBytes := arbo.BigIntToBytes(bLen, keyBI)
-	oldValueBytes := arbo.BigIntToBytes(bLen, big.NewInt(70))
-	if err := tree.Add(keyBytes, oldValueBytes); err != nil {
-		t.Fatalf("tree.Add: %v", err)
-	}
-	// Add a few more leaves for a non-trivial tree.
-	for _, i := range []int64{1, 2, 3} {
-		k := arbo.BigIntToBytes(bLen, big.NewInt(i))
-		v := arbo.BigIntToBytes(bLen, big.NewInt(i*100))
-		if err := tree.Add(k, v); err != nil {
-			t.Fatalf("tree.Add(%d): %v", i, err)
-		}
-	}
-
-	oldRootBytes, err := tree.Root()
-	if err != nil {
-		t.Fatalf("tree.Root (old): %v", err)
-	}
-
-	// Get proof of the existing key before update.
-	_, _, packedSiblings, exists, err := tree.GenProof(keyBytes)
-	if err != nil {
-		t.Fatalf("GenProof: %v", err)
-	}
-	if !exists {
-		t.Fatal("key not found (should exist)")
-	}
-
-	newValueBytes := arbo.BigIntToBytes(bLen, big.NewInt(700))
-	if err := tree.Update(keyBytes, newValueBytes); err != nil {
-		t.Fatalf("tree.Update: %v", err)
-	}
-
-	newRootBytes, err := tree.Root()
-	if err != nil {
-		t.Fatalf("tree.Root (new): %v", err)
-	}
-
-	// For update: fnc0=0, fnc1=1, is_old0=0.
-	// No sibling removal (fnc1=1 → not an insert).
-	siblingsUnpacked, err := arbo.UnpackSiblings(arbo.HashFunctionSha256, packedSiblings)
-	if err != nil {
-		t.Fatalf("UnpackSiblings: %v", err)
-	}
-	zero32 := make([]byte, bLen)
-	for len(siblingsUnpacked) < smtLevels {
-		siblingsUnpacked = append(siblingsUnpacked, zero32)
-	}
-	siblingsUnpacked = siblingsUnpacked[:smtLevels]
-
-	smtEntry := davinci.SmtEntry{
-		OldRoot:  "0x" + hex.EncodeToString(pad32(oldRootBytes)),
-		NewRoot:  "0x" + hex.EncodeToString(pad32(newRootBytes)),
-		OldKey:   "0x" + hex.EncodeToString(pad32(keyBytes)),
-		OldValue: "0x" + hex.EncodeToString(pad32(oldValueBytes)),
-		IsOld0:   0,
-		NewKey:   "0x" + hex.EncodeToString(pad32(keyBytes)),
-		NewValue: "0x" + hex.EncodeToString(pad32(newValueBytes)),
-		Fnc0:     0, // update
-		Fnc1:     1,
-		Siblings: make([]string, smtLevels),
-	}
-	for i, s := range siblingsUnpacked {
-		smtEntry.Siblings[i] = "0x" + hex.EncodeToString(pad32(s))
-	}
-
-	req.Smt = []davinci.SmtEntry{smtEntry}
-
-	t.Logf("SMT update: old_root=%s → new_root=%s", smtEntry.OldRoot[:10], smtEntry.NewRoot[:10])
-
-	client := davinci.NewClient(apiURL)
-	jobID, err := client.SubmitProve(req)
-	if err != nil {
-		t.Fatalf("SubmitProve: %v", err)
-	}
-	t.Logf("Queued job %s (SMT update)", jobID)
-
-	proof, err := client.WaitForJob(jobID, proofTimeout())
-	if err != nil {
-		t.Fatalf("WaitForJob %s: %v", jobID, err)
-	}
-	t.Logf("Job %s done (status: %s)", jobID, proof.Status)
-}
 
 // pad32 zero-pads a byte slice to exactly 32 bytes (big-endian convention).
 func pad32(b []byte) []byte {
@@ -492,49 +317,49 @@ func TestSMTEmulator(t *testing.T) {
 	if get(1) != 0 {
 		t.Errorf("output[1] (fail_mask) = 0x%x, want 0", get(1))
 	}
-	if get(7) != 1 {
-		t.Errorf("output[7] (groth16_ok) = %d, want 1", get(7))
+	if get(40) != 1 {
+		t.Errorf("output[40] (groth16_ok) = %d, want 1", get(40))
 	}
-	if get(8) != 1 {
-		t.Errorf("output[8] (ecdsa_ok) = %d, want 1", get(8))
+	if get(41) != 1 {
+		t.Errorf("output[41] (ecdsa_ok) = %d, want 1", get(41))
 	}
-	if get(9) != 1 {
-		t.Errorf("output[9] (smt_ok) = %d, want 1", get(9))
+	if get(42) != 1 {
+		t.Errorf("output[42] (smt_ok) = %d, want 1", get(42))
 	}
 }
 
 // runZiskEmu writes input bytes to a temp file, executes ziskemu, and returns
 // parsed uint32 outputs. Returns an error if ziskemu is not in PATH or fails.
 func runZiskEmu(inputBytes []byte) ([]uint32, error) {
-ziskemuBin, err := exec.LookPath("ziskemu")
-if err != nil {
-return nil, fmt.Errorf("ziskemu not in PATH: %w", err)
-}
-elfPath := os.Getenv("CIRCUIT_ELF_PATH")
-if elfPath == "" {
-elfPath = "/home/p4u/davinci-zkvm/circuit/elf/circuit.elf"
-}
-tmp, err := os.CreateTemp("", "statetx-*.bin")
-if err != nil {
-return nil, err
-}
-defer os.Remove(tmp.Name())
-if _, err := tmp.Write(inputBytes); err != nil {
-return nil, err
-}
-tmp.Close()
+	ziskemuBin, err := exec.LookPath("ziskemu")
+	if err != nil {
+		return nil, fmt.Errorf("ziskemu not in PATH: %w", err)
+	}
+	elfPath := os.Getenv("CIRCUIT_ELF_PATH")
+	if elfPath == "" {
+		elfPath = "/home/p4u/davinci-zkvm/circuit/elf/circuit.elf"
+	}
+	tmp, err := os.CreateTemp("", "statetx-*.bin")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(inputBytes); err != nil {
+		return nil, err
+	}
+	tmp.Close()
 
-cmd := exec.Command(ziskemuBin, "-e", elfPath, "-i", tmp.Name())
-out, err := cmd.Output()
-if err != nil {
-return nil, fmt.Errorf("ziskemu failed: %w\noutput: %s", err, out)
-}
-lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-var outputs []uint32
-for _, l := range lines {
-var v uint32
-fmt.Sscanf(strings.TrimSpace(l), "%x", &v)
-outputs = append(outputs, v)
-}
-return outputs, nil
+	cmd := exec.Command(ziskemuBin, "-e", elfPath, "-i", tmp.Name())
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("ziskemu failed: %w\noutput: %s", err, out)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	var outputs []uint32
+	for _, l := range lines {
+		var v uint32
+		fmt.Sscanf(strings.TrimSpace(l), "%x", &v)
+		outputs = append(outputs, v)
+	}
+	return outputs, nil
 }

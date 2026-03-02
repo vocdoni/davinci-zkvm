@@ -433,6 +433,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "davinci-zkvm-input-gen",
+ "hex",
  "serde",
  "serde_json",
  "tokio",

@@ -42,6 +42,10 @@ require (
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/pprof v0.0.0-20251213031049-b05bdaca462f // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
+	github.com/iden3/go-rapidsnark/prover v0.0.12 // indirect
+	github.com/iden3/go-rapidsnark/types v0.0.3 // indirect
+	github.com/iden3/go-rapidsnark/witness v0.0.6 // indirect
+	github.com/iden3/wasmer-go v0.0.1 // indirect
 	github.com/ingonyama-zk/icicle-gnark/v3 v3.2.2 // indirect
 	github.com/klauspost/compress v1.18.3 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
@@ -67,6 +71,7 @@ require (
 	github.com/sethvargo/go-retry v0.3.0 // indirect
 	github.com/supranational/blst v0.3.16-0.20250831170142-f48500c1fdbe // indirect
 	github.com/syndtr/goleveldb v1.0.1-0.20220721030215-126854af5e6d // indirect
+	github.com/vocdoni/davinci-circom v0.1.0 // indirect
 	github.com/vocdoni/davinci-node/spec v0.0.0-20260210223636-e85fc7c89da9 // indirect
 	github.com/vocdoni/gnark-crypto-primitives v0.0.2-0.20260115102516-64ce9c3fd55d // indirect
 	github.com/vocdoni/poseidon377 v0.0.0-20260107010505-905fd2aadb69 // indirect
@@ -89,3 +94,7 @@ require (
 )
 
 replace github.com/vocdoni/davinci-node => /home/p4u/davinci-node
+
+replace github.com/vocdoni/davinci-node/spec => /home/p4u/davinci-node/spec
+
+replace github.com/vocdoni/davinci-circom => /home/p4u/davinci-circom
