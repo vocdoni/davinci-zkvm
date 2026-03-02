@@ -521,18 +521,43 @@ pub fn verify_state(
     }
 
     // ── Process read-proofs: inclusion in OldStateRoot (no mutation) ──────────
-    // Config keys are read-only; each proof must have old_root == new_root == old_state_root
-    // (ensured by fnc0=0, fnc1=0 in the SMT Processor, but we check explicitly).
-    for p in &state.process_proofs {
-        if p.old_root != state.old_state_root || p.new_root != state.old_state_root {
-            *fail_mask |= FAIL_SMT_PROCESS;
-            ok = false;
-            break;
+    // Exactly 4 proofs are required, one per config key in fixed order:
+    //   [0] key=0x00 (ProcessID), [1] key=0x02 (BallotMode),
+    //   [2] key=0x03 (EncryptionKey), [3] key=0x06 (CensusOrigin).
+    // Each proof must be read-only (old_root == new_root == old_state_root).
+    const EXPECTED_KEYS: [FrRaw; 4] = [
+        [0x00, 0, 0, 0], // StateKeyProcessID
+        [0x02, 0, 0, 0], // StateKeyBallotMode
+        [0x03, 0, 0, 0], // StateKeyEncryptionKey
+        [0x06, 0, 0, 0], // StateKeyCensusOrigin
+    ];
+    if state.process_proofs.len() != 4 {
+        *fail_mask |= FAIL_SMT_PROCESS;
+        ok = false;
+    } else {
+        for (i, p) in state.process_proofs.iter().enumerate() {
+            if p.old_root != state.old_state_root || p.new_root != state.old_state_root {
+                *fail_mask |= FAIL_SMT_PROCESS;
+                ok = false;
+                break;
+            }
+            if !verify_transition(p) {
+                *fail_mask |= FAIL_SMT_PROCESS;
+                ok = false;
+                break;
+            }
+            // Each proof must correspond to the correct config key.
+            if p.new_key != EXPECTED_KEYS[i] {
+                *fail_mask |= FAIL_SMT_PROCESS;
+                ok = false;
+                break;
+            }
         }
-        if !verify_transition(p) {
+        // The processID value stored in the state tree (key 0x00) must equal
+        // the processID declared in the state-transition block header.
+        if ok && state.process_proofs[0].new_value != state.process_id {
             *fail_mask |= FAIL_SMT_PROCESS;
             ok = false;
-            break;
         }
     }
 

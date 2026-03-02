@@ -62,6 +62,17 @@ func newClient() *davinci.Client {
 	return davinci.NewClient(apiURL)
 }
 
+// arboHexToBEHex converts an arbo LE hex string (as produced by hex.EncodeToString
+// on arbo.Root() bytes) to standard big-endian hex. This is needed because the
+// STATETX block encodes fields as arbo LE hex, while the KZG block requires
+// big-endian hex — both must decode to the same FrRaw limbs in the circuit.
+func arboHexToBEHex(leHex string) string {
+	trimmed := strings.TrimPrefix(leHex, "0x")
+	leBytes, _ := hex.DecodeString(trimmed)
+	bi := arbo.BytesToBigInt(leBytes)
+	return "0x" + hex.EncodeToString(pad32(bi.Bytes()))
+}
+
 // pad32 right-aligns b into a 32-byte slice (zero-left-padded).
 func pad32(b []byte) []byte {
 	if len(b) == 32 {

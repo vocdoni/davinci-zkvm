@@ -41,19 +41,23 @@ type PublicOutputs struct {
 
 // Fail mask bit constants, matching circuit/src/types.rs.
 const (
-	FailCurve       = 1 << 0   // Groth16 BN254 verification
-	FailPairing     = 1 << 1   // BN254 pairing check
-	FailECDSA       = 1 << 2   // ECDSA signature verification
-	FailSMTVoteID   = 1 << 10  // VoteID chain
-	FailSMTBallot   = 1 << 11  // Ballot chain
-	FailSMTResults  = 1 << 12  // Results chain
-	FailSMTProcess  = 1 << 13  // Process read-proofs
-	FailConsistency = 1 << 14  // VoteID/ballot namespace binding
-	FailBallotNS    = 1 << 15  // Ballot namespace check
-	FailCensus      = 1 << 16  // Census membership proof
-	FailReenc       = 1 << 17  // ElGamal re-encryption
-	FailKZG         = 1 << 18  // KZG blob evaluation
-	FailParse       = 1 << 31  // Input parsing error
+	FailCurve        = 1 << 1  // Groth16 BN254 curve check
+	FailPairing      = 1 << 2  // BN254 pairing check
+	FailECDSA        = 1 << 3  // ECDSA signature verification
+	FailSMTVoteID    = 1 << 10 // VoteID chain
+	FailSMTBallot    = 1 << 11 // Ballot chain
+	FailSMTResults   = 1 << 12 // Results chain
+	FailSMTProcess   = 1 << 13 // Process config proofs
+	FailConsistency  = 1 << 14 // VoteID/ballot namespace binding
+	FailBallotNS     = 1 << 15 // Ballot namespace check
+	FailCensus       = 1 << 16 // Census membership proof
+	FailReenc        = 1 << 17 // ElGamal re-encryption
+	FailKZG          = 1 << 18 // KZG blob evaluation
+	FailMissingBlock = 1 << 19 // Mandatory block absent
+	FailResultAccum  = 1 << 20 // Result accumulator mismatch
+	FailLeafHash     = 1 << 21 // Ballot SMT leaf hash mismatch
+	FailBinding      = 1 << 22 // Cross-block binding mismatch
+	FailParse        = 1 << 31 // Input parsing error
 )
 
 // ParseOutputs decodes the 46 u32 output registers from the ZisK circuit
@@ -182,6 +186,10 @@ func (o *PublicOutputs) FailString() string {
 		{FailCensus, "census"},
 		{FailReenc, "reencryption"},
 		{FailKZG, "kzg"},
+		{FailMissingBlock, "missing_block"},
+		{FailResultAccum, "result_accum"},
+		{FailLeafHash, "leaf_hash"},
+		{FailBinding, "binding"},
 		{FailParse, "parse_error"},
 	}
 	for _, f := range flags {

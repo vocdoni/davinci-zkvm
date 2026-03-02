@@ -10,7 +10,7 @@
 //! |  10 | `FAIL_SMT_VOTEID`       | smt.rs         | VoteID insertion chain invalid             |
 //! |  11 | `FAIL_SMT_BALLOT`       | smt.rs         | Ballot insertion chain invalid             |
 //! |  12 | `FAIL_SMT_RESULTS`      | smt.rs         | ResultsAdd/Sub transition invalid          |
-//! |  13 | `FAIL_SMT_PROCESS`      | smt.rs         | Process read-proof invalid                 |
+//! |  13 | `FAIL_SMT_PROCESS`      | smt.rs         | Process config proof invalid or missing    |
 //! |  14 | `FAIL_CONSISTENCY`      | consistency.rs | VoteID namespace / proof binding mismatch  |
 //! |  15 | `FAIL_BALLOT_NS`        | consistency.rs | Ballot namespace / address binding mismatch|
 //! |  16 | `FAIL_CENSUS`           | census.rs      | Census membership proof failed             |
@@ -19,6 +19,7 @@
 //! |  19 | `FAIL_MISSING_BLOCK`    | various        | Mandatory block absent from input          |
 //! |  20 | `FAIL_RESULT_ACCUM`     | results.rs     | Result accumulator ballot sum mismatch     |
 //! |  21 | `FAIL_LEAF_HASH`        | results.rs     | Ballot SMT leaf hash mismatch              |
+//! |  22 | `FAIL_BINDING`          | main.rs        | Cross-block binding mismatch               |
 //! |  31 | `FAIL_PARSE`            | io.rs          | Binary format / parse error                |
 
 /// BN254 G1 affine point: (x[4], y[4]) in 256-bit little-endian limbs.
@@ -72,6 +73,9 @@ pub const FAIL_MISSING_BLOCK: u32 = 1 << 19;
 pub const FAIL_RESULT_ACCUM: u32 = 1 << 20;
 /// Bit 21 — Ballot leaf hash: SHA-256(serialized_ballot) ≠ SMT new_value.
 pub const FAIL_LEAF_HASH: u32 = 1 << 21;
+/// Bit 22 — Cross-block binding: processID, rootHashBefore, or encryption key mismatch
+/// between independently-parsed blocks (KZG ↔ state, re-encryption ↔ process config).
+pub const FAIL_BINDING: u32 = 1 << 22;
 
 /// One Groth16 proof and its associated public inputs.
 #[derive(Clone)]

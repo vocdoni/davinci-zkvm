@@ -345,13 +345,16 @@ func TestStateTxEmulator(t *testing.T) {
 	newRootBytes, _ := procTree.Root()
 	newRootHex := "0x" + hex.EncodeToString(pad32(newRootBytes))
 
+	// ProcessID must match the value stored in the state tree under key 0x00.
+	processIDHex := "0x" + hex.EncodeToString(arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(configVals[0])))
+
 	t.Logf("old=%s  new=%s  voteIDs=%d  ballots=%d  procProofs=%d",
 		oldRootHex[:10], newRootHex[:10], len(voteIDChain), len(ballotChain), len(processSmt))
 
 	sd := &davinci.StateTransitionData{
 		VotersCount:      nVotes,
 		OverwrittenCount: 0,
-		ProcessID:        oldRootHex, // use old root as dummy processID
+		ProcessID:        processIDHex,
 		OldStateRoot:     oldRootHex,
 		NewStateRoot:     newRootHex,
 		VoteIDSmt:        voteIDChain,
@@ -801,13 +804,16 @@ func TestResultAccumulator(t *testing.T) {
 	newRootBytes, _ := tree.Root()
 	newRootHex := "0x" + hex.EncodeToString(pad32(newRootBytes))
 
+	// ProcessID must match the value stored in the state tree under key 0x00.
+	processIDHex := "0x" + hex.EncodeToString(arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(configVals[0])))
+
 	t.Logf("old=%s  new=%s  voteIDs=%d  ballots=%d  resultsAdd=UPDATE",
 		oldRootHex[:10], newRootHex[:10], len(voteIDChain), len(ballotChain))
 
 	sd := &davinci.StateTransitionData{
 		VotersCount:      uint64(nVotes),
 		OverwrittenCount: 0,
-		ProcessID:        oldRootHex,
+		ProcessID:        processIDHex,
 		OldStateRoot:     oldRootHex,
 		NewStateRoot:     newRootHex,
 		VoteIDSmt:        voteIDChain,

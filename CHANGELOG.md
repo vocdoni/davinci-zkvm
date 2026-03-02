@@ -2,6 +2,38 @@
 
 All notable changes to davinci-zkvm are documented here.
 
+## Unreleased — Cross-Block Binding Security Checks
+
+### Security
+
+- **Cross-block binding verification** (`circuit/src/main.rs` Phase 6). The circuit now
+  verifies that fields shared between protocol blocks are consistent. Previously, each block
+  (STATETX, KZGBLK, REENCBLK) was validated independently, allowing an attacker to supply
+  a valid KZG commitment for a different processID or state root than the one in the state
+  transition. New checks:
+  - KZG processID must match STATETX processID
+  - KZG rootHashBefore must match STATETX old state root
+  - Re-encryption public key must match the encryption key stored in process config (key 0x03)
+  - Failure sets `FAIL_BINDING` (bit 22) in the fail mask
+
+- **Process config key/value validation** (`circuit/src/smt.rs`). Process proofs must contain
+  exactly 4 entries with keys [0x00, 0x02, 0x03, 0x06] (ProcessID, BallotMode, EncryptionKey,
+  CensusOrigin). The processID value (key 0x00) must match the state block header. Previously,
+  process proofs were counted but key IDs were not validated.
+
+### Fixed
+
+- **Go-SDK fail-mask constants** (`go-sdk/outputs.go`). Corrected bit shifts: FailCurve was
+  `1<<0` but circuit uses `1<<1` (FAIL_CURVE). FailPairing and FailECDSA were similarly off by
+  one. Added missing constants: FailMissingBlock (bit 19), FailResultAccum (bit 20),
+  FailLeafHash (bit 21), FailBinding (bit 22).
+
+- **KZG/STATETX encoding consistency** (`go-sdk/tests/integration/`). The STATETX block uses
+  arbo little-endian hex (parsed by `hex32_to_smt_fr` in Rust), while the KZG block uses
+  standard big-endian hex (parsed by `be_hex32_to_fr_le`). Both produce identical FrRaw limbs
+  in the circuit. The integration test now correctly uses `processIDArboHex()` for STATETX and
+  `ProcessIDHex()` for KZG, with `arboHexToBEHex()` for root conversion.
+
 ## Unreleased — Remove Legacy SMT Batch + Mandatory Protocol Blocks
 
 ### Breaking Changes
