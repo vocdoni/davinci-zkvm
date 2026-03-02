@@ -2,9 +2,28 @@
 
 All notable changes to davinci-zkvm are documented here.
 
-## Unreleased — Cross-Block Binding Security Checks
+## Unreleased — Security Audit & Cross-Block Binding
 
 ### Security
+
+- **CIRCUIT.md formal specification** (new file). Complete constraint-by-constraint
+  documentation of all six verification phases, their inputs/outputs, fail-mask bits,
+  security properties, and known limitations. Serves as the reference for auditing
+  the protocol implementation.
+
+- **Census proof count binding** (`circuit/src/main.rs` Phase 6.4). The circuit now
+  verifies that the number of census proofs equals `n_voters` from the STATETX block.
+  Previously, a malicious prover could provide fewer census proofs than voters, allowing
+  non-census-members to submit votes. Failure sets `FAIL_BINDING` (bit 22).
+
+- **Re-encryption entry count binding** (`circuit/src/main.rs` Phase 6.5). The circuit now
+  verifies that the number of re-encryption entries equals `n_voters`. A missing check
+  would have allowed the prover to omit re-encryption for some ballots. Sets `FAIL_BINDING`.
+
+- **Census address-to-voter binding** (`circuit/src/main.rs` Phase 6.6). The circuit now
+  extracts the Ethereum address from each census leaf (`PackAddressWeight(addr, weight)`)
+  and verifies it matches the corresponding ballot proof's `public_inputs[0]`. This
+  prevents reuse of a single census proof across multiple voters. Sets `FAIL_BINDING`.
 
 - **Cross-block binding verification** (`circuit/src/main.rs` Phase 6). The circuit now
   verifies that fields shared between protocol blocks are consistent. Previously, each block
@@ -253,28 +272,21 @@ minor changes to produce compatible input data.
 These features are present in the Gnark StateTransitionCircuit but not yet
 implemented in the zkVM circuit. They are tracked for future work.
 
-1. **Ballot homomorphic sum verification** (`VerifyBallots`): The Gnark circuit
-   sums all re-encrypted ballots using ElGamal homomorphic addition and checks
-   that `ResultsAdd.new = ResultsAdd.old + sum(ballots)` and
-   `ResultsSub.new = ResultsSub.old + sum(overwritten_ballots)`. The zkVM verifies
-   the SMT transitions for ResultsAdd/Sub but does not verify that the stored
-   values correspond to the homomorphic sums of the actual ballot data. This
-   means the sequencer is trusted to compute the result accumulation correctly.
-
-2. **Leaf hash verification** (`VerifyLeafHashes`): The Gnark circuit verifies
-   that each SMT leaf value equals `hash(serialized_data)` for ballots, process
-   config entries, and results. The zkVM verifies the SMT proof validity but
-   does not check that the leaf values match the expected serialized content.
-
-3. **Blob construction verification** (`VerifyBlobs`): The Gnark circuit builds
+1. **Blob construction verification** (`VerifyBlobs`): The Gnark circuit builds
    the EIP-4844 blob from the votes and results inside the circuit and verifies
    the full KZG commitment+opening. The zkVM only verifies the barycentric
    evaluation (`Y = P(Z)`) and does not verify that the blob content matches
    the state transition data. Full KZG opening proof verification requires
    BLS12-381 pairings (not yet available as a ZisK precompile).
 
-4. **CSP census proofs**: The Gnark circuit supports two census types (Merkle
+2. **CSP census proofs**: The Gnark circuit supports two census types (Merkle
    tree and CSP/blind signatures). The zkVM implements Merkle census proofs only.
+
+3. **Ballot-to-re-encryption binding**: The Circom ballot proof exposes
+   `[address, voteID, inputsHash]` as public inputs — the raw ciphertext data
+   is not directly accessible. The circuit cannot verify that the re-encryption
+   `original` ciphertexts match the ballot proven by the Groth16 proof.
+   A future enhancement could verify `SHA-256(original_ciphertexts) == inputsHash`.
 
 ### Code Quality
 

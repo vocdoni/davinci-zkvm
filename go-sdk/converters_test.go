@@ -55,7 +55,6 @@ func TestParseOutputs(t *testing.T) {
 	// Diagnostics
 	outputs[OutputBatchOk] = 1
 	outputs[OutputECDSAOk] = 1
-	outputs[OutputSMTOk] = 2
 	outputs[OutputNProofs] = 128
 	outputs[OutputNPublic] = 3
 	outputs[OutputLogN] = 7

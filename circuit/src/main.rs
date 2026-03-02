@@ -20,6 +20,21 @@ mod types;
 use crate::types::{FrRaw, ZERO_FR};
 use ziskos::{read_input_slice, set_output};
 
+/// Extract the Ethereum address (uint160) from a packed census leaf.
+///
+/// Census leaves encode `PackAddressWeight(address, weight) = (address << 88) | weight`.
+/// This function right-shifts the leaf value by 88 bits to recover the address.
+/// The returned FrRaw holds the 160-bit address in the lower 3 limbs.
+fn extract_address_from_census_leaf(leaf: &FrRaw) -> FrRaw {
+    // 88 = 64 + 24, so we shift across word boundaries.
+    [
+        (leaf[1] >> 24) | (leaf[2] << 40),
+        (leaf[2] >> 24) | (leaf[3] << 40),
+        leaf[3] >> 24,
+        0,
+    ]
+}
+
 /// Compute the arbo leaf value for the encryption key: SHA-256(X_BE32 || Y_BE32) → FrRaw.
 ///
 /// This encoding matches the sequencer's convention for storing a BabyJubJub public key
@@ -243,6 +258,54 @@ fn main() {
             if enc_key_hash != state.process_proofs[2].new_value {
                 fail_mask |= crate::types::FAIL_BINDING;
                 binding_ok = false;
+            }
+        }
+    }
+
+    // 6.3 Census proof count must equal the voter count from STATETX.
+    //
+    // Without this check, a malicious prover could provide fewer census
+    // proofs than voters, allowing non-census-members to submit votes.
+    if let Some(state) = &parsed.state {
+        if parsed.census_proofs.len() != state.n_voters {
+            fail_mask |= crate::types::FAIL_BINDING;
+            binding_ok = false;
+        }
+    }
+
+    // 6.4 Re-encryption entry count must equal the voter count from STATETX.
+    //
+    // Ensures every voter ballot has a corresponding re-encryption entry,
+    // preventing the prover from omitting re-encryption for some ballots.
+    if let Some(state) = &parsed.state {
+        if parsed.reenc_entries.len() != state.n_voters {
+            fail_mask |= crate::types::FAIL_BINDING;
+            binding_ok = false;
+        }
+    }
+
+    // 6.5 Census leaf address must match the ballot proof's address.
+    //
+    // The census leaf encodes PackAddressWeight(address, weight) = (address << 88) | weight.
+    // The ballot proof's public_inputs[0] is the voter's Ethereum address (uint160).
+    // This check binds each census membership proof to the specific voter who submitted
+    // the corresponding ballot proof, preventing reuse of a single census proof across
+    // multiple voters.
+    if let Some(state) = &parsed.state {
+        let n = state.n_voters.min(parsed.census_proofs.len()).min(parsed.proofs.len());
+        if parsed.n_public >= 1 {
+            for i in 0..n {
+                let leaf_addr = extract_address_from_census_leaf(&parsed.census_proofs[i].leaf);
+                let proof_addr = &parsed.proofs[i].public_inputs[0];
+                // Compare lower 3 limbs (160 bits); limb[3] must be zero for valid addresses.
+                if leaf_addr[0] != proof_addr[0]
+                    || leaf_addr[1] != proof_addr[1]
+                    || (leaf_addr[2] & 0xFFFFFFFF) != (proof_addr[2] & 0xFFFFFFFF)
+                {
+                    fail_mask |= crate::types::FAIL_BINDING;
+                    binding_ok = false;
+                    break;
+                }
             }
         }
     }
