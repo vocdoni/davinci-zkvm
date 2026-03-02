@@ -4,6 +4,16 @@ All notable changes to davinci-zkvm are documented here.
 
 ## Unreleased — Security Audit & Cross-Block Binding
 
+### Bug Fixes
+
+- **Missing `has_ballot_data` flag in Rust encoder** (`input-gen/src/lib.rs`). The
+  `write_state_block()` function did not write the `has_ballot_data` u64 flag after
+  process proofs, causing the circuit parser to read the next block's magic bytes as
+  the flag value. This produced total parse corruption and a heap crash (SIGABRT)
+  during end-to-end proving through the HTTP service. The Go encoder already wrote
+  this flag correctly. Added `BallotProofData` struct to `StateData` for full ballot
+  data support, and the encoder now always writes `has_ballot_data=0` when absent.
+
 ### Security
 
 - **CIRCUIT.md formal specification** (new file). Complete constraint-by-constraint
