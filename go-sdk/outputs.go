@@ -32,12 +32,11 @@ type PublicOutputs struct {
 	BlobCommitmentLimbs [3]*big.Int
 
 	// Diagnostics (not public inputs for on-chain verification)
-	BatchOk  bool   // Groth16 batch verification passed
-	ECDSAOk  bool   // ECDSA signature batch passed
-	SMTOk    uint32 // 1=ok, 2=absent, 0=fail
-	NProofs  uint32 // number of Groth16 proofs verified
-	NPublic  uint32 // public inputs per proof
-	LogN     uint32 // log₂ aggregation tree depth
+	BatchOk bool   // Groth16 batch verification passed
+	ECDSAOk bool   // ECDSA signature batch passed
+	NProofs uint32 // number of Groth16 proofs verified
+	NPublic uint32 // public inputs per proof
+	LogN    uint32 // log₂ aggregation tree depth
 }
 
 // Fail mask bit constants, matching circuit/src/types.rs.
@@ -45,7 +44,6 @@ const (
 	FailCurve       = 1 << 0   // Groth16 BN254 verification
 	FailPairing     = 1 << 1   // BN254 pairing check
 	FailECDSA       = 1 << 2   // ECDSA signature verification
-	FailSMTBatch    = 1 << 9   // Legacy SMT batch
 	FailSMTVoteID   = 1 << 10  // VoteID chain
 	FailSMTBallot   = 1 << 11  // Ballot chain
 	FailSMTResults  = 1 << 12  // Results chain
@@ -77,7 +75,6 @@ func ParseOutputs(outputs []uint32) (*PublicOutputs, error) {
 		CensusRoot:            u32SliceToBigInt(outputs[OutputCensusRoot : OutputCensusRoot+8]),
 		BatchOk:               outputs[OutputBatchOk] == 1,
 		ECDSAOk:               outputs[OutputECDSAOk] == 1,
-		SMTOk:                 outputs[OutputSMTOk],
 		NProofs:               outputs[OutputNProofs],
 		NPublic:               outputs[OutputNPublic],
 		LogN:                  outputs[OutputLogN],
@@ -176,7 +173,6 @@ func (o *PublicOutputs) FailString() string {
 		{FailCurve, "groth16_curve"},
 		{FailPairing, "pairing"},
 		{FailECDSA, "ecdsa"},
-		{FailSMTBatch, "smt_batch"},
 		{FailSMTVoteID, "smt_voteid"},
 		{FailSMTBallot, "smt_ballot"},
 		{FailSMTResults, "smt_results"},

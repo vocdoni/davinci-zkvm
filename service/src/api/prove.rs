@@ -4,7 +4,7 @@ use crate::api::AppState;
 use crate::types::{ProveRequest, SmtEntryJson};
 use anyhow::{bail, Context};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use davinci_zkvm_input_gen::{census_proof_from_hex, generate_input, write_census_block, write_kzg_block, write_reenc_block, write_smt_block, write_state_block, be_hex32_to_fr_le, BjjCiphertextData, KzgData, ReencEntryData, SmtEntry, StateData};
+use davinci_zkvm_input_gen::{census_proof_from_hex, generate_input, write_census_block, write_kzg_block, write_reenc_block, write_state_block, be_hex32_to_fr_le, BjjCiphertextData, KzgData, ReencEntryData, SmtEntry, StateData};
 use tracing::{debug, error, info, warn};
 
 pub async fn submit_prove(
@@ -40,12 +40,8 @@ pub async fn submit_prove(
             has_results_sub     = st.results_sub_smt.is_some(),
             "State-transition block"
         );
-    } else if !req.smt.is_empty() {
-        let old = req.smt.first().map(|e| e.old_root.as_str()).unwrap_or("?");
-        let new = req.smt.last().map(|e| e.new_root.as_str()).unwrap_or("?");
-        info!(entries = req.smt.len(), old_root = %old, new_root = %new, "Legacy SMT block");
     } else {
-        warn!("No state/SMT block in request");
+        warn!("No state block in request");
     }
 
     if !req.census_proofs.is_empty() {
@@ -83,19 +79,12 @@ pub async fn submit_prove(
     let proofs = req.proofs.clone();
     let public_inputs = req.public_inputs.clone();
     let sigs = req.sigs.clone();
-    let smt_json = req.smt.clone();
     let state_json = req.state.clone();
     let census_json = req.census_proofs.clone();
     let reenc_json = req.reencryption.clone();
     let kzg_json = req.kzg.clone();
     let input_bytes = match tokio::task::spawn_blocking(move || {
         let mut bytes = generate_input(&vk, &proofs, &public_inputs, &sigs)?;
-
-        // Append legacy simple SMT block (mutually exclusive with state block).
-        if !smt_json.is_empty() && state_json.is_none() {
-            let entries = smt_entries_from_json(&smt_json)?;
-            bytes.extend(write_smt_block(&entries)?);
-        }
 
         // Append full STATETX state-transition block.
         if let Some(st) = state_json {

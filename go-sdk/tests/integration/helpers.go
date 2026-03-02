@@ -62,11 +62,6 @@ func newClient() *davinci.Client {
 	return davinci.NewClient(apiURL)
 }
 
-// ─── SMT block encoding ───────────────────────────────────────────────────
-
-// smtMagic is "SMTBLK!!" encoded as little-endian bytes.
-var smtMagic = []byte("SMTBLK!!")
-
 // pad32 right-aligns b into a 32-byte slice (zero-left-padded).
 func pad32(b []byte) []byte {
 	if len(b) == 32 {
@@ -78,84 +73,6 @@ func pad32(b []byte) []byte {
 	out := make([]byte, 32)
 	copy(out[32-len(b):], b)
 	return out
-}
-
-// leHex32ToFrLE converts a 0x-prefixed little-endian hex string to a [32]byte
-// little-endian word array (arbo convention).
-func leHex32ToFrLE(s string) ([32]byte, error) {
-	hex32 := strings.TrimPrefix(s, "0x")
-	if len(hex32) < 64 {
-		hex32 = hex32 + strings.Repeat("0", 64-len(hex32))
-	}
-	leBuf, err := hex.DecodeString(hex32)
-	if err != nil {
-		return [32]byte{}, err
-	}
-	var out [32]byte
-	copy(out[:], leBuf)
-	return out, nil
-}
-
-// writeFrLE writes a 0x-prefixed hex32 field as [u64;4] LE to buf.
-func writeFrLE(buf *[]byte, s string) error {
-	v, err := leHex32ToFrLE(s)
-	if err != nil {
-		return fmt.Errorf("leHex32ToFrLE(%q): %w", s, err)
-	}
-	*buf = append(*buf, v[:]...)
-	return nil
-}
-
-// writeU64LE appends a uint64 in little-endian format to buf.
-func writeU64LE(buf *[]byte, v uint64) {
-	var b [8]byte
-	binary.LittleEndian.PutUint64(b[:], v)
-	*buf = append(*buf, b[:]...)
-}
-
-// encodeSMTBlock encodes a slice of SmtEntry into the SMTBLK binary format.
-// Returns nil if entries is empty.
-func encodeSMTBlock(entries []davinci.SmtEntry) ([]byte, error) {
-	if len(entries) == 0 {
-		return nil, nil
-	}
-	nLevels := len(entries[0].Siblings)
-	var buf []byte
-	buf = append(buf, smtMagic...)
-	writeU64LE(&buf, uint64(len(entries)))
-	writeU64LE(&buf, uint64(nLevels))
-	for _, e := range entries {
-		if err := writeFrLE(&buf, e.OldRoot); err != nil {
-			return nil, err
-		}
-		if err := writeFrLE(&buf, e.NewRoot); err != nil {
-			return nil, err
-		}
-		if err := writeFrLE(&buf, e.OldKey); err != nil {
-			return nil, err
-		}
-		if err := writeFrLE(&buf, e.OldValue); err != nil {
-			return nil, err
-		}
-		writeU64LE(&buf, uint64(e.IsOld0))
-		if err := writeFrLE(&buf, e.NewKey); err != nil {
-			return nil, err
-		}
-		if err := writeFrLE(&buf, e.NewValue); err != nil {
-			return nil, err
-		}
-		writeU64LE(&buf, uint64(e.Fnc0))
-		writeU64LE(&buf, uint64(e.Fnc1))
-		if len(e.Siblings) != nLevels {
-			return nil, fmt.Errorf("inconsistent sibling count: %d vs %d", len(e.Siblings), nLevels)
-		}
-		for _, sib := range e.Siblings {
-			if err := writeFrLE(&buf, sib); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return buf, nil
 }
 
 // buildArboInsertEntry creates an SMT insert proof using arbo SHA-256.

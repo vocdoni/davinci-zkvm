@@ -7,7 +7,6 @@
 //! |   1 | `FAIL_CURVE`            | groth16.rs     | Proof point not on curve                   |
 //! |   2 | `FAIL_PAIRING`          | groth16.rs     | Batch pairing check failed                 |
 //! |   3 | `FAIL_ECDSA`            | ecdsa.rs       | ECDSA signature or address binding failed  |
-//! |   9 | `FAIL_SMT_BATCH`        | smt.rs         | Legacy SMTBLK transition invalid           |
 //! |  10 | `FAIL_SMT_VOTEID`       | smt.rs         | VoteID insertion chain invalid             |
 //! |  11 | `FAIL_SMT_BALLOT`       | smt.rs         | Ballot insertion chain invalid             |
 //! |  12 | `FAIL_SMT_RESULTS`      | smt.rs         | ResultsAdd/Sub transition invalid          |
@@ -37,9 +36,6 @@ pub type FrRaw = [u64; 4];
 /// Magic bytes `"GROTH16B"` in little-endian ASCII — identifies the binary input format.
 pub const MAGIC: u64 = 0x423631484f545247u64;
 
-/// Magic bytes `"SMTBLK!!"` — identifies the optional SMT block appended after ECDSA data.
-pub const SMT_MAGIC: u64 = u64::from_le_bytes(*b"SMTBLK!!");
-
 /// BN254 scalar field modulus r as [u64; 4] little-endian.
 #[allow(dead_code)]
 pub const BN254_FR_MODULUS: FrRaw = [
@@ -60,7 +56,6 @@ pub const FAIL_PARSE:       u32 = 1 << 31;
 pub const FAIL_CURVE:       u32 = 1 << 1;
 pub const FAIL_PAIRING:     u32 = 1 << 2;
 pub const FAIL_ECDSA:       u32 = 1 << 3;
-pub const FAIL_SMT_BATCH:   u32 = 1 << 9;
 pub const FAIL_SMT_VOTEID:  u32 = 1 << 10;
 pub const FAIL_SMT_BALLOT:  u32 = 1 << 11;
 pub const FAIL_SMT_RESULTS: u32 = 1 << 12;

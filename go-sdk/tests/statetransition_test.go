@@ -236,9 +236,6 @@ func TestChainedSMT(t *testing.T) {
 	if outputs[1]&0x00000E00 != 0 { // bits 9-13 cover SMT failures
 		t.Errorf("fail_mask has SMT bits set: 0x%08x", outputs[1])
 	}
-	if outputs[42] != 2 {
-		t.Errorf("output[42] (legacy_smt_ok) = %d, want 2 (absent)", outputs[42])
-	}
 	if outputs[18] != uint32(votesPerBatch) {
 		t.Errorf("output[18] (voters_count) = %d, want %d", outputs[18], votesPerBatch)
 	}
