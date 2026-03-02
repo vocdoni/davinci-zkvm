@@ -18,6 +18,8 @@
 //! |  17 | `FAIL_REENC`            | babyjubjub.rs  | Re-encryption verification failed          |
 //! |  18 | `FAIL_KZG`              | kzg.rs         | KZG barycentric evaluation mismatch        |
 //! |  19 | `FAIL_MISSING_BLOCK`    | various        | Mandatory block absent from input          |
+//! |  20 | `FAIL_RESULT_ACCUM`     | results.rs     | Result accumulator ballot sum mismatch     |
+//! |  21 | `FAIL_LEAF_HASH`        | results.rs     | Ballot SMT leaf hash mismatch              |
 //! |  31 | `FAIL_PARSE`            | io.rs          | Binary format / parse error                |
 
 /// BN254 G1 affine point: (x[4], y[4]) in 256-bit little-endian limbs.
@@ -71,6 +73,10 @@ pub const FAIL_REENC:       u32 = 1 << 17;
 pub const FAIL_KZG:         u32 = 1 << 18;
 /// Bit 19 — A mandatory protocol block is missing from the input.
 pub const FAIL_MISSING_BLOCK: u32 = 1 << 19;
+/// Bit 20 — Result accumulator: homomorphic ballot sum does not match ResultsAdd/Sub.
+pub const FAIL_RESULT_ACCUM: u32 = 1 << 20;
+/// Bit 21 — Ballot leaf hash: SHA-256(serialized_ballot) ≠ SMT new_value.
+pub const FAIL_LEAF_HASH: u32 = 1 << 21;
 
 /// One Groth16 proof and its associated public inputs.
 #[derive(Clone)]
@@ -176,6 +182,11 @@ pub struct CensusProofEntry {
     pub siblings: Vec<FrRaw>,
 }
 
+/// A ballot is 8 ElGamal ciphertexts × 4 BN254 Fr coordinates = 32 field elements.
+/// Layout: [C1.x, C1.y, C2.x, C2.y] for each of the 8 ciphertexts, sequentially.
+/// This matches `elgamal.Ballot.BigInts()` in davinci-node.
+pub type BallotData = [FrRaw; 32];
+
 /// Full DAVINCI state-transition data, parsed from the STATETX binary block.
 /// Present when the prover includes a `state` field in the ProveRequest.
 pub struct StateBlock {
@@ -201,4 +212,16 @@ pub struct StateBlock {
     pub process_proofs: Vec<SmtTransition>,
     /// Shared n_levels for vote_id_chain and ballot_chain.
     pub n_levels: usize,
+
+    // ── Result accumulator ballot data ────────────────────────────────────────
+    /// Previous ResultsAdd leaf value (32 Fr elements). ZERO_FR ballot when absent.
+    pub old_results_add: BallotData,
+    /// Previous ResultsSub leaf value (32 Fr elements). ZERO_FR ballot when absent.
+    pub old_results_sub: BallotData,
+    /// Per-voter re-encrypted ballots (32 Fr elements each), in same order as ballot_chain.
+    /// Used for homomorphic sum verification: NewResultsAdd = OldResultsAdd + Σ(all ballots).
+    pub voter_ballots: Vec<BallotData>,
+    /// Per-overwrite old ballot data (32 Fr elements each). Only present for UPDATE entries.
+    /// Used for homomorphic sum: NewResultsSub = OldResultsSub + Σ(overwritten ballots).
+    pub overwritten_ballots: Vec<BallotData>,
 }

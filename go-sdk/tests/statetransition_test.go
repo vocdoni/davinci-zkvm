@@ -14,6 +14,7 @@ package tests
 // process read-proofs.
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -448,4 +449,408 @@ func outputsHex(outputs []uint32) []string {
 		result[i] = fmt.Sprintf("%08x", v)
 	}
 	return result
+}
+
+// ballotLeafHash computes SHA-256(serialize(ballot)) matching the circuit's
+// results.rs ballot_leaf_hash function. Each of the 32 Fr elements is serialized
+// as 32 bytes big-endian, for a total of 1024 bytes.
+// Returns the hash in arbo LE byte order (ready for arbo tree storage).
+func ballotLeafHash(ballot []string) ([]byte, error) {
+	if len(ballot) != 32 {
+		return nil, fmt.Errorf("ballot must have 32 elements, got %d", len(ballot))
+	}
+	var buf [1024]byte
+	for i, s := range ballot {
+		b, err := hexTo32BE(s)
+		if err != nil {
+			return nil, fmt.Errorf("ballot[%d]: %w", i, err)
+		}
+		copy(buf[i*32:(i+1)*32], b[:])
+	}
+	h := sha256.Sum256(buf[:])
+	// Convert to arbo LE byte order (swap endianness).
+	// The circuit converts SHA-256 output (BE) to FrRaw LE limbs.
+	// Arbo stores values as LE bytes, so we must swap before insertion.
+	hashBI := new(big.Int).SetBytes(h[:])
+	return arbo.BigIntToBytes(32, hashBI), nil
+}
+
+// hexTo32BE converts a 0x-prefixed big-endian hex string to exactly 32 bytes.
+func hexTo32BE(s string) ([32]byte, error) {
+	h := s
+	if len(h) > 2 && h[:2] == "0x" {
+		h = h[2:]
+	}
+	if len(h) < 64 {
+		h = fmt.Sprintf("%064s", h)
+	}
+	b, err := hex.DecodeString(h)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	var out [32]byte
+	copy(out[32-len(b):], b)
+	return out, nil
+}
+
+// ballotFieldAdd performs BN254 Fr element-wise addition of two 32-element ballots.
+// Each element is a 0x-prefixed big-endian hex string.
+func ballotFieldAdd(a, b []string) []string {
+	if len(a) != 32 || len(b) != 32 {
+		panic("ballotFieldAdd: both ballots must have 32 elements")
+	}
+	// BN254 Fr modulus
+	frMod, _ := new(big.Int).SetString("21888242871839275222246405745257275088548364400416034343698204186575808495617", 10)
+	result := make([]string, 32)
+	for i := 0; i < 32; i++ {
+		aBI := new(big.Int)
+		bBI := new(big.Int)
+		aBI.SetString(a[i][2:], 16)
+		bBI.SetString(b[i][2:], 16)
+		sum := new(big.Int).Add(aBI, bBI)
+		sum.Mod(sum, frMod)
+		result[i] = fmt.Sprintf("0x%064x", sum)
+	}
+	return result
+}
+
+// makeDeterministicBallot creates a ballot with 32 small deterministic Fr values
+// derived from a seed, for testing purposes.
+func makeDeterministicBallot(seed int) []string {
+	ballot := make([]string, 32)
+	for i := 0; i < 32; i++ {
+		v := uint64(seed*100 + i + 1)
+		ballot[i] = fmt.Sprintf("0x%064x", v)
+	}
+	return ballot
+}
+
+// zeroBallot returns a ballot with all 32 fields set to zero.
+func zeroBallot() []string {
+	ballot := make([]string, 32)
+	for i := range ballot {
+		ballot[i] = fmt.Sprintf("0x%064x", 0)
+	}
+	return ballot
+}
+
+// buildArboInsertWithHashValue inserts a key with the given raw 32-byte hash value
+// into the arbo tree and returns the SmtEntry for the insertion.
+func buildArboInsertWithHashValue(
+	tree *arbo.Tree, keyBI *big.Int, valueHash []byte, levels int,
+) (davinci.SmtEntry, error) {
+	bLen := arbo.HashFunctionSha256.Len()
+	newKeyBytes := arbo.BigIntToBytes(bLen, keyBI)
+
+	// GenProof BEFORE insertion
+	oldLeafKey, oldLeafValue, _, exists, err := tree.GenProof(newKeyBytes)
+	if err != nil {
+		return davinci.SmtEntry{}, fmt.Errorf("GenProof before: %w", err)
+	}
+	if exists {
+		return davinci.SmtEntry{}, fmt.Errorf("key %s already exists", keyBI)
+	}
+	isOld0 := len(oldLeafKey) == 0
+	if isOld0 {
+		oldLeafKey = make([]byte, bLen)
+		oldLeafValue = make([]byte, bLen)
+	}
+
+	oldRootBytes, _ := tree.Root()
+
+	if err := tree.Add(newKeyBytes, valueHash); err != nil {
+		return davinci.SmtEntry{}, fmt.Errorf("tree.Add: %w", err)
+	}
+
+	newRootBytes, _ := tree.Root()
+
+	_, _, packedSibs, existsAfter, err := tree.GenProof(newKeyBytes)
+	if err != nil {
+		return davinci.SmtEntry{}, fmt.Errorf("GenProof after: %w", err)
+	}
+	if !existsAfter {
+		return davinci.SmtEntry{}, fmt.Errorf("key not found after insertion")
+	}
+
+	sibs, err := arbo.UnpackSiblings(arbo.HashFunctionSha256, packedSibs)
+	if err != nil {
+		return davinci.SmtEntry{}, err
+	}
+	if !isOld0 && len(sibs) > 0 {
+		sibs = sibs[:len(sibs)-1]
+	}
+	zero := make([]byte, bLen)
+	for len(sibs) < levels {
+		sibs = append(sibs, zero)
+	}
+	sibs = sibs[:levels]
+
+	entry := davinci.SmtEntry{
+		OldRoot:  "0x" + hex.EncodeToString(pad32(oldRootBytes)),
+		NewRoot:  "0x" + hex.EncodeToString(pad32(newRootBytes)),
+		OldKey:   "0x" + hex.EncodeToString(pad32(oldLeafKey)),
+		OldValue: "0x" + hex.EncodeToString(pad32(oldLeafValue)),
+		NewKey:   "0x" + hex.EncodeToString(pad32(newKeyBytes)),
+		NewValue: "0x" + hex.EncodeToString(pad32(valueHash)),
+		Fnc0:     1,
+		Fnc1:     0,
+		Siblings: make([]string, levels),
+	}
+	if isOld0 {
+		entry.IsOld0 = 1
+	}
+	for i, s := range sibs {
+		entry.Siblings[i] = "0x" + hex.EncodeToString(pad32(s))
+	}
+	return entry, nil
+}
+
+// buildArboUpdateWithHashValue updates an existing key's value in the arbo tree
+// and returns the SmtEntry for the update.
+func buildArboUpdateWithHashValue(
+	tree *arbo.Tree, keyBI *big.Int, newValueHash []byte, levels int,
+) (davinci.SmtEntry, error) {
+	bLen := arbo.HashFunctionSha256.Len()
+	keyBytes := arbo.BigIntToBytes(bLen, keyBI)
+
+	// Get old value before update
+	_, oldValBytes, _, exists, err := tree.GenProof(keyBytes)
+	if err != nil {
+		return davinci.SmtEntry{}, err
+	}
+	if !exists {
+		return davinci.SmtEntry{}, fmt.Errorf("key %s not found for update", keyBI)
+	}
+	oldRootBytes, _ := tree.Root()
+
+	if err := tree.Update(keyBytes, newValueHash); err != nil {
+		return davinci.SmtEntry{}, fmt.Errorf("tree.Update: %w", err)
+	}
+	newRootBytes, _ := tree.Root()
+
+	_, _, packedSibs, _, err := tree.GenProof(keyBytes)
+	if err != nil {
+		return davinci.SmtEntry{}, err
+	}
+	sibs, err := arbo.UnpackSiblings(arbo.HashFunctionSha256, packedSibs)
+	if err != nil {
+		return davinci.SmtEntry{}, err
+	}
+	zero := make([]byte, bLen)
+	for len(sibs) < levels {
+		sibs = append(sibs, zero)
+	}
+	sibs = sibs[:levels]
+
+	entry := davinci.SmtEntry{
+		OldRoot:  "0x" + hex.EncodeToString(pad32(oldRootBytes)),
+		NewRoot:  "0x" + hex.EncodeToString(pad32(newRootBytes)),
+		OldKey:   "0x" + hex.EncodeToString(pad32(keyBytes)),
+		OldValue: "0x" + hex.EncodeToString(pad32(oldValBytes)),
+		NewKey:   "0x" + hex.EncodeToString(pad32(keyBytes)),
+		NewValue: "0x" + hex.EncodeToString(pad32(newValueHash)),
+		IsOld0:   0,
+		Fnc0:     0,
+		Fnc1:     1, // UPDATE
+		Siblings: make([]string, levels),
+	}
+	for i, s := range sibs {
+		entry.Siblings[i] = "0x" + hex.EncodeToString(pad32(s))
+	}
+	return entry, nil
+}
+
+// TestResultAccumulator verifies the circuit's result accumulator and ballot
+// leaf hash verification. It builds a full STATETX block with ballot data,
+// computes the expected cumulative ResultsAdd, and checks that the circuit
+// does NOT set FAIL_RESULT_ACCUM or FAIL_LEAF_HASH bits.
+//
+// Tree setup (mirrors how davinci-node initializes a voting process):
+//   1. Insert config entries (process keys)
+//   2. Insert initial ResultsAdd = SHA256(zeroBallot) with key 0x01
+//   3. Capture OldStateRoot
+//   4. Insert voteIDs (chain)
+//   5. Insert ballots with leaf hashes (chain)
+//   6. UPDATE ResultsAdd to SHA256(cumulative sum)
+//   7. Capture NewStateRoot
+func TestResultAccumulator(t *testing.T) {
+	dataDir := testDataDir()
+	inputBin := filepath.Join(dataDir, "aggregated_bn254", "zisk_full_verify_input.bin")
+	if _, err := os.Stat(inputBin); err != nil {
+		t.Skipf("input.bin not found: %v", err)
+	}
+	baseInput, err := os.ReadFile(inputBin)
+	if err != nil {
+		t.Fatalf("read input.bin: %v", err)
+	}
+
+	const nVotes = 3
+	const levels = 256
+
+	voteIDs, err := parseVoteIDsFromBinary(baseInput, nVotes)
+	if err != nil {
+		t.Fatalf("parseVoteIDsFromBinary: %v", err)
+	}
+	addrsLo16, err := parseAddrsLo16FromBinary(baseInput, nVotes)
+	if err != nil {
+		t.Fatalf("parseAddrsLo16FromBinary: %v", err)
+	}
+
+	// Deterministic ballot data for each voter
+	var voterBallots [][]string
+	for i := 0; i < nVotes; i++ {
+		voterBallots = append(voterBallots, makeDeterministicBallot(i+1))
+	}
+
+	// Cumulative ResultsAdd = Σ(all voter ballots)
+	resultsAddBallot := zeroBallot()
+	for _, vb := range voterBallots {
+		resultsAddBallot = ballotFieldAdd(resultsAddBallot, vb)
+	}
+
+	// Compute SHA-256 leaf hashes for ballot SMT entries
+	var voterLeafHashes [][]byte
+	for i, vb := range voterBallots {
+		h, err := ballotLeafHash(vb)
+		if err != nil {
+			t.Fatalf("ballotLeafHash[%d]: %v", i, err)
+		}
+		voterLeafHashes = append(voterLeafHashes, h)
+	}
+
+	oldResultsAddHash, err := ballotLeafHash(zeroBallot())
+	if err != nil {
+		t.Fatalf("ballotLeafHash(zeroAdd): %v", err)
+	}
+	newResultsAddHash, err := ballotLeafHash(resultsAddBallot)
+	if err != nil {
+		t.Fatalf("ballotLeafHash(newAdd): %v", err)
+	}
+
+	bLen := arbo.HashFunctionSha256.Len()
+
+	// Build the arbo tree with config + initial results entries (pre-seeded state).
+	db := memdb.New()
+	tree, err := arbo.NewTree(arbo.Config{
+		Database:     db,
+		MaxLevels:    levels,
+		HashFunction: arbo.HashFunctionSha256,
+	})
+	if err != nil {
+		t.Fatalf("arbo.NewTree: %v", err)
+	}
+
+	// Insert config entries: processID(0), ballotMode(2), encKey(3), censusOrigin(6).
+	configKeys := []uint64{0x00, 0x02, 0x03, 0x06}
+	configVals := []uint64{0xABCDEF, 0x01, 0x1234, 0x01}
+	for i, k := range configKeys {
+		keyBI := new(big.Int).SetUint64(k)
+		valBI := new(big.Int).SetUint64(configVals[i])
+		if err := tree.Add(
+			arbo.BigIntToBytes(bLen, keyBI),
+			arbo.BigIntToBytes(bLen, valBI),
+		); err != nil {
+			t.Fatalf("config insert[%d]: %v", i, err)
+		}
+	}
+
+	// Pre-seed ResultsAdd entry (key=0x01) with SHA256(zeroBallot).
+	// This matches how davinci-node initializes a voting process.
+	resultsAddKeyBI := new(big.Int).SetUint64(0x01)
+	if err := tree.Add(
+		arbo.BigIntToBytes(bLen, resultsAddKeyBI),
+		oldResultsAddHash,
+	); err != nil {
+		t.Fatalf("resultsAdd seed: %v", err)
+	}
+
+	// Capture OldStateRoot (config + initial results = starting state).
+	oldRootBytes, _ := tree.Root()
+	oldRootHex := "0x" + hex.EncodeToString(pad32(oldRootBytes))
+
+	// Process read-proofs (inclusion in OldStateRoot, no mutation).
+	processSmt, err := buildArboReadProofs(tree, configKeys, bLen, levels)
+	if err != nil {
+		t.Fatalf("buildArboReadProofs: %v", err)
+	}
+
+	// VoteID chain (INSERT)
+	var voteIDChain []davinci.SmtEntry
+	for i, vid := range voteIDs {
+		entry, err := buildArboInsertEntry(tree, new(big.Int).SetUint64(vid), new(big.Int).SetUint64(uint64(1000+i)), levels)
+		if err != nil {
+			t.Fatalf("voteID insert[%d]: %v", i, err)
+		}
+		voteIDChain = append(voteIDChain, entry)
+	}
+
+	// Ballot chain (INSERT, value = SHA256(ballot data))
+	var ballotChain []davinci.SmtEntry
+	for i := 0; i < nVotes; i++ {
+		ballotKey := uint64(0x10) + uint64(i)<<16 + addrsLo16[i]
+		entry, err := buildArboInsertWithHashValue(tree, new(big.Int).SetUint64(ballotKey), voterLeafHashes[i], levels)
+		if err != nil {
+			t.Fatalf("ballot insert[%d]: %v", i, err)
+		}
+		ballotChain = append(ballotChain, entry)
+	}
+
+	// ResultsAdd UPDATE: from SHA256(zeroBallot) to SHA256(cumulative sum)
+	resultsAddEntry, err := buildArboUpdateWithHashValue(tree, resultsAddKeyBI, newResultsAddHash, levels)
+	if err != nil {
+		t.Fatalf("resultsAdd update: %v", err)
+	}
+
+	newRootBytes, _ := tree.Root()
+	newRootHex := "0x" + hex.EncodeToString(pad32(newRootBytes))
+
+	t.Logf("old=%s  new=%s  voteIDs=%d  ballots=%d  resultsAdd=UPDATE",
+		oldRootHex[:10], newRootHex[:10], len(voteIDChain), len(ballotChain))
+
+	sd := &davinci.StateTransitionData{
+		VotersCount:      uint64(nVotes),
+		OverwrittenCount: 0,
+		ProcessID:        oldRootHex,
+		OldStateRoot:     oldRootHex,
+		NewStateRoot:     newRootHex,
+		VoteIDSmt:        voteIDChain,
+		BallotSmt:        ballotChain,
+		ResultsAddSmt:    &resultsAddEntry,
+		ProcessSmt:       processSmt,
+		BallotProofs: &davinci.BallotProofData{
+			OldResultsAdd:      zeroBallot(),
+			OldResultsSub:      zeroBallot(),
+			VoterBallots:       voterBallots,
+			OverwrittenBallots: [][]string{},
+		},
+	}
+
+	stateBlock, err := davinci.EncodeStateBlock(sd)
+	if err != nil {
+		t.Fatalf("EncodeStateBlock: %v", err)
+	}
+
+	combined := append(baseInput, stateBlock...)
+	t.Logf("combined: %d bytes (%d base + %d STATETX)", len(combined), len(baseInput), len(stateBlock))
+
+	outputs, err := runZiskEmu(combined)
+	if err != nil {
+		t.Fatalf("ziskemu: %v", err)
+	}
+	t.Logf("outputs: %v", outputsHex(outputs))
+
+	// Verify no state-transition or result accumulator failures.
+	// Census, re-encryption, and KZG blocks are absent (FAIL_MISSING_BLOCK expected),
+	// but the state-transition and result accumulator bits must be clean.
+	const failSMTBits = 0x00007E00  // bits 9-14: SMT + consistency
+	const failResultAccum = 1 << 20 // bit 20: FAIL_RESULT_ACCUM
+	const failLeafHash = 1 << 21    // bit 21: FAIL_LEAF_HASH
+	const resultBits = failSMTBits | failResultAccum | failLeafHash
+
+	if outputs[1]&resultBits != 0 {
+		t.Errorf("fail_mask has state/result bits set: 0x%08x (masked=0x%08x)", outputs[1], outputs[1]&resultBits)
+	}
+	if outputs[18] != nVotes {
+		t.Errorf("output[18] (voters_count) = %d, want %d", outputs[18], nVotes)
+	}
 }

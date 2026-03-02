@@ -110,6 +110,29 @@ type StateTransitionData struct {
 	// ProcessSmt holds exactly 4 read-proofs for config entries in OldStateRoot.
 	// Order: processID (0x0), ballotMode (0x2), encryptionKey (0x3), censusOrigin (0x6).
 	ProcessSmt []SmtEntry `json:"process_smt"`
+
+	// BallotProofs holds the result accumulator and leaf hash verification data.
+	// When non-nil, the circuit verifies:
+	//   - Each ballot SMT leaf = SHA-256(serialized_ballot)
+	//   - NewResultsAdd = OldResultsAdd + Σ(VoterBallots)
+	//   - NewResultsSub = OldResultsSub + Σ(OverwrittenBallots)
+	BallotProofs *BallotProofData `json:"ballot_proofs,omitempty"`
+}
+
+// BallotProofData holds the ballot data needed for result accumulator verification.
+// Each BallotData is 32 hex strings representing 32 BN254 Fr field elements
+// (8 ElGamal ciphertexts × 4 coordinates: C1.X, C1.Y, C2.X, C2.Y).
+type BallotProofData struct {
+	// OldResultsAdd is the previous ResultsAdd leaf value (32 Fr elements, big-endian hex).
+	OldResultsAdd []string `json:"old_results_add"`
+	// OldResultsSub is the previous ResultsSub leaf value (32 Fr elements, big-endian hex).
+	OldResultsSub []string `json:"old_results_sub"`
+	// VoterBallots contains the re-encrypted ballot for each voter (same order as BallotSmt).
+	// Each inner slice has exactly 32 big-endian hex strings.
+	VoterBallots [][]string `json:"voter_ballots"`
+	// OverwrittenBallots contains the old ballot data for each UPDATE entry.
+	// Each inner slice has exactly 32 big-endian hex strings.
+	OverwrittenBallots [][]string `json:"overwritten_ballots"`
 }
 
 // CensusProof is a lean-IMT Poseidon membership proof for a census voter.

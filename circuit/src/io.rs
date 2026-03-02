@@ -409,6 +409,38 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
         }
     }
 
+    // ── Result accumulator ballot data ──────────────────────────────────────
+    // has_ballot_data: 0 = absent (zeros), 1 = present
+    let has_ballot_data = read1!(0) != 0;
+    let zero_ballot: [FrRaw; 32] = [ZERO_FR; 32];
+    let (old_results_add, old_results_sub, voter_ballots, overwritten_ballots) = if has_ballot_data {
+        let mut old_ra = [ZERO_FR; 32];
+        for i in 0..32 { old_ra[i] = read_fr!(); }
+        let mut old_rs = [ZERO_FR; 32];
+        for i in 0..32 { old_rs[i] = read_fr!(); }
+
+        let n_vb = read1!(0) as usize;
+        if n_vb > 4096 { *fail_mask |= 1 << 31; }
+        let mut vb = Vec::with_capacity(n_vb);
+        for _ in 0..n_vb {
+            let mut b = [ZERO_FR; 32];
+            for i in 0..32 { b[i] = read_fr!(); }
+            vb.push(b);
+        }
+
+        let n_ob = read1!(0) as usize;
+        if n_ob > 4096 { *fail_mask |= 1 << 31; }
+        let mut ob = Vec::with_capacity(n_ob);
+        for _ in 0..n_ob {
+            let mut b = [ZERO_FR; 32];
+            for i in 0..32 { b[i] = read_fr!(); }
+            ob.push(b);
+        }
+        (old_ra, old_rs, vb, ob)
+    } else {
+        (zero_ballot, zero_ballot, Vec::new(), Vec::new())
+    };
+
     StateBlock {
         n_voters, n_overwritten,
         process_id, old_state_root, new_state_root,
@@ -416,5 +448,7 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
         results_add, results_sub,
         process_proofs,
         n_levels,
+        old_results_add, old_results_sub,
+        voter_ballots, overwritten_ballots,
     }
 }
