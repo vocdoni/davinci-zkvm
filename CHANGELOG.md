@@ -28,12 +28,34 @@ All notable changes to davinci-zkvm are documented here.
 - **New fail-mask constant** (`types.rs`). Added `FAIL_MISSING_BLOCK` (bit 19) to signal
   that a mandatory protocol block is absent from the circuit input.
 
+- **Result accumulator verification** (`results.rs`, new module). Implements the homomorphic
+  ballot tally check from the DAVINCI protocol:
+  - `NewResultsAdd = OldResultsAdd + Σ(all voter ballots)` (element-wise BN254 Fr addition)
+  - `NewResultsSub = OldResultsSub + Σ(overwritten ballots)` (for vote overwrites)
+  - Verifies ballot leaf hashes: `SHA-256(serialize(ballot)) == SMT new_value` for each
+    voter ballot, binding re-encrypted ballot data to the state tree
+  - New fail-mask bits: `FAIL_RESULT_ACCUM` (bit 20) and `FAIL_LEAF_HASH` (bit 21)
+  - Each ballot is 32 BN254 Fr field elements (8 ElGamal ciphertexts × 4 coordinates)
+
+- **Extended state block parsing** (`io.rs`, `types.rs`). Added `BallotData` type and
+  parsing for the optional ballot proof data section: `OldResultsAdd`, `OldResultsSub`,
+  per-voter ballot data, and overwritten ballot data.
+
+### Go SDK (`go-sdk/`)
+
+- **Ballot proof encoding** (`types.go`, `encode.go`). Added `BallotProofData` struct
+  and encoding support for the result accumulator binary section.
+
 ### Tests (`go-sdk/tests/`)
 
 - **Unit tests updated for mandatory blocks**. Component-specific tests (SMT, census,
   re-encryption, KZG) now verify their component's diagnostic output rather than
   `overall_ok`, since they intentionally omit other protocol blocks. Full end-to-end
   validation with all blocks is handled by integration tests.
+
+- **Result accumulator test** (`statetransition_test.go`, `TestResultAccumulator`). End-to-end
+  test that builds deterministic ballot data, computes SHA-256 leaf hashes, inserts into arbo
+  with proper LE byte ordering, and verifies the circuit accepts the result accumulation.
 
 ## Unreleased — Go SDK Strongly-Typed Integration API
 

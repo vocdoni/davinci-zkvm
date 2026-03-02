@@ -95,6 +95,68 @@ func EncodeStateBlock(sd *StateTransitionData) ([]byte, error) {
 		}
 	}
 
+	// Result accumulator ballot data
+	if sd.BallotProofs != nil {
+		bp := sd.BallotProofs
+		buf = appendU64(buf, 1) // has_ballot_data = true
+
+		// OldResultsAdd: 32 Fr elements
+		if len(bp.OldResultsAdd) != 32 {
+			return nil, fmt.Errorf("old_results_add must have 32 elements, got %d", len(bp.OldResultsAdd))
+		}
+		for i, s := range bp.OldResultsAdd {
+			fr, err := beHexToFrLE(s)
+			if err != nil {
+				return nil, fmt.Errorf("old_results_add[%d]: %w", i, err)
+			}
+			buf = appendFr(buf, fr)
+		}
+
+		// OldResultsSub: 32 Fr elements
+		if len(bp.OldResultsSub) != 32 {
+			return nil, fmt.Errorf("old_results_sub must have 32 elements, got %d", len(bp.OldResultsSub))
+		}
+		for i, s := range bp.OldResultsSub {
+			fr, err := beHexToFrLE(s)
+			if err != nil {
+				return nil, fmt.Errorf("old_results_sub[%d]: %w", i, err)
+			}
+			buf = appendFr(buf, fr)
+		}
+
+		// VoterBallots: n_vb, then 32 Fr per ballot
+		buf = appendU64(buf, uint64(len(bp.VoterBallots)))
+		for i, vb := range bp.VoterBallots {
+			if len(vb) != 32 {
+				return nil, fmt.Errorf("voter_ballots[%d] must have 32 elements, got %d", i, len(vb))
+			}
+			for j, s := range vb {
+				fr, err := beHexToFrLE(s)
+				if err != nil {
+					return nil, fmt.Errorf("voter_ballots[%d][%d]: %w", i, j, err)
+				}
+				buf = appendFr(buf, fr)
+			}
+		}
+
+		// OverwrittenBallots: n_ob, then 32 Fr per ballot
+		buf = appendU64(buf, uint64(len(bp.OverwrittenBallots)))
+		for i, ob := range bp.OverwrittenBallots {
+			if len(ob) != 32 {
+				return nil, fmt.Errorf("overwritten_ballots[%d] must have 32 elements, got %d", i, len(ob))
+			}
+			for j, s := range ob {
+				fr, err := beHexToFrLE(s)
+				if err != nil {
+					return nil, fmt.Errorf("overwritten_ballots[%d][%d]: %w", i, j, err)
+				}
+				buf = appendFr(buf, fr)
+			}
+		}
+	} else {
+		buf = appendU64(buf, 0) // has_ballot_data = false
+	}
+
 	return buf, nil
 }
 

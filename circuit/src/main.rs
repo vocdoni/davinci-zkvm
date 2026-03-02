@@ -13,6 +13,7 @@ mod hash;
 mod io;
 mod kzg;
 mod poseidon;
+mod results;
 mod smt;
 mod types;
 
@@ -151,6 +152,16 @@ fn main() {
         &mut fail_mask,
     );
 
+    // 4.4 Result accumulation and ballot leaf hashes:
+    //     - Each ballot SMT leaf hash = SHA-256(serialized_ballot_data)
+    //     - NewResultsAdd = OldResultsAdd + Σ(all re-encrypted voter ballots)
+    //     - NewResultsSub = OldResultsSub + Σ(overwritten ballots)
+    //     This ensures the election tally is correctly maintained across batches.
+    let results_ok = match &parsed.state {
+        Some(state) => results::verify_results(state, &mut fail_mask),
+        None => false, // already caught by FAIL_MISSING_BLOCK above
+    };
+
     // ═════════════════════════════════════════════════════════════════════════
     // PHASE 5: DATA AVAILABILITY
     //
@@ -182,6 +193,7 @@ fn main() {
         && consistency_ok
         && state_ok
         && reenc_ok
+        && results_ok
         && kzg_ok
         && (smt_ok == 1 || smt_ok == 2);
 
