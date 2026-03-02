@@ -4,6 +4,22 @@ All notable changes to davinci-zkvm are documented here.
 
 ## Unreleased — Security Audit & Cross-Block Binding
 
+### Go SDK
+
+- **High-level `ProveBatch` API** (`go-sdk/batch.go`). New per-voter `VoterBallot`
+  type groups proof, signature, census, and re-encryption data together instead of
+  requiring callers to maintain parallel arrays. `ProveBatch` is the primary
+  integration type for the davinci-node sequencer, with `Client.Prove(ctx, batch)`
+  handling the full submit → poll → download lifecycle.
+
+- **`PackAddressWeight` helper** for constructing census leaf values
+  `(address << 88) | weight`, matching the circuit's `extract_address_from_census_leaf`.
+
+- **`NewBallotProofData` constructor** accepting `[]*big.Int` slices, avoiding manual
+  hex conversion for result accumulator data.
+
+- **`NewPublicInput` variadic constructor** for ballot proof public signals.
+
 ### Bug Fixes
 
 - **Missing `has_ballot_data` flag in Rust encoder** (`input-gen/src/lib.rs`). The

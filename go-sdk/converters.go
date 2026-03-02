@@ -357,3 +357,37 @@ func NewStateTransitionData(
 		ResultsSubSmt:    resultsSubSmt,
 	}
 }
+
+// NewBallotProofData creates BallotProofData from native Go types.
+//
+// Each Fr element is a *big.Int in the BN254 scalar field. The slices
+// oldResultsAdd and oldResultsSub must each have exactly 32 elements.
+// Each inner slice of voterBallots and overwrittenBallots must also have
+// exactly 32 elements (8 ciphertexts × 4 coordinates).
+func NewBallotProofData(
+	oldResultsAdd []*big.Int,
+	oldResultsSub []*big.Int,
+	voterBallots [][]*big.Int,
+	overwrittenBallots [][]*big.Int,
+) *BallotProofData {
+	toHex := func(vals []*big.Int) []string {
+		out := make([]string, len(vals))
+		for i, v := range vals {
+			out[i] = bigIntToHex32BE(v)
+		}
+		return out
+	}
+	toHex2D := func(vals [][]*big.Int) [][]string {
+		out := make([][]string, len(vals))
+		for i, row := range vals {
+			out[i] = toHex(row)
+		}
+		return out
+	}
+	return &BallotProofData{
+		OldResultsAdd:      toHex(oldResultsAdd),
+		OldResultsSub:      toHex(oldResultsSub),
+		VoterBallots:       toHex2D(voterBallots),
+		OverwrittenBallots: toHex2D(overwrittenBallots),
+	}
+}
