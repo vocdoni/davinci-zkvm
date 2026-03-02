@@ -4,6 +4,7 @@ ziskos::entrypoint!(main);
 mod babyjubjub;
 mod bls_fr;
 mod bn254;
+mod bn254_fr;
 mod census;
 mod consistency;
 mod ecdsa;

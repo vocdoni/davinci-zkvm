@@ -2,7 +2,43 @@
 
 All notable changes to davinci-zkvm are documented here.
 
-## Unreleased — Security Audit & Protocol Hardening
+## Unreleased — BN254 Fr Precompile Optimization
+
+### Performance
+
+- **BN254 Fr field arithmetic via `arith256_mod` precompile** (`circuit/src/bn254_fr.rs`).
+  Created a new module that performs all BN254 Fr field operations (mul, add, sub, inv,
+  pow, exp5) using the ZisK `arith256_mod` hardware precompile (`syscall 0x802`).
+  Each precompile call computes `(a·b + c) mod p` in a single prover row, replacing
+  software Montgomery multiplication that required ~50 RISC-V instructions per operation.
+
+- **Poseidon hash migrated to precompile** (`circuit/src/poseidon.rs`).
+  Replaced all `ark_bn254::Fr` operations with `bn254_fr` precompile calls. The `mix()`
+  function uses fused multiply-add (`muladd`) to halve the number of precompile calls
+  compared to separate mul+add. For 128 voters, Poseidon performs ~80K field multiplications,
+  each now a single prover row instead of ~50 rows.
+
+- **BabyJubJub curve migrated to precompile** (`circuit/src/babyjubjub.rs`).
+  Replaced all `ark_bn254::Fr` operations with `bn254_fr` precompile calls. BabyJubJub
+  scalar multiplication performs ~1M field multiplications for 128 voters, all now
+  hardware-accelerated.
+
+- **Groth16 Fiat-Shamir challenge via precompile** (`circuit/src/groth16.rs`).
+  Replaced `ArkFr::from_random_bytes` with `bn254_fr::from_random_bytes_32`, eliminating
+  an unused `d1` SHA-256 computation (~72 prover rows saved per Groth16 challenge).
+
+- **Removed ark-ff, ark-ec, ark-bn254 dependencies** (`circuit/Cargo.toml`).
+  The circuit ELF shrank from 451KB to 365KB (19% reduction). The only remaining
+  dependency is `ziskos v0.15.0`.
+
+### Test Fixes
+
+- **TestChainedSMT updated for protocol hardening** (`go-sdk/tests/statetransition_test.go`).
+  The test now builds both VoteID and Ballot chains in a single arbo tree with proper
+  key namespaces, matching the protocol's chain-length validation requirements added
+  in the security audit.
+
+## Security Audit & Protocol Hardening
 
 ### Security Fixes
 

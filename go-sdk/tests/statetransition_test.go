@@ -128,10 +128,13 @@ func parseAddrsLo16FromBinary(data []byte, n int) ([]uint64, error) {
 	return addrs, nil
 }
 
-// TestChainedSMT verifies that chained voteID insertions are correctly
-// validated by the STATETX circuit using ziskemu.
-// Uses the real voteIDs from the Groth16 proof public inputs so the
-// consistency binding check also passes.
+// TestChainedSMT verifies that chained voteID + ballot insertions are
+// correctly validated by the STATETX circuit using ziskemu.
+// Uses all 5 proofs from the pre-generated data (votesPerBatch=5), builds
+// a single arbo tree with both VoteID and Ballot namespaces, and checks
+// that overall_ok=1 with the correct state root transition.
+// Unlike TestStateTxEmulator, this test omits process read-proofs to verify
+// that the circuit accepts batches without process config checks.
 func TestChainedSMT(t *testing.T) {
 	dataDir := testDataDir()
 	inputBin := filepath.Join(dataDir, "aggregated_bn254", "zisk_full_verify_input.bin")
@@ -144,14 +147,18 @@ func TestChainedSMT(t *testing.T) {
 		t.Fatalf("read input.bin: %v", err)
 	}
 
-	// Extract real voteIDs from the Groth16 proof public inputs (index 1).
+	// Extract real voteIDs and address lower-16-bits from the Groth16 proofs.
 	voteIDs, err := parseVoteIDsFromBinary(baseInput, votesPerBatch)
 	if err != nil {
 		t.Fatalf("parseVoteIDsFromBinary: %v", err)
 	}
-	t.Logf("voteIDs from proofs: %v", voteIDs)
+	addrsLo16, err := parseAddrsLo16FromBinary(baseInput, votesPerBatch)
+	if err != nil {
+		t.Fatalf("parseAddrsLo16FromBinary: %v", err)
+	}
+	t.Logf("voteIDs: %v  addrsLo16: %v", voteIDs, addrsLo16)
 
-	// Build arbo SHA-256 tree and insert the real voteIDs.
+	// Build a single arbo SHA-256 tree for both VoteID and Ballot namespaces.
 	db := memdb.New()
 	tree, err := arbo.NewTree(arbo.Config{
 		Database:     db,
@@ -165,35 +172,47 @@ func TestChainedSMT(t *testing.T) {
 	oldRootBytes, _ := tree.Root()
 	oldRootHex := "0x" + hex.EncodeToString(pad32(oldRootBytes))
 
-	// Insert voteID keys in sequence, collecting transitions.
-	var chain []davinci.SmtEntry
+	// Insert voteID keys (namespace >= 0x8000_0000_0000_0000).
+	var voteIDChain []davinci.SmtEntry
 	for i, vid := range voteIDs {
 		keyBI := new(big.Int).SetUint64(vid)
 		valBI := new(big.Int).SetUint64(uint64(100 + i))
 		entry, err := buildArboInsertEntry(tree, keyBI, valBI, stateTxLevels)
 		if err != nil {
-			t.Fatalf("buildArboInsertEntry[%d]: %v", i, err)
+			t.Fatalf("voteID insert[%d]: %v", i, err)
 		}
-		chain = append(chain, entry)
+		voteIDChain = append(voteIDChain, entry)
+	}
+
+	// Insert ballot keys (namespace [0x10, 0x7FFF_FFFF_FFFF_FFFF]).
+	// key = BallotMin + (censusIdx << 16) + (address & 0xFFFF)
+	ballotMin := uint64(0x10)
+	var ballotChain []davinci.SmtEntry
+	for i := 0; i < votesPerBatch; i++ {
+		ballotKey := ballotMin + uint64(i)<<16 + addrsLo16[i]
+		keyBI := new(big.Int).SetUint64(ballotKey)
+		valBI := new(big.Int).SetUint64(uint64(200 + i))
+		entry, err := buildArboInsertEntry(tree, keyBI, valBI, stateTxLevels)
+		if err != nil {
+			t.Fatalf("ballot insert[%d]: %v", i, err)
+		}
+		ballotChain = append(ballotChain, entry)
 	}
 
 	newRootBytes, _ := tree.Root()
 	newRootHex := "0x" + hex.EncodeToString(pad32(newRootBytes))
 
-	t.Logf("old_root=%s  new_root=%s  n=%d", oldRootHex[:10], newRootHex[:10], len(chain))
+	t.Logf("old_root=%s  new_root=%s  voteIDs=%d  ballots=%d",
+		oldRootHex[:10], newRootHex[:10], len(voteIDChain), len(ballotChain))
 
-	// Build STATETX block (VoteID chain only; other chains empty).
 	sd := &davinci.StateTransitionData{
 		VotersCount:      uint64(votesPerBatch),
 		OverwrittenCount: 0,
-		ProcessID:        "0x" + hex.EncodeToString(make([]byte, 32)), // zero process ID
+		ProcessID:        "0x" + hex.EncodeToString(make([]byte, 32)),
 		OldStateRoot:     oldRootHex,
 		NewStateRoot:     newRootHex,
-		VoteIDSmt:        chain,
-		BallotSmt:        nil,
-		ResultsAddSmt:    nil,
-		ResultsSubSmt:    nil,
-		ProcessSmt:       nil,
+		VoteIDSmt:        voteIDChain,
+		BallotSmt:        ballotChain,
 	}
 
 	stateBlock, err := davinci.EncodeStateBlock(sd)
@@ -204,26 +223,22 @@ func TestChainedSMT(t *testing.T) {
 	combined := append(baseInput, stateBlock...)
 	t.Logf("combined input: %d bytes (%d base + %d STATETX)", len(combined), len(baseInput), len(stateBlock))
 
-	// Run ziskemu and parse outputs.
 	outputs, err := runZiskEmu(combined)
 	if err != nil {
 		t.Fatalf("ziskemu: %v", err)
 	}
 	t.Logf("ziskemu outputs: %v", outputsHex(outputs))
 
-	// Assertions.
 	if outputs[0] != 1 {
-		t.Errorf("output[0] (overall_ok) = %d, want 1", outputs[0])
+		t.Errorf("output[0] (overall_ok) = %d, want 1; fail_mask=0x%08x", outputs[0], outputs[1])
 	}
 	if outputs[42] != 2 {
-		// 2 = legacy SMTBLK absent (not a failure); 1 = present+ok
 		t.Errorf("output[42] (legacy_smt_ok) = %d, want 2", outputs[42])
 	}
-	// Outputs 2-9: old root (8 × u32); 10-17: new root (8 × u32).
 	if outputs[18] != uint32(votesPerBatch) {
 		t.Errorf("output[18] (voters_count) = %d, want %d", outputs[18], votesPerBatch)
 	}
-	// Verify new root is non-zero when n_voters > 0.
+	// Verify new root is non-zero.
 	newRootNonZero := false
 	for i := 10; i <= 17; i++ {
 		if outputs[i] != 0 {
