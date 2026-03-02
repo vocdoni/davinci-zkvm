@@ -37,7 +37,6 @@ const (
 	failCurve       = uint32(1 << 1)  // proof point not on curve
 	failPairing     = uint32(1 << 2)  // batch pairing check failed
 	failECDSA       = uint32(1 << 3)  // ECDSA signature or address binding failed
-	failSMTBatch    = uint32(1 << 9)  // legacy SMTBLK transition invalid
 	failSMTVoteID   = uint32(1 << 10) // voteID insertion chain invalid
 	failSMTBallot   = uint32(1 << 11) // ballot insertion chain invalid
 	failSMTResults  = uint32(1 << 12) // resultsAdd/Sub transition invalid
@@ -48,8 +47,8 @@ const (
 	failReenc       = uint32(1 << 17) // re-encryption verification failed
 	failKZG         = uint32(1 << 18) // KZG barycentric evaluation mismatch
 
-	// failSMTAny covers any SMT-related failure (bits 9–13).
-	failSMTAny = failSMTBatch | failSMTVoteID | failSMTBallot | failSMTResults | failSMTProcess
+	// failSMTAny covers any SMT-related failure (bits 10–13).
+	failSMTAny = failSMTVoteID | failSMTBallot | failSMTResults | failSMTProcess
 )
 
 // cheatElectionInput holds a fully encoded, valid circuit input for 2 voters

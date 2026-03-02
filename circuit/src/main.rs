@@ -41,7 +41,7 @@ use ziskos::{read_input_slice, set_output};
 // Indices 40-45: diagnostic / auxiliary outputs
 //   [40] batch_ok    — Groth16 batch verification result
 //   [41] ecdsa_ok    — ECDSA signature batch result
-//   [42] smt_ok      — legacy SMTBLK batch (1=ok, 2=absent, 0=fail)
+//   [42] (reserved)
 //   [43] nproofs     — number of Groth16 proofs verified
 //   [44] n_public    — number of public inputs per proof
 //   [45] log_n       — log₂ of the aggregation tree depth
@@ -174,13 +174,6 @@ fn main() {
     let (kzg_ok, kzg_commitment) = kzg::verify_kzg(&parsed.kzg, &mut fail_mask);
 
     // ═════════════════════════════════════════════════════════════════════════
-    // LEGACY: simple SMT batch (SMTBLK). Retained for backward compatibility
-    // with test tooling. Does NOT affect overall_ok when absent (smt_ok == 2).
-    // Production deployments always use the full STATETX block (Phase 4).
-    // ═════════════════════════════════════════════════════════════════════════
-    let smt_ok = smt::verify_batch(&parsed, &mut fail_mask);
-
-    // ═════════════════════════════════════════════════════════════════════════
     // FINAL VERDICT
     //
     // Every phase must pass. The fail_mask provides granular diagnostics
@@ -194,8 +187,7 @@ fn main() {
         && state_ok
         && reenc_ok
         && results_ok
-        && kzg_ok
-        && (smt_ok == 1 || smt_ok == 2);
+        && kzg_ok;
 
     // Extract census root: all proofs use the same root (validated in census.rs).
     let census_root: FrRaw = parsed.census_proofs
@@ -225,7 +217,6 @@ fn main() {
     // ── Diagnostics ─────────────────────────────────────────────────────────
     set_output(40, batch_ok as u32);
     set_output(41, auth_ok as u32);
-    set_output(42, smt_ok);
     set_output(43, parsed.nproofs as u32);
     set_output(44, parsed.n_public as u32);
     set_output(45, parsed.log_n as u32);

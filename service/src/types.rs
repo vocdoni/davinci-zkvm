@@ -128,9 +128,6 @@ pub struct ProveRequest {
     pub public_inputs: Vec<Vec<String>>,
     /// ECDSA signatures — one per proof, in same order. Mandatory.
     pub sigs: Vec<EcdsaSig>,
-    /// Optional simple SMT proofs (legacy/testing). Use state for full protocol.
-    #[serde(default)]
-    pub smt: Vec<SmtEntryJson>,
     /// Full state-transition data for the DAVINCI protocol.
     #[serde(default)]
     pub state: Option<StateTransitionJson>,

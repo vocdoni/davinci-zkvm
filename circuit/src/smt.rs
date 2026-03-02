@@ -15,7 +15,7 @@
 use crate::hash::sha256_once;
 use crate::io::ParsedInput;
 use crate::types::{FrRaw, SmtTransition, ZERO_FR,
-    FAIL_SMT_BATCH, FAIL_SMT_VOTEID, FAIL_SMT_BALLOT, FAIL_SMT_RESULTS, FAIL_SMT_PROCESS};
+    FAIL_SMT_VOTEID, FAIL_SMT_BALLOT, FAIL_SMT_RESULTS, FAIL_SMT_PROCESS};
 
 // ─── Byte-order helpers ────────────────────────────────────────────────────
 
@@ -322,28 +322,6 @@ pub fn verify_transition(t: &SmtTransition) -> bool {
     // Final check: computed new root matches claimed new root.
     let computed_new_root = if enabled { top_r } else { t.old_root };
     computed_new_root == t.new_root
-}
-
-// ─── Batch verifier ─────────────────────────────────────────────────────────
-
-/// Verify all SMT transitions in the parsed input.
-///
-/// Returns:
-/// - `2` when no SMT block is present (backward-compatible)
-/// - `1` when all transitions are valid
-/// - `0` when any transition is invalid (also sets bit 9 in `fail_mask`)
-pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> u32 {
-    if parsed.smt.is_empty() {
-        return 2; // SMT block absent — not a failure
-    }
-    let mut all_ok = true;
-    for t in &parsed.smt {
-        if !verify_transition(t) {
-            *fail_mask |= FAIL_SMT_BATCH;
-            all_ok = false;
-        }
-    }
-    all_ok as u32
 }
 
 // ─── Chain verifier ──────────────────────────────────────────────────────────

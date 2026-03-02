@@ -40,7 +40,6 @@ const (
 	// Diagnostic outputs (not used as public inputs)
 	OutputBatchOk    = 40 // Groth16 batch verification result (1=ok)
 	OutputECDSAOk    = 41 // ECDSA signature batch result (1=ok)
-	OutputSMTOk      = 42 // legacy SMTBLK batch (1=ok, 2=absent, 0=fail)
 	OutputNProofs    = 43 // number of Groth16 proofs verified
 	OutputNPublic    = 44 // number of public inputs per Groth16 proof
 	OutputLogN       = 45 // log₂ of the aggregation tree depth
@@ -192,9 +191,6 @@ type ProveRequest struct {
 	PublicInputs [][]string `json:"public_inputs"`
 	// Sigs contains one ECDSA signature per proof (same order as Proofs). Mandatory.
 	Sigs []json.RawMessage `json:"sigs"`
-	// Smt contains optional simple SMT state-transition proofs (legacy / testing).
-	// For the full DAVINCI protocol, use State instead.
-	Smt []SmtEntry `json:"smt,omitempty"`
 	// State contains the full state-transition data for the DAVINCI protocol.
 	// When non-nil, the circuit verifies chained SMT transitions and outputs
 	// the old/new state roots and vote counts (outputs 10-15).

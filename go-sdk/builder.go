@@ -28,7 +28,6 @@ type ProveRequestBuilder struct {
 	census       []CensusProof
 	reenc        *ReencryptionData
 	kzg          *KZGRequest
-	legacySmt    []SmtEntry
 }
 
 // NewProveRequestBuilder creates a new empty builder.
@@ -77,16 +76,8 @@ func (b *ProveRequestBuilder) AddEcdsaSignature(sig *EcdsaSignature) *ProveReque
 }
 
 // SetStateTransition sets the full DAVINCI state-transition data.
-// Mutually exclusive with SetLegacySmt.
 func (b *ProveRequestBuilder) SetStateTransition(state *StateTransitionData) *ProveRequestBuilder {
 	b.state = state
-	return b
-}
-
-// SetLegacySmt sets legacy SMT entries (for testing or simple use cases).
-// Mutually exclusive with SetStateTransition.
-func (b *ProveRequestBuilder) SetLegacySmt(entries []SmtEntry) *ProveRequestBuilder {
-	b.legacySmt = entries
 	return b
 }
 
@@ -124,9 +115,6 @@ func (b *ProveRequestBuilder) Build() (*ProveRequest, error) {
 	if len(b.sigs) != len(b.proofs) {
 		return nil, fmt.Errorf("signatures count (%d) must match proofs count (%d)",
 			len(b.sigs), len(b.proofs))
-	}
-	if b.state != nil && len(b.legacySmt) > 0 {
-		return nil, fmt.Errorf("state and legacy smt are mutually exclusive")
 	}
 
 	// Serialize VK (use raw if provided, otherwise marshal typed)
@@ -176,7 +164,6 @@ func (b *ProveRequestBuilder) Build() (*ProveRequest, error) {
 		Proofs:       proofsJSON,
 		PublicInputs: pubInputs,
 		Sigs:         sigsJSON,
-		Smt:          b.legacySmt,
 		State:        b.state,
 		CensusProofs: b.census,
 		Reencryption: b.reenc,

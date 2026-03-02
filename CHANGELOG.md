@@ -2,7 +2,24 @@
 
 All notable changes to davinci-zkvm are documented here.
 
-## Unreleased — Mandatory Protocol Blocks + Circuit Restructure
+## Unreleased — Remove Legacy SMT Batch + Mandatory Protocol Blocks
+
+### Breaking Changes
+
+- **Removed legacy SMT batch (SMTBLK)** — The simple SMT batch format that predated the full
+  DAVINCI state-transition protocol has been removed entirely. All SMT operations now go through
+  the `STATETX!` block format which enforces chained transitions, vote/ballot separation, result
+  accumulator verification, and process config proofs. API consumers must use the `State` field
+  (not the removed `Smt` field) in `ProveRequest`.
+
+  **Removed across the stack:**
+  - Circuit: `SMT_MAGIC`, `FAIL_SMT_BATCH` (bit 9), `verify_batch()`, output slot 42 (smt_ok)
+  - Go SDK: `OutputSMTOk`, `FailSMTBatch`, `ProveRequest.Smt`, `ProveRequestBuilder.SetLegacySmt()`
+  - Service: `ProveRequestJson.smt`, legacy block encoding path
+  - Input-gen: `SMT_MAGIC`, `write_smt_block()`
+  - Tests: `TestSMTEmulator`, `smt_service_test.go`, legacy encoding helpers
+
+## Mandatory Protocol Blocks + Circuit Restructure
 
 ### Circuit (`circuit/src/`)
 

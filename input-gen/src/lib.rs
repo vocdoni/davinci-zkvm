@@ -18,8 +18,6 @@ use std::path::{Path, PathBuf};
 
 // "GROTH16B" in little-endian ASCII — matches guest magic constant
 const MAGIC: u64 = 0x423631484f545247u64;
-// "SMTBLK!!" in little-endian ASCII — matches circuit SMT_MAGIC constant
-const SMT_MAGIC: u64 = u64::from_le_bytes(*b"SMTBLK!!");
 const STATE_MAGIC: u64 = u64::from_le_bytes(*b"STATETX!");
 
 /// One Arbo-compatible SMT state-transition entry for binary encoding.
@@ -43,39 +41,6 @@ pub struct SmtEntry {
     pub fnc1: bool,
     /// Merkle siblings root→leaf, padded to `n_levels` with zeros.
     pub siblings: Vec<[u64; 4]>,
-}
-
-/// Encode a slice of SMT transitions into the optional SMT binary block.
-///
-/// Returns an empty `Vec` if `entries` is empty (no block written).
-/// Returns an error if entries have inconsistent sibling counts.
-///
-/// The returned bytes should be appended to the output of `generate_input`.
-pub fn write_smt_block(entries: &[SmtEntry]) -> Result<Vec<u8>> {
-    if entries.is_empty() {
-        return Ok(Vec::new());
-    }
-    let n_levels = entries[0].siblings.len();
-    for (i, e) in entries.iter().enumerate() {
-        if e.siblings.len() != n_levels {
-            bail!("SMT entry {} has {} siblings, expected {}", i, e.siblings.len(), n_levels);
-        }
-    }
-    let n_transitions = entries.len();
-    // Header: magic(u64) + n_transitions(u64) + n_levels(u64) = 24 bytes
-    // Per transition: 4+4+4+4 FrRaw + 1+4+4+1+1 u64 scalars + n_levels FrRaw
-    //   = (4*4 + 1+1+1 + n_levels*4) × 8 bytes
-    let entry_bytes = (4 * 4 + 5 + n_levels * 4) * 8;
-    let mut buf = Vec::with_capacity(24 + n_transitions * entry_bytes);
-
-    buf.extend_from_slice(&SMT_MAGIC.to_le_bytes());
-    buf.extend_from_slice(&(n_transitions as u64).to_le_bytes());
-    buf.extend_from_slice(&(n_levels as u64).to_le_bytes());
-
-    for e in entries {
-        write_smt_entry_body(&mut buf, e);
-    }
-    Ok(buf)
 }
 
 /// Parse a 0x-prefixed 32-byte big-endian hex string into `[u64; 4]` (LE word order).
