@@ -148,7 +148,9 @@ func TestCensusProofEmulator(t *testing.T) {
 	}
 	t.Logf("Outputs: %v", outputsHex(outputs))
 
-	if outputs[0] != 1 {
-		t.Errorf("overall_ok=%d, want 1 (fail_mask=0x%08x)", outputs[0], outputs[1])
+	// This test provides Groth16 + ECDSA + CENSUSBLK but omits STATETX, re-encryption,
+	// and KZG blocks. overall_ok=0 is expected. We verify census-specific bits are clear.
+	if outputs[1]&0x00010000 != 0 { // bit 16 = FAIL_CENSUS
+		t.Errorf("FAIL_CENSUS bit set in fail_mask: 0x%08x", outputs[1])
 	}
 }

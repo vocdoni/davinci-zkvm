@@ -169,12 +169,11 @@ func runKZGEmulatorTest(t *testing.T, blob *types.Blob, name string) {
 	}
 	t.Logf("[%s] outputs: %v", name, outputsHex(outputs))
 
-	if outputs[davinci.OutputOverallOk] != 1 {
-		t.Errorf("[%s] overall_ok=%d want 1; fail_mask=0x%08x",
-			name, outputs[davinci.OutputOverallOk], outputs[davinci.OutputFailMask])
-	}
-	if outputs[davinci.OutputFailMask] != 0 {
-		t.Errorf("[%s] fail_mask=0x%08x want 0", name, outputs[davinci.OutputFailMask])
+	// This test provides Groth16 + ECDSA + KZGBLK but omits STATETX, census, and
+	// re-encryption blocks. overall_ok=0 is expected. We verify KZG-specific bits.
+	const failKZGBit = 1 << 18
+	if outputs[davinci.OutputFailMask]&failKZGBit != 0 {
+		t.Errorf("[%s] FAIL_KZG bit set: fail_mask=0x%08x", name, outputs[davinci.OutputFailMask])
 	}
 
 	// Verify BlobCommitmentLimbs (outputs[28..39]) match the commitment bytes.

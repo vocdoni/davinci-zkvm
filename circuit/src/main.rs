@@ -33,7 +33,6 @@ use ziskos::{read_input_slice, set_output};
 //   [20..27] CensusRoot        — 256-bit lean-IMT Poseidon census root (8 × u32, LE)
 //
 // Indices 28-39: BlobCommitmentLimbs (3 × 128-bit, 12 × u32)
-//   Populated from the KZG commitment when a KZGBLK block is present, zero otherwise.
 //   [28..31] BlobCommitment limb 0 (128 bits)
 //   [32..35] BlobCommitment limb 1 (128 bits)
 //   [36..39] BlobCommitment limb 2 (128 bits)
@@ -60,44 +59,131 @@ fn main() {
     let input = read_input_slice();
     let mut fail_mask: u32 = 0;
 
-    let parsed       = io::parse_input(&input, &mut fail_mask);
-    let batch_ok     = groth16::verify_batch(&parsed, &mut fail_mask);
-    let ecdsa_ok     = ecdsa::verify_batch(&parsed, &mut fail_mask);
-    let smt_ok       = smt::verify_batch(&parsed, &mut fail_mask);
+    // ═════════════════════════════════════════════════════════════════════════
+    // INPUT PARSING
+    //
+    // Decode the binary input blob into structured data. All subsequent phases
+    // operate on the parsed representation. Parse errors set FAIL_PARSE.
+    // ═════════════════════════════════════════════════════════════════════════
+    let parsed = io::parse_input(&input, &mut fail_mask);
 
-    // State-transition block verification (STATETX).
+    // ═════════════════════════════════════════════════════════════════════════
+    // PHASE 1: BALLOT PROOF VERIFICATION
+    //
+    // Verify the BN254 Groth16 ballot proofs using batch pairing. Each proof
+    // attests that a voter correctly encrypted their ballot under the election
+    // public key. The batch verification aggregates all proofs into a single
+    // multi-pairing check with random linear combination (Fiat-Shamir).
+    //
+    // This replaces the 3-circuit recursion chain (VoteVerifier → Aggregator →
+    // StateTransition) of the Gnark implementation: the zkVM directly verifies
+    // up to 128 BN254 ballot proofs in one pass.
+    // ═════════════════════════════════════════════════════════════════════════
+    let batch_ok = groth16::verify_batch(&parsed, &mut fail_mask);
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // PHASE 2: AUTHENTICATION
+    //
+    // Verify voter identity via cryptographic signatures. Each voter must prove
+    // they control the private key corresponding to their registered address.
+    // The signature covers the voteID, binding the voter's identity to their
+    // specific ballot.
+    //
+    // Currently supported: secp256k1 ECDSA (Ethereum-compatible).
+    // Extensible to: RSA, BLS, EdDSA, or other signature schemes. The
+    // authentication method will be determined by a process parameter
+    // (similar to how censusOrigin selects the eligibility check).
+    // ═════════════════════════════════════════════════════════════════════════
+    let auth_ok = ecdsa::verify_batch(&parsed, &mut fail_mask);
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // PHASE 3: ELIGIBILITY
+    //
+    // Verify each voter's right to participate in this election by checking
+    // their membership in the census. The verification method depends on the
+    // censusOrigin parameter stored in the process configuration.
+    //
+    // Currently supported: lean-IMT Poseidon Merkle tree proofs.
+    //   Each voter proves inclusion of (address, weight) in the census tree.
+    //   The circuit enforces: same root for all proofs, no duplicate leaves.
+    //
+    // Extensible to: CSP blind signatures (authority signs voter's key),
+    // ZK-credential proofs, or other census mechanisms. The census proof
+    // format and verification logic will be selected by censusOrigin.
+    // ═════════════════════════════════════════════════════════════════════════
+    let eligibility_ok = census::verify_batch(&parsed, &mut fail_mask);
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // PHASE 4: STATE TRANSITION
+    //
+    // Verify the Sparse Merkle Tree (SMT) state transition that records votes
+    // into the election state. This is the core of the DAVINCI protocol,
+    // ensuring that each vote is correctly inserted into the state tree and
+    // that the election results are properly accumulated.
+    //
+    // Sub-checks:
+    //   4.1 Consistency — namespace validation and proof-to-state binding
+    //   4.2 SMT chains  — VoteID insertions, ballot insertions/updates,
+    //                      ResultsAdd/Sub transitions, process config reads
+    //   4.3 Re-encryption — ElGamal ballot re-encryption correctness,
+    //                        ensuring votes are blinded before storage
+    // ═════════════════════════════════════════════════════════════════════════
+
+    // 4.1 Consistency: namespace validation and proof-to-state binding.
+    //     - VoteID keys fall in [0x8000000000000000, 0xFFFFFFFFFFFFFFFF]
+    //     - VoteID keys match the voteID from the ballot proofs
+    //     - Ballot keys fall in [0x10, 0x7FFFFFFFFFFFFFFF]
+    //     - Ballot keys encode the voter's address (lower 16 bits)
+    let consistency_ok = consistency::verify_consistency(&parsed, &mut fail_mask);
+
+    // 4.2 SMT chain verification: the full state-transition integrity check.
+    //     Returns the old/new state roots and vote counts.
     let (state_ok, old_root, new_root, voters, overwritten) =
         smt::verify_state(&parsed, &mut fail_mask);
 
-    // Consistency: voteID + ballot namespace and binding checks.
-    let consistency_ok = consistency::verify_consistency(&parsed, &mut fail_mask);
-
-    // Census lean-IMT Poseidon proof verification.
-    let census_ok = census::verify_batch(&parsed, &mut fail_mask);
-
-    // Re-encryption verification (BabyJubJub ElGamal).
+    // 4.3 Re-encryption: verify that each stored ballot is the original
+    //     ballot re-encrypted with a deterministic key derived from k_seed.
+    //     This ensures votes are blinded (unlinkable to the voter after storage)
+    //     while preserving the homomorphic structure for tallying.
     let reenc_ok = babyjubjub::verify_batch_from_parsed(
         &parsed.reenc_pub_key,
         &parsed.reenc_entries,
         &mut fail_mask,
     );
 
-    // KZG blob barycentric evaluation (KZGBLK!! magic). Absent = trivially pass.
+    // ═════════════════════════════════════════════════════════════════════════
+    // PHASE 5: DATA AVAILABILITY
+    //
+    // Verify the EIP-4844 KZG blob commitment. The blob contains the complete
+    // vote data (ballots, voteIDs, addresses, results) for on-chain data
+    // availability. The circuit verifies the barycentric evaluation Y = P(Z)
+    // where Z is derived from the process context (processID, rootHashBefore,
+    // commitment) to bind the blob to this specific state transition.
+    // ═════════════════════════════════════════════════════════════════════════
     let (kzg_ok, kzg_commitment) = kzg::verify_kzg(&parsed.kzg, &mut fail_mask);
 
-    // overall_ok: all mandatory verifications pass.
-    // smt_ok semantics: 1 = valid, 0 = invalid, 2 = absent (legacy SMTBLK not provided).
-    // The legacy SMTBLK and the full STATETX block are independent; absence of SMTBLK
-    // is normal when using STATETX. state_ok covers STATETX validity.
+    // ═════════════════════════════════════════════════════════════════════════
+    // LEGACY: simple SMT batch (SMTBLK). Retained for backward compatibility
+    // with test tooling. Does NOT affect overall_ok when absent (smt_ok == 2).
+    // Production deployments always use the full STATETX block (Phase 4).
+    // ═════════════════════════════════════════════════════════════════════════
+    let smt_ok = smt::verify_batch(&parsed, &mut fail_mask);
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // FINAL VERDICT
+    //
+    // Every phase must pass. The fail_mask provides granular diagnostics
+    // for debugging when overall_ok is false.
+    // ═════════════════════════════════════════════════════════════════════════
     let overall_ok = fail_mask == 0
         && batch_ok
-        && ecdsa_ok
-        && (smt_ok == 1 || smt_ok == 2)
-        && state_ok
+        && auth_ok
+        && eligibility_ok
         && consistency_ok
-        && census_ok
+        && state_ok
         && reenc_ok
-        && kzg_ok;
+        && kzg_ok
+        && (smt_ok == 1 || smt_ok == 2);
 
     // Extract census root: all proofs use the same root (validated in census.rs).
     let census_root: FrRaw = parsed.census_proofs
@@ -116,8 +202,7 @@ fn main() {
     set_output(19, overwritten as u32);// OverwrittenVotesCount
     set_fr_output(20, &census_root);   // CensusRoot
 
-    // BlobCommitmentLimbs: populated from KZG commitment when present, zero otherwise.
-    // Each 128-bit limb is stored as 4 × u32 LE (slots 28-31, 32-35, 36-39).
+    // BlobCommitmentLimbs: each 128-bit limb stored as 4 × u32 LE.
     let limb_u32s = kzg::commitment_to_limb_u32s(&kzg_commitment);
     for (l, limb) in limb_u32s.iter().enumerate() {
         for (w, &word) in limb.iter().enumerate() {
@@ -127,7 +212,7 @@ fn main() {
 
     // ── Diagnostics ─────────────────────────────────────────────────────────
     set_output(40, batch_ok as u32);
-    set_output(41, ecdsa_ok as u32);
+    set_output(41, auth_ok as u32);
     set_output(42, smt_ok);
     set_output(43, parsed.nproofs as u32);
     set_output(44, parsed.n_public as u32);

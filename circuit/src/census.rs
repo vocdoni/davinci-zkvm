@@ -47,7 +47,8 @@ pub fn verify_census_proof(root: &FrRaw, leaf: &FrRaw, index: u64, siblings: &[F
 /// 3. Each proof's Merkle path is valid against the declared root.
 pub fn verify_batch(parsed: &crate::io::ParsedInput, fail_mask: &mut u32) -> bool {
     if parsed.census_proofs.is_empty() {
-        return true;
+        *fail_mask |= crate::types::FAIL_MISSING_BLOCK;
+        return false;
     }
 
     // ── Invariant 1: all proofs must reference the same census root ───────────

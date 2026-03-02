@@ -17,6 +17,7 @@
 //! |  16 | `FAIL_CENSUS`           | census.rs      | Census membership proof failed             |
 //! |  17 | `FAIL_REENC`            | babyjubjub.rs  | Re-encryption verification failed          |
 //! |  18 | `FAIL_KZG`              | kzg.rs         | KZG barycentric evaluation mismatch        |
+//! |  19 | `FAIL_MISSING_BLOCK`    | various        | Mandatory block absent from input          |
 //! |  31 | `FAIL_PARSE`            | io.rs          | Binary format / parse error                |
 
 /// BN254 G1 affine point: (x[4], y[4]) in 256-bit little-endian limbs.
@@ -68,6 +69,8 @@ pub const FAIL_CENSUS:      u32 = 1 << 16;
 pub const FAIL_REENC:       u32 = 1 << 17;
 /// Bit 18 — KZG barycentric evaluation mismatch.
 pub const FAIL_KZG:         u32 = 1 << 18;
+/// Bit 19 — A mandatory protocol block is missing from the input.
+pub const FAIL_MISSING_BLOCK: u32 = 1 << 19;
 
 /// One Groth16 proof and its associated public inputs.
 #[derive(Clone)]

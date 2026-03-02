@@ -18,7 +18,7 @@
 //!
 //! All BN254 Fr field operations are backed by the ZisK `arith256_mod` precompile
 //! via the `bn254_fr` module.  Each scalar multiplication (256-bit double-and-add)
-//! does ~5,000 field operations, so the ~50× speedup from the precompile is
+//! does ~5,000 field operations, so the ~50x speedup from the precompile is
 //! significant for batches with many voters.
 
 use crate::bn254_fr::{self, BnFr};
@@ -197,7 +197,10 @@ pub fn verify_batch_from_parsed(
     fail_mask: &mut u32,
 ) -> bool {
     let (pub_key_x, pub_key_y) = match reenc_pub_key {
-        None => return true,  // absent = pass
+        None => {
+            *fail_mask |= crate::types::FAIL_MISSING_BLOCK;
+            return false;
+        }
         Some(pk) => pk,
     };
     for entry in reenc_entries {
