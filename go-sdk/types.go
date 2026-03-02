@@ -148,6 +148,47 @@ type CensusProof struct {
 	Siblings []string `json:"siblings"`
 }
 
+// CensusOrigin represents the census verification method for an election.
+type CensusOrigin uint64
+
+const (
+	// CensusOriginMerkle represents lean-IMT Poseidon Merkle tree census (origins 1-3).
+	CensusOriginMerkle CensusOrigin = 1
+	// CensusOriginCSP represents CSP ECDSA census (origin 4).
+	CensusOriginCSP CensusOrigin = 4
+)
+
+// IsCSP returns true if the census origin is a CSP (Credential Service Provider) type.
+func (co CensusOrigin) IsCSP() bool { return co == CensusOriginCSP }
+
+// IsMerkle returns true if the census origin uses Merkle tree proofs.
+func (co CensusOrigin) IsMerkle() bool { return co >= 1 && co <= 3 }
+
+// CspProof represents a CSP ECDSA attestation for a single voter.
+// The CSP signs: keccak256(EthPersonalSignPrefix || processID || address || weight || index).
+type CspProof struct {
+	// R is the ECDSA signature R component (32-byte big-endian hex).
+	R string `json:"r"`
+	// S is the ECDSA signature S component (32-byte big-endian hex).
+	S string `json:"s"`
+	// VoterAddress is the voter's Ethereum address (20-byte hex, 0x-prefixed).
+	VoterAddress string `json:"voter_address"`
+	// Weight is the voter's census weight (32-byte big-endian hex).
+	Weight string `json:"weight"`
+	// Index is the CSP-assigned auto-increment ballot index.
+	Index uint64 `json:"index"`
+}
+
+// CspData holds all CSP ECDSA census data for a batch of voters.
+type CspData struct {
+	// CspPubKeyX is the x-coordinate of the CSP's secp256k1 public key (32-byte BE hex).
+	CspPubKeyX string `json:"csp_pub_key_x"`
+	// CspPubKeyY is the y-coordinate of the CSP's secp256k1 public key (32-byte BE hex).
+	CspPubKeyY string `json:"csp_pub_key_y"`
+	// Proofs holds one CSP attestation per real voter.
+	Proofs []CspProof `json:"proofs"`
+}
+
 // BjjPoint is an ElGamal ciphertext point (x, y) on BabyJubJub in BN254 Fr.
 // Coordinates are 32-byte big-endian hex strings.
 type BjjPoint struct {
@@ -198,6 +239,9 @@ type ProveRequest struct {
 	// CensusProofs contains one lean-IMT Poseidon membership proof per voter.
 	// When non-empty, the circuit verifies each proof against the census root.
 	CensusProofs []CensusProof `json:"census_proofs,omitempty"`
+	// CspData contains CSP ECDSA census proofs (used when censusOrigin == 4).
+	// Mutually exclusive with CensusProofs (only one census type per request).
+	CspData *CspData `json:"csp_data,omitempty"`
 	// Reencryption contains the re-encryption verification data.
 	// When non-nil, the circuit verifies ElGamal re-encryption for each voter.
 	Reencryption *ReencryptionData `json:"reencryption,omitempty"`

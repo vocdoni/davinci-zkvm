@@ -20,6 +20,7 @@
 //! |  20 | `FAIL_RESULT_ACCUM`     | results.rs     | Result accumulator ballot sum mismatch     |
 //! |  21 | `FAIL_LEAF_HASH`        | results.rs     | Ballot SMT leaf hash mismatch              |
 //! |  22 | `FAIL_BINDING`          | main.rs        | Cross-block binding mismatch               |
+//! |  23 | `FAIL_CSP`              | csp.rs         | CSP ECDSA signature or address check failed|
 //! |  31 | `FAIL_PARSE`            | io.rs          | Binary format / parse error                |
 
 /// BN254 G1 affine point: (x[4], y[4]) in 256-bit little-endian limbs.
@@ -131,6 +132,15 @@ pub const REENC_MAGIC: u64 = u64::from_le_bytes(*b"REENCBLK");
 /// Magic bytes `"KZGBLK!!"` — identifies the optional KZG barycentric evaluation block.
 pub const KZG_MAGIC: u64 = u64::from_le_bytes(*b"KZGBLK!!");
 
+/// Magic bytes `"CSPBLK!!"` — identifies the CSP ECDSA census block.
+pub const CSP_MAGIC: u64 = u64::from_le_bytes(*b"CSPBLK!!");
+
+/// Census origin value for CSP ECDSA mode (process config key 0x06 == 4).
+pub const CENSUS_ORIGIN_CSP: u64 = 4;
+
+/// Bit 23 — CSP ECDSA signature or address verification failed.
+pub const FAIL_CSP: u32 = 1 << 23;
+
 /// KZG EIP-4844 blob barycentric evaluation block.
 ///
 /// Contains all data needed to verify Y = P(Z) where P is the polynomial interpolating
@@ -179,6 +189,32 @@ pub struct CensusProofEntry {
     pub index: u64,
     /// Merkle siblings (variable length; absent levels are omitted by lean-IMT).
     pub siblings: Vec<FrRaw>,
+}
+
+/// One CSP ECDSA proof entry: the CSP signed (processID, address, weight, index)
+/// for this voter, attesting their eligibility.
+#[derive(Clone)]
+pub struct CspEntry {
+    /// ECDSA signature R component (secp256k1 scalar, [u64;4] LE).
+    pub r: FrRaw,
+    /// ECDSA signature S component (secp256k1 scalar, [u64;4] LE).
+    pub s: FrRaw,
+    /// Voter's Ethereum address as uint160 in FrRaw LE limbs.
+    pub voter_address: FrRaw,
+    /// Voter's census weight (BN254 Fr, [u64;4] LE).
+    pub weight: FrRaw,
+    /// CSP-assigned auto-increment ballot index (determines ballot SMT key).
+    pub index: u64,
+}
+
+/// CSP census block: one CSP public key and per-voter ECDSA proofs.
+pub struct CspBlock {
+    /// CSP public key X coordinate (secp256k1 point, [u64;4] LE).
+    pub csp_pub_key_x: FrRaw,
+    /// CSP public key Y coordinate (secp256k1 point, [u64;4] LE).
+    pub csp_pub_key_y: FrRaw,
+    /// Per-voter CSP ECDSA proofs.
+    pub entries: Vec<CspEntry>,
 }
 
 /// A ballot is 8 ElGamal ciphertexts × 4 BN254 Fr coordinates = 32 field elements.

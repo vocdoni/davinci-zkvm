@@ -6,14 +6,17 @@
 package integration
 
 import (
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"math/big"
 
 	arbo "github.com/vocdoni/arbo"
 	"github.com/vocdoni/arbo/memdb"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/vocdoni/davinci-node/crypto/blobs"
 	bjjgnark "github.com/vocdoni/davinci-node/crypto/ecc/bjj_gnark"
 	"github.com/vocdoni/davinci-node/crypto/ecc"
@@ -69,6 +72,10 @@ type Election struct {
 	// VotedBallots maps voter CensusIdx → their last re-encrypted ballot stored in the
 	// state tree. Used to detect overwrites and to compute ResultsSub contributions.
 	VotedBallots map[int]*elgamal.Ballot
+	// CspKey is the CSP's secp256k1 private key (nil for Merkle census mode).
+	CspKey *ecdsa.PrivateKey
+	// CensusOrigin is the census type: 1 = lean-IMT, 4 = CSP ECDSA.
+	CensusOrigin int
 }
 
 // NewElection creates a new test election with nVoters registered voters.
@@ -187,6 +194,160 @@ func NewElection(nVoters int) (*Election, error) {
 		ResultsAdd:   elgamal.NewBallot(bjjgnark.New()),
 		ResultsSub:   elgamal.NewBallot(bjjgnark.New()),
 		VotedBallots: make(map[int]*elgamal.Ballot),
+		CensusOrigin: 1,
+	}, nil
+}
+
+// NewCSPElection creates a test election using CSP ECDSA census (censusOrigin=4).
+// Instead of a lean-IMT census tree, voters are authenticated by the CSP's signature.
+// The CSP's Ethereum address serves as the census root.
+func NewCSPElection(nVoters int) (*Election, error) {
+	var processID types.ProcessID
+	copy(processID[:], "DAVINCI_CSP_TEST")
+	processIDBI := new(big.Int).SetBytes(processID[:])
+
+	encKeyPoint, encPrivKey, err := elgamal.GenerateKey(bjjgnark.New())
+	if err != nil {
+		return nil, fmt.Errorf("elgamal.GenerateKey: %w", err)
+	}
+	encKey := encKeyPoint.(*bjjgnark.BJJ)
+	encKeyHashBI := encKeyLeafValue(encKey)
+
+	// Generate CSP secp256k1 key pair.
+	cspKey, err := ecdsa.GenerateKey(crypto.S256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("ecdsa.GenerateKey (CSP): %w", err)
+	}
+
+	// Process state tree setup (same as Merkle, but censusOrigin=4).
+	procDB := memdb.New()
+	procTree, err := arbo.NewTree(arbo.Config{
+		Database:     procDB,
+		MaxLevels:    procLevels,
+		HashFunction: arbo.HashFunctionSha256,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("arbo.NewTree: %w", err)
+	}
+
+	bLen := arbo.HashFunctionSha256.Len()
+	configValsBI := []*big.Int{
+		processIDBI,        // 0x00 = ProcessID
+		big.NewInt(0x01),   // 0x02 = BallotMode
+		encKeyHashBI,       // 0x03 = EncryptionKey hash
+		big.NewInt(0x04),   // 0x06 = CensusOrigin = CSP
+	}
+	for i, k := range configKeys {
+		if err := procTree.Add(
+			arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(k)),
+			arbo.BigIntToBytes(bLen, configValsBI[i]),
+		); err != nil {
+			return nil, fmt.Errorf("procTree.Add config[%d]: %w", i, err)
+		}
+	}
+
+	// ResultsAdd (0x04) and ResultsSub (0x05).
+	zeroBallot := elgamal.NewBallot(bjjgnark.New())
+	zeroLeafBI := ballotLeafHash(zeroBallot)
+	for _, k := range []uint64{keyResultsAdd, keyResultsSub} {
+		if err := procTree.Add(
+			arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(k)),
+			arbo.BigIntToBytes(bLen, zeroLeafBI),
+		); err != nil {
+			return nil, fmt.Errorf("procTree.Add results key 0x%02x: %w", k, err)
+		}
+	}
+
+	rootBytes, err := procTree.Root()
+	if err != nil {
+		return nil, fmt.Errorf("initial root: %w", err)
+	}
+	oldRoot := "0x" + hex.EncodeToString(pad32(rootBytes))
+
+	// Voters (same key generation as Merkle mode).
+	voters := make([]*Voter, nVoters)
+	for i := 0; i < nVoters; i++ {
+		seed := make([]byte, 32)
+		for j := range seed {
+			seed[j] = byte((i*7 + j*3 + 42) % 256)
+		}
+		signer, err := nodesig.NewSignerFromSeed(seed)
+		if err != nil {
+			return nil, fmt.Errorf("voter %d signer: %w", i, err)
+		}
+		addrBytes := signer.Address().Bytes()
+		voters[i] = &Voter{
+			Signer:        signer,
+			AddressBytes:  addrBytes,
+			AddressBigInt: new(big.Int).SetBytes(addrBytes),
+			CensusIdx:     i,
+			Weight:        big.NewInt(42),
+		}
+	}
+
+	return &Election{
+		ProcessID:    processID,
+		EncKey:       encKey,
+		EncPrivKey:   encPrivKey,
+		Voters:       voters,
+		ProcTree:     procTree,
+		OldRoot:      oldRoot,
+		configVals:   configValsBI,
+		ResultsAdd:   elgamal.NewBallot(bjjgnark.New()),
+		ResultsSub:   elgamal.NewBallot(bjjgnark.New()),
+		VotedBallots: make(map[int]*elgamal.Ballot),
+		CspKey:       cspKey,
+		CensusOrigin: 4,
+	}, nil
+}
+
+// BuildCspData builds the CSP ECDSA census block for a batch of voters.
+// Each voter's eligibility is signed by the CSP key using Ethereum personal-sign:
+//   message = "\x19Ethereum Signed Message:\n92" || processID(32BE) || address(20) || weight(32BE) || index(8BE)
+func (e *Election) BuildCspData(batchVoters []*Voter) (*davinci.CspData, error) {
+	if e.CspKey == nil {
+		return nil, fmt.Errorf("election is not in CSP mode (no CSP key)")
+	}
+
+	// ProcessID as 32-byte big-endian.
+	pidBI := new(big.Int).SetBytes(e.ProcessID[:])
+	pidBE := pad32(pidBI.Bytes())
+
+	proofs := make([]davinci.CspProof, len(batchVoters))
+	for i, v := range batchVoters {
+		// Build CSP payload: processID(32BE) || address(20) || weight(32BE) || index(8BE)
+		var payload [92]byte
+		copy(payload[:32], pidBE)
+		copy(payload[32:52], v.AddressBytes)
+		v.Weight.FillBytes(payload[52:84])
+		binary.BigEndian.PutUint64(payload[84:92], uint64(v.CensusIdx))
+
+		// Ethereum personal-sign envelope.
+		prefix := fmt.Sprintf("\x19Ethereum Signed Message:\n%d", len(payload))
+		envelope := append([]byte(prefix), payload[:]...)
+		hash := crypto.Keccak256(envelope)
+
+		sig, err := crypto.Sign(hash, e.CspKey)
+		if err != nil {
+			return nil, fmt.Errorf("CSP sign voter %d: %w", i, err)
+		}
+		// sig = [R(32) || S(32) || V(1)]
+		r := new(big.Int).SetBytes(sig[:32])
+		s := new(big.Int).SetBytes(sig[32:64])
+
+		proofs[i] = davinci.CspProof{
+			R:            fmt.Sprintf("0x%064x", r),
+			S:            fmt.Sprintf("0x%064x", s),
+			VoterAddress: fmt.Sprintf("0x%040x", new(big.Int).SetBytes(v.AddressBytes)),
+			Weight:       fmt.Sprintf("0x%064x", v.Weight),
+			Index:        uint64(v.CensusIdx),
+		}
+	}
+
+	return &davinci.CspData{
+		CspPubKeyX: fmt.Sprintf("0x%064x", e.CspKey.PublicKey.X),
+		CspPubKeyY: fmt.Sprintf("0x%064x", e.CspKey.PublicKey.Y),
+		Proofs:     proofs,
 	}, nil
 }
 
