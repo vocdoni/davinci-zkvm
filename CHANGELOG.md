@@ -2,6 +2,39 @@
 
 All notable changes to davinci-zkvm are documented here.
 
+## Unreleased — Mandatory Protocol Blocks + Circuit Restructure
+
+### Circuit (`circuit/src/`)
+
+- **Mandatory protocol blocks** (`kzg.rs`, `census.rs`, `babyjubjub.rs`, `consistency.rs`,
+  `smt.rs`). All verification blocks are now mandatory. Previously, absent blocks returned
+  `true` (pass), allowing a proof to succeed without data availability, eligibility, or
+  re-encryption verification. Now any missing block sets `FAIL_MISSING_BLOCK` (bit 19) in
+  the fail mask and returns `false`. This closes a protocol soundness gap where an attacker
+  could omit the KZG blob commitment, census proofs, or re-encryption data and still
+  produce a passing proof.
+
+- **Circuit restructured into 5 DAVINCI protocol phases** (`main.rs`). The circuit entry
+  point now follows the protocol specification with clear phase annotations:
+  1. **Ballot Proof Verification** — Groth16 BN254 batch pairing
+  2. **Authentication** — secp256k1 ECDSA (extensible to RSA, BLS, EdDSA)
+  3. **Eligibility** — lean-IMT Poseidon census proofs (extensible via censusOrigin)
+  4. **State Transition** — consistency + SMT chains + re-encryption
+  5. **Data Availability** — KZG blob commitment (mandatory)
+
+- **Compilation bug fixed** (`main.rs`). The `parsed` variable was used before being declared
+  (lines 63-65), making the circuit uncompilable. Fixed by reordering to parse input first.
+
+- **New fail-mask constant** (`types.rs`). Added `FAIL_MISSING_BLOCK` (bit 19) to signal
+  that a mandatory protocol block is absent from the circuit input.
+
+### Tests (`go-sdk/tests/`)
+
+- **Unit tests updated for mandatory blocks**. Component-specific tests (SMT, census,
+  re-encryption, KZG) now verify their component's diagnostic output rather than
+  `overall_ok`, since they intentionally omit other protocol blocks. Full end-to-end
+  validation with all blocks is handled by integration tests.
+
 ## Unreleased — Go SDK Strongly-Typed Integration API
 
 ### Go SDK (`go-sdk/`)

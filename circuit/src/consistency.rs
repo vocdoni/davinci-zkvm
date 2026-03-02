@@ -24,7 +24,10 @@ use crate::types::{FAIL_CONSISTENCY, FAIL_BALLOT_NS};
 
 pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     let state = match &parsed.state {
-        None => return true, // STATETX absent — no consistency checks to perform
+        None => {
+            *fail_mask |= crate::types::FAIL_MISSING_BLOCK;
+            return false;
+        }
         Some(s) => s,
     };
 

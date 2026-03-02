@@ -11,7 +11,7 @@
 //! **Evaluation point Z** is derived deterministically:
 //!   `Z = SHA-256(processID_be32 ‖ rootHashBefore_be32 ‖ commitment_48bytes) mod p_bls`
 //!
-//! Using SHA-256 (hardware-accelerated via ZisK precompile) instead of Poseidon
+//! Using SHA-256 (hardware-accelerated via ZisK precompile) 
 //! keeps proving cost low while domain-separating Z from the blob data.
 //!
 //! **Barycentric formula** (degree-4095 polynomial in evaluation form):
@@ -30,12 +30,10 @@
 //!   - ~383 arith256_mod calls for the single `inv` inside `batch_inverse`
 //!   - ~16000 field operations in the barycentric sum loop
 //!
-//! # Reference implementation
-//! `davinci-node/crypto/blobs/barycentric.go` → `EvaluateBarycentricNative`
 
 use crate::bls_fr::{self, BlsFrRaw, ONE, ZERO};
 use crate::hash::sha256_once;
-use crate::types::{FrRaw, KZGBlock, FAIL_KZG};
+use crate::types::{FrRaw, KZGBlock, FAIL_KZG, FAIL_MISSING_BLOCK};
 
 /// Number of cells in an EIP-4844 blob.
 const N: usize = 4096;
@@ -226,7 +224,10 @@ fn batch_inverse(v: &[BlsFrRaw; N]) -> [BlsFrRaw; N] {
 /// - `commitment` is the 48-byte KZG commitment (zero-padded when absent).
 pub fn verify_kzg(kzg: &Option<KZGBlock>, fail_mask: &mut u32) -> (bool, [u8; 48]) {
     let block = match kzg {
-        None => return (true, [0u8; 48]),
+        None => {
+            *fail_mask |= FAIL_MISSING_BLOCK;
+            return (false, [0u8; 48]);
+        }
         Some(b) => b,
     };
 

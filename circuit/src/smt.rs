@@ -412,7 +412,10 @@ pub fn verify_state(
     fail_mask: &mut u32,
 ) -> (bool, FrRaw, FrRaw, u64, u64) {
     let state = match &parsed.state {
-        None => return (true, ZERO_FR, ZERO_FR, 0, 0),
+        None => {
+            *fail_mask |= crate::types::FAIL_MISSING_BLOCK;
+            return (false, ZERO_FR, ZERO_FR, 0, 0);
+        }
         Some(s) => s,
     };
 
