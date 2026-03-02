@@ -99,6 +99,7 @@ pub async fn submit_prove(
                 results_add: st.results_add_smt.as_ref().map(|e| smt_entry_from_json(e)).transpose()?,
                 results_sub: st.results_sub_smt.as_ref().map(|e| smt_entry_from_json(e)).transpose()?,
                 process_proofs: smt_entries_from_json(&st.process_smt)?,
+                ballot_proof_data: None, // TODO: populate from request when ballot proof data is included
             };
             bytes.extend(write_state_block(&sd)?);
         }

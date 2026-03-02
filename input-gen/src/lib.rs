@@ -82,6 +82,25 @@ pub struct StateData {
     pub results_sub: Option<SmtEntry>,
     /// Exactly 4 read-proofs: processID(0x0), ballotMode(0x2), encKey(0x3), censusOrigin(0x6).
     pub process_proofs: Vec<SmtEntry>,
+    /// Optional ballot proof data for result accumulator verification.
+    /// When `None`, the encoder writes `has_ballot_data = 0`.
+    pub ballot_proof_data: Option<BallotProofData>,
+}
+
+/// Result accumulator ballot data for binary serialization.
+///
+/// Contains the old results, per-voter ballots, and overwritten ballots needed
+/// to verify the homomorphic tally: NewResultsAdd = OldResultsAdd + Σ(voter_ballots).
+#[derive(Debug, Clone)]
+pub struct BallotProofData {
+    /// Previous ResultsAdd leaf value (32 BN254 Fr elements).
+    pub old_results_add: Vec<[u64; 4]>,
+    /// Previous ResultsSub leaf value (32 BN254 Fr elements).
+    pub old_results_sub: Vec<[u64; 4]>,
+    /// Per-voter re-encrypted ballots (32 Fr elements each).
+    pub voter_ballots: Vec<Vec<[u64; 4]>>,
+    /// Per-overwrite old ballot data (32 Fr elements each).
+    pub overwritten_ballots: Vec<Vec<[u64; 4]>>,
 }
 
 /// Serialize a `StateData` into the STATETX binary block.
@@ -136,10 +155,43 @@ pub fn write_state_block(sd: &StateData) -> Result<Vec<u8>> {
         }
     }
 
+    // Ballot proof data (result accumulator): has_ballot_data flag + optional data.
+    // This must always be present so the circuit parser can distinguish the end
+    // of the STATETX block from the next block's magic.
+    if let Some(bp) = &sd.ballot_proof_data {
+        buf.extend_from_slice(&1u64.to_le_bytes()); // has_ballot_data = true
+
+        if bp.old_results_add.len() != 32 {
+            bail!("old_results_add must have 32 elements, got {}", bp.old_results_add.len());
+        }
+        for fr in &bp.old_results_add { write_u64_slice(&mut buf, fr); }
+
+        if bp.old_results_sub.len() != 32 {
+            bail!("old_results_sub must have 32 elements, got {}", bp.old_results_sub.len());
+        }
+        for fr in &bp.old_results_sub { write_u64_slice(&mut buf, fr); }
+
+        buf.extend_from_slice(&(bp.voter_ballots.len() as u64).to_le_bytes());
+        for (i, vb) in bp.voter_ballots.iter().enumerate() {
+            if vb.len() != 32 {
+                bail!("voter_ballots[{}] must have 32 elements, got {}", i, vb.len());
+            }
+            for fr in vb { write_u64_slice(&mut buf, fr); }
+        }
+
+        buf.extend_from_slice(&(bp.overwritten_ballots.len() as u64).to_le_bytes());
+        for (i, ob) in bp.overwritten_ballots.iter().enumerate() {
+            if ob.len() != 32 {
+                bail!("overwritten_ballots[{}] must have 32 elements, got {}", i, ob.len());
+            }
+            for fr in ob { write_u64_slice(&mut buf, fr); }
+        }
+    } else {
+        buf.extend_from_slice(&0u64.to_le_bytes()); // has_ballot_data = false
+    }
+
     Ok(buf)
 }
-
-/// Serialize a chain of SMT entries: u64 len + u64 n_levels + entries.
 fn write_smt_chain(buf: &mut Vec<u8>, entries: &[SmtEntry]) -> Result<()> {
     let n = entries.len() as u64;
     let n_levels = entries.first().map(|e| e.siblings.len()).unwrap_or(0);
