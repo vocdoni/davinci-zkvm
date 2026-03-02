@@ -13,47 +13,21 @@
 //! arkworks defaults.
 //!
 //! Producing the same hash outputs as the Go reference libraries requires the
-//! exact iden3 constants embedded here.  Injecting these constants into the
-//! arkworks framework would require custom `PoseidonConfig` construction with the
-//! same 81-entry `ark` table and 3×3 `mds` matrix, yielding no simplification
-//! while adding a dependency on `ark-crypto-primitives`.
+//! exact iden3 constants embedded here.
+//!
+//! # Hardware acceleration
+//!
+//! All BN254 Fr field operations (multiplication, addition, S-box) are backed by
+//! the ZisK `arith256_mod` precompile via the `bn254_fr` module.  Each field
+//! operation compiles to a single ArithMod prover row instead of ~50 Fibonacci SM
+//! rows for software Montgomery multiplication.  The `muladd` primitive also fuses
+//! multiply + add into a single precompile call (used by `mix` and sparse matrix).
 //!
 //! The custom implementation is verified by the end-to-end census proof tests,
 //! which check against the Go lean-imt-go output directly.
-//!
-//! # Future optimization
-//!
-//! The `exp5` function (x^5) and MDS matrix multiplications use `ark-bn254::Fr`
-//! for pure-software field arithmetic.  In principle, each BN254 Fr multiplication
-//! could be replaced with an `arith256_mod` precompile call (with the BN254 Fr
-//! modulus), similar to what `bls_fr.rs` does for BLS12-381.  This would reduce
-//! prover cost for Poseidon if census proof verification becomes a bottleneck.
-//! For now, the plain `ark-ff` path suffices given the small number of Poseidon
-//! calls per batch (≤ 128 voters × 1 call = 128 hash invocations).
 
-use ark_bn254::Fr;
-use ark_ff::{BigInteger256, Field, PrimeField};
+use crate::bn254_fr::{self, BnFr};
 use crate::types::FrRaw;
-
-// -- helpers ------------------------------------------------------------------
-
-/// Convert a `FrRaw` ([u64; 4] LE limbs, standard form) to an `ark_bn254::Fr`.
-#[inline]
-fn raw_to_fr(r: &FrRaw) -> Fr {
-    Fr::from_bigint(BigInteger256::new(*r)).unwrap_or(Fr::ZERO)
-}
-
-/// Convert an `ark_bn254::Fr` back to `FrRaw`.
-#[inline]
-fn fr_to_raw(v: Fr) -> FrRaw {
-    v.into_bigint().0
-}
-
-/// Decode a 4-limb LE constant literal into an `ark_bn254::Fr`.
-#[inline]
-fn c_to_fr(c: &[u64; 4]) -> Fr {
-    Fr::from_bigint(BigInteger256::new(*c)).unwrap_or(Fr::ZERO)
-}
 
 // -- round constants (t=3, BN254, go-iden3-crypto index 1) --------------------
 
@@ -447,27 +421,28 @@ const T: usize = 3;
 const N_ROUNDS_F: usize = 8;
 const N_ROUNDS_P: usize = 57;
 
-/// Compute `x^5 mod p` (Poseidon S-box).
+/// Compute `x^5 mod p` (Poseidon S-box) via precompile.
 #[inline]
-fn exp5(x: Fr) -> Fr {
-    let x2 = x * x;
-    let x4 = x2 * x2;
-    x4 * x
+fn exp5(x: &BnFr) -> BnFr {
+    bn254_fr::exp5(x)
 }
 
 /// Add-round-key: `state[i] += C[it + i]` for all `i`.
-fn ark(state: &mut [Fr; T], it: usize) {
+fn ark(state: &mut [BnFr; T], it: usize) {
     for i in 0..T {
-        state[i] += c_to_fr(&POSEIDON_C[it + i]);
+        state[i] = bn254_fr::add(&state[i], &POSEIDON_C[it + i]);
     }
 }
 
-/// Matrix multiply: `newState[i] = sum_j_j M[j][i] * state[j]`.
-fn mix(state: &mut [Fr; T], m: &[[[u64; 4]; T]; T]) {
-    let mut ns = [Fr::ZERO; T];
+/// Matrix multiply using fused multiply-add: `newState[i] = Σ_j M[j][i] · state[j]`.
+///
+/// Each `muladd` call computes `(constant · state_element + accumulator) mod p` in
+/// a single precompile row, halving the number of calls versus separate mul + add.
+fn mix(state: &mut [BnFr; T], m: &[[[u64; 4]; T]; T]) {
+    let mut ns = [bn254_fr::ZERO; T];
     for i in 0..T {
         for j in 0..T {
-            ns[i] += c_to_fr(&m[j][i]) * state[j];
+            ns[i] = bn254_fr::muladd(&m[j][i], &state[j], &ns[i]);
         }
     }
     *state = ns;
@@ -478,52 +453,52 @@ fn mix(state: &mut [Fr; T], m: &[[[u64; 4]; T]; T]) {
 /// Compatible with `go-iden3-crypto/poseidon.Hash([]*big.Int{a, b})`.
 /// `initState = 0`.
 pub fn poseidon2(a: &FrRaw, b: &FrRaw) -> FrRaw {
-    let mut state = [Fr::ZERO, raw_to_fr(a), raw_to_fr(b)];
+    let mut state: [BnFr; T] = [bn254_fr::ZERO, *a, *b];
 
     // Initial ARK at offset 0
     ark(&mut state, 0);
 
     // nRoundsF/2 - 1 = 3 full rounds
     for i in 0..(N_ROUNDS_F / 2 - 1) {
-        for j in 0..T { state[j] = exp5(state[j]); }
+        for j in 0..T { state[j] = exp5(&state[j]); }
         ark(&mut state, (i + 1) * T);
         mix(&mut state, &POSEIDON_M);
     }
 
     // One more full round + mix with P
-    for j in 0..T { state[j] = exp5(state[j]); }
+    for j in 0..T { state[j] = exp5(&state[j]); }
     ark(&mut state, (N_ROUNDS_F / 2) * T);
     mix(&mut state, &POSEIDON_P);
 
     // nRoundsP = 57 partial rounds (sparse matrix S)
     for i in 0..N_ROUNDS_P {
-        state[0] = exp5(state[0]);
-        state[0] += c_to_fr(&POSEIDON_C[(N_ROUNDS_F / 2 + 1) * T + i]);
+        state[0] = exp5(&state[0]);
+        state[0] = bn254_fr::add(&state[0], &POSEIDON_C[(N_ROUNDS_F / 2 + 1) * T + i]);
 
         // Sparse matrix multiply using S
         let base = (T * 2 - 1) * i;
-        let mut new0 = Fr::ZERO;
+        let mut new0 = bn254_fr::ZERO;
         for j in 0..T {
-            new0 += c_to_fr(&POSEIDON_S[base + j]) * state[j];
+            new0 = bn254_fr::muladd(&POSEIDON_S[base + j], &state[j], &new0);
         }
         for k in 1..T {
-            state[k] += c_to_fr(&POSEIDON_S[base + T + k - 1]) * state[0];
+            state[k] = bn254_fr::muladd(&POSEIDON_S[base + T + k - 1], &state[0], &state[k]);
         }
         state[0] = new0;
     }
 
     // nRoundsF/2 - 1 = 3 final full rounds
     for i in 0..(N_ROUNDS_F / 2 - 1) {
-        for j in 0..T { state[j] = exp5(state[j]); }
+        for j in 0..T { state[j] = exp5(&state[j]); }
         ark(&mut state, (N_ROUNDS_F / 2 + 1) * T + N_ROUNDS_P + i * T);
         mix(&mut state, &POSEIDON_M);
     }
 
     // Last full round (no ARK)
-    for j in 0..T { state[j] = exp5(state[j]); }
+    for j in 0..T { state[j] = exp5(&state[j]); }
     mix(&mut state, &POSEIDON_M);
 
-    fr_to_raw(state[0])
+    state[0]
 }
 
 // t=2 (1 input): nRoundsF=8, nRoundsP=56
@@ -791,60 +766,59 @@ static POSEIDON1_P: [[[u64; 4]; 2]; 2] = [
 /// Compatible with `go-iden3-crypto/poseidon.Hash([]*big.Int{a})`.
 /// `initState = 0`.
 pub fn poseidon1(a: &FrRaw) -> FrRaw {
-    let mut state = [Fr::ZERO, raw_to_fr(a)];
+    let mut state: [BnFr; T2] = [bn254_fr::ZERO, *a];
 
     // Initial ARK at offset 0
-    state[0] += c_to_fr(&POSEIDON1_C[0]);
-    state[1] += c_to_fr(&POSEIDON1_C[1]);
+    state[0] = bn254_fr::add(&state[0], &POSEIDON1_C[0]);
+    state[1] = bn254_fr::add(&state[1], &POSEIDON1_C[1]);
+
+    // Helper: 2×2 matrix multiply using fused muladd.
+    #[inline(always)]
+    fn mix2(s: &mut [BnFr; 2], m: &[[[u64; 4]; 2]; 2]) {
+        let s0 = bn254_fr::muladd(&m[1][0], &s[1], &bn254_fr::mul(&m[0][0], &s[0]));
+        let s1 = bn254_fr::muladd(&m[1][1], &s[1], &bn254_fr::mul(&m[0][1], &s[0]));
+        s[0] = s0; s[1] = s1;
+    }
 
     // nRoundsF/2 - 1 = 3 full rounds
     for i in 0..(N_ROUNDS_F / 2 - 1) {
-        for j in 0..T2 { state[j] = exp5(state[j]); }
-        state[0] += c_to_fr(&POSEIDON1_C[(i + 1) * T2]);
-        state[1] += c_to_fr(&POSEIDON1_C[(i + 1) * T2 + 1]);
-        // mix with M (2x2) — transposed: newState[i] = sum_j M[j][i] * state[j]
-        let s0 = c_to_fr(&POSEIDON1_M[0][0]) * state[0] + c_to_fr(&POSEIDON1_M[1][0]) * state[1];
-        let s1 = c_to_fr(&POSEIDON1_M[0][1]) * state[0] + c_to_fr(&POSEIDON1_M[1][1]) * state[1];
-        state[0] = s0; state[1] = s1;
+        for j in 0..T2 { state[j] = exp5(&state[j]); }
+        state[0] = bn254_fr::add(&state[0], &POSEIDON1_C[(i + 1) * T2]);
+        state[1] = bn254_fr::add(&state[1], &POSEIDON1_C[(i + 1) * T2 + 1]);
+        mix2(&mut state, &POSEIDON1_M);
     }
 
-    // Transition: exp5all + ARK + mix with P (transposed)
-    for j in 0..T2 { state[j] = exp5(state[j]); }
-    state[0] += c_to_fr(&POSEIDON1_C[(N_ROUNDS_F / 2) * T2]);
-    state[1] += c_to_fr(&POSEIDON1_C[(N_ROUNDS_F / 2) * T2 + 1]);
-    let s0 = c_to_fr(&POSEIDON1_P[0][0]) * state[0] + c_to_fr(&POSEIDON1_P[1][0]) * state[1];
-    let s1 = c_to_fr(&POSEIDON1_P[0][1]) * state[0] + c_to_fr(&POSEIDON1_P[1][1]) * state[1];
-    state[0] = s0; state[1] = s1;
+    // Transition: exp5all + ARK + mix with P
+    for j in 0..T2 { state[j] = exp5(&state[j]); }
+    state[0] = bn254_fr::add(&state[0], &POSEIDON1_C[(N_ROUNDS_F / 2) * T2]);
+    state[1] = bn254_fr::add(&state[1], &POSEIDON1_C[(N_ROUNDS_F / 2) * T2 + 1]);
+    mix2(&mut state, &POSEIDON1_P);
 
     // nRoundsP = 56 partial rounds (sparse S)
     for i in 0..N_ROUNDS_P2 {
-        state[0] = exp5(state[0]);
-        state[0] += c_to_fr(&POSEIDON1_C[(N_ROUNDS_F / 2 + 1) * T2 + i]);
+        state[0] = exp5(&state[0]);
+        state[0] = bn254_fr::add(&state[0], &POSEIDON1_C[(N_ROUNDS_F / 2 + 1) * T2 + i]);
 
-        // Sparse matrix: new_s0 = S[3i]*s0 + S[3i+1]*s1; s1 = s1 + s0*S[3i+2]
+        // Sparse: new0 = S[3i]*s0 + S[3i+1]*s1; s1 += s0*S[3i+2]
         let base = (T2 * 2 - 1) * i;
-        let new0 = c_to_fr(&POSEIDON1_S[base]) * state[0]
-                 + c_to_fr(&POSEIDON1_S[base + 1]) * state[1];
-        state[1] += c_to_fr(&POSEIDON1_S[base + 2]) * state[0];
+        let new0 = bn254_fr::muladd(&POSEIDON1_S[base + 1], &state[1],
+                                     &bn254_fr::mul(&POSEIDON1_S[base], &state[0]));
+        state[1] = bn254_fr::muladd(&POSEIDON1_S[base + 2], &state[0], &state[1]);
         state[0] = new0;
     }
 
     // nRoundsF/2 - 1 = 3 final full rounds
     for i in 0..(N_ROUNDS_F / 2 - 1) {
-        for j in 0..T2 { state[j] = exp5(state[j]); }
+        for j in 0..T2 { state[j] = exp5(&state[j]); }
         let off = (N_ROUNDS_F / 2 + 1) * T2 + N_ROUNDS_P2 + i * T2;
-        state[0] += c_to_fr(&POSEIDON1_C[off]);
-        state[1] += c_to_fr(&POSEIDON1_C[off + 1]);
-        let s0 = c_to_fr(&POSEIDON1_M[0][0]) * state[0] + c_to_fr(&POSEIDON1_M[1][0]) * state[1];
-        let s1 = c_to_fr(&POSEIDON1_M[0][1]) * state[0] + c_to_fr(&POSEIDON1_M[1][1]) * state[1];
-        state[0] = s0; state[1] = s1;
+        state[0] = bn254_fr::add(&state[0], &POSEIDON1_C[off]);
+        state[1] = bn254_fr::add(&state[1], &POSEIDON1_C[off + 1]);
+        mix2(&mut state, &POSEIDON1_M);
     }
 
     // Last full round (no ARK)
-    for j in 0..T2 { state[j] = exp5(state[j]); }
-    let s0 = c_to_fr(&POSEIDON1_M[0][0]) * state[0] + c_to_fr(&POSEIDON1_M[1][0]) * state[1];
-    let s1 = c_to_fr(&POSEIDON1_M[0][1]) * state[0] + c_to_fr(&POSEIDON1_M[1][1]) * state[1];
-    state[0] = s0; state[1] = s1;
+    for j in 0..T2 { state[j] = exp5(&state[j]); }
+    mix2(&mut state, &POSEIDON1_M);
 
-    fr_to_raw(state[0])
+    state[0]
 }

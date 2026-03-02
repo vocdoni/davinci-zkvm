@@ -14,11 +14,10 @@
 //! pre-computed by the host and validated implicitly by the pairing equation.
 
 use crate::bn254::{fr_eq, g1_is_valid, g2_is_valid, gt_eq, gt_one};
+use crate::bn254_fr;
 use crate::hash::sha256_once;
 use crate::io::ParsedInput;
 use crate::types::*;
-use ark_bn254::Fr as ArkFr;
-use ark_ff::{Field as ArkField, PrimeField};
 use ziskos::zisklib::{is_on_curve_bn254, is_on_curve_twist_bn254, pairing_batch_bn254};
 
 /// Derive a non-zero BN254 scalar field challenge from a 32-byte digest.
@@ -35,20 +34,11 @@ fn challenge_fr(digest: &[u8; 32]) -> Option<FrRaw> {
         buf0[40] = 0;
         let d0 = sha256_once(&buf0);
 
-        let mut buf1 = [0u8; 41];
-        buf1[..32].copy_from_slice(digest);
-        buf1[32..40].copy_from_slice(&counter.to_be_bytes());
-        buf1[40] = 1;
-        let d1 = sha256_once(&buf1);
-
-        let mut wide = [0u8; 64];
-        wide[..32].copy_from_slice(&d0);
-        wide[32..].copy_from_slice(&d1);
-
-        if let Some(v) = ArkFr::from_random_bytes(&wide) {
-            if v.inverse().is_some() {
-                return Some(v.into_bigint().0);
-            }
+        // BN254 Fr has 254-bit modulus — only 32 bytes needed for Fiat-Shamir.
+        // (The host also computes d1 for historical arkworks compatibility, but
+        // Fr::from_random_bytes only consumes the first 32 bytes.)
+        if let Some(v) = bn254_fr::from_random_bytes_32(&d0) {
+            return Some(v);
         }
         counter = counter.wrapping_add(1);
     }
