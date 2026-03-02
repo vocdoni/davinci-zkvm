@@ -66,6 +66,8 @@ type cheatElectionInput struct {
 	reencBlock []byte
 	// kzgBlock is the encoded KZGBLK block bytes.
 	kzgBlock []byte
+	// oldRoot is the state root BEFORE the state transition (for KZG Z derivation).
+	oldRoot string
 }
 
 // fullInput concatenates all blocks into a single binary.
@@ -197,6 +199,7 @@ func buildCheatInput(t *testing.T) (*cheatElectionInput, *Election, []*BallotRes
 		censusBlock: censusBlockBytes,
 		reencBlock:  reencBlockBytes,
 		kzgBlock:    kzgBlockBytes,
+		oldRoot:     oldRoot,
 	}, election, batch.Results
 }
 
@@ -344,10 +347,10 @@ func TestCheatWrongKZG(t *testing.T) {
 	}
 	comm48 := [48]byte(commitment)
 
-	// Use the election's correct processID (BE hex) and root (LE→BE hex)
-	// so only FAIL_KZG is triggered (not FAIL_BINDING from mismatched IDs).
+	// Use the election's correct processID (BE hex) and the OLD root (before
+	// state transition) so only FAIL_KZG is triggered (not FAIL_BINDING).
 	pidBE, _ := hex.DecodeString(trimHex(election.ProcessIDHex()))
-	rootBE, _ := hex.DecodeString(trimHex(arboHexToBEHex(election.OldRoot)))
+	rootBE, _ := hex.DecodeString(trimHex(arboHexToBEHex(base.oldRoot)))
 
 	wrongKZG, err := davinci.EncodeKZGBlock(&davinci.KZGEvalData{
 		ProcessID:      pidBE,
@@ -502,10 +505,12 @@ func TestCheatValidKZGRoundTrip(t *testing.T) {
 			}
 			comm48 := [48]byte(commitment)
 
-			// Use the election's actual processID (BE) and root (arbo LE→BE)
-			// so the circuit's cross-block binding check passes.
+			// Use the election's actual processID (BE) and the OLD root
+			// (before state transition) so the circuit's cross-block binding
+			// check passes. election.OldRoot was advanced by BuildStateBlock,
+			// so we use base.oldRoot which was saved before the transition.
 			pidHex := election.ProcessIDHex()
-			rootBEHex := arboHexToBEHex(election.OldRoot)
+			rootBEHex := arboHexToBEHex(base.oldRoot)
 
 			z := deriveKZGZ(pidHex, rootBEHex, comm48)
 

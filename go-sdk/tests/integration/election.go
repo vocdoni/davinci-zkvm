@@ -65,10 +65,11 @@ type Election struct {
 	OldRoot string
 	// configVals are the process config BigInt values inserted at setup.
 	configVals []*big.Int
-	// ResultsAdd is the accumulated homomorphic sum of all re-encrypted ballots.
-	ResultsAdd *elgamal.Ballot
-	// ResultsSub is the accumulated homomorphic sum of overwritten (replaced) ballots.
-	ResultsSub *elgamal.Ballot
+	// ResultsAdd is the Fr-wise accumulated sum of all re-encrypted ballot coordinates.
+	// Uses coordinate-wise Fr addition to match the circuit's ballot_add().
+	ResultsAdd frAccumBallot
+	// ResultsSub is the Fr-wise accumulated sum of overwritten ballot coordinates.
+	ResultsSub frAccumBallot
 	// VotedBallots maps voter CensusIdx → their last re-encrypted ballot stored in the
 	// state tree. Used to detect overwrites and to compute ResultsSub contributions.
 	VotedBallots map[int]*elgamal.Ballot
@@ -131,8 +132,8 @@ func NewElection(nVoters int) (*Election, error) {
 	}
 
 	// ── ResultsAdd (0x04) and ResultsSub (0x05) ──────────────────────────────
-	zeroBallot := elgamal.NewBallot(bjjgnark.New())
-	zeroLeafBI := ballotLeafHash(zeroBallot)
+	zeroAccum := newZeroFrAccum()
+	zeroLeafBI := frAccumLeafHash(zeroAccum)
 	for _, k := range []uint64{keyResultsAdd, keyResultsSub} {
 		if err := procTree.Add(
 			arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(k)),
@@ -191,8 +192,8 @@ func NewElection(nVoters int) (*Election, error) {
 		censusLeaves: leaves,
 		OldRoot:      oldRoot,
 		configVals:   configValsBI,
-		ResultsAdd:   elgamal.NewBallot(bjjgnark.New()),
-		ResultsSub:   elgamal.NewBallot(bjjgnark.New()),
+		ResultsAdd:   newZeroFrAccum(),
+		ResultsSub:   newZeroFrAccum(),
 		VotedBallots: make(map[int]*elgamal.Ballot),
 		CensusOrigin: 1,
 	}, nil
@@ -202,8 +203,21 @@ func NewElection(nVoters int) (*Election, error) {
 // Instead of a lean-IMT census tree, voters are authenticated by the CSP's signature.
 // The CSP's Ethereum address serves as the census root.
 func NewCSPElection(nVoters int) (*Election, error) {
+	// Build a valid ProcessID: addr(20) + version(4) + nonce(7).
+	// Use the same structure as NewElection but with a distinct identifier.
 	var processID types.ProcessID
-	copy(processID[:], "DAVINCI_CSP_TEST")
+	copy(processID[:], "DAVINCI_CSP_INTEGR_T") // 20 bytes for addr
+	processID[20] = 0x01                        // version bytes (must be non-zero)
+	processID[21] = 0x00
+	processID[22] = 0x00
+	processID[23] = 0x04                        // censusOrigin hint
+	processID[24] = 0x00                        // nonce
+	processID[25] = 0x00
+	processID[26] = 0x00
+	processID[27] = 0x00
+	processID[28] = 0x00
+	processID[29] = 0x00
+	processID[30] = 0x01
 	processIDBI := new(big.Int).SetBytes(processID[:])
 
 	encKeyPoint, encPrivKey, err := elgamal.GenerateKey(bjjgnark.New())
@@ -247,8 +261,8 @@ func NewCSPElection(nVoters int) (*Election, error) {
 	}
 
 	// ResultsAdd (0x04) and ResultsSub (0x05).
-	zeroBallot := elgamal.NewBallot(bjjgnark.New())
-	zeroLeafBI := ballotLeafHash(zeroBallot)
+	zeroAccum := newZeroFrAccum()
+	zeroLeafBI := frAccumLeafHash(zeroAccum)
 	for _, k := range []uint64{keyResultsAdd, keyResultsSub} {
 		if err := procTree.Add(
 			arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(k)),
@@ -293,8 +307,8 @@ func NewCSPElection(nVoters int) (*Election, error) {
 		ProcTree:     procTree,
 		OldRoot:      oldRoot,
 		configVals:   configValsBI,
-		ResultsAdd:   elgamal.NewBallot(bjjgnark.New()),
-		ResultsSub:   elgamal.NewBallot(bjjgnark.New()),
+		ResultsAdd:   newZeroFrAccum(),
+		ResultsSub:   newZeroFrAccum(),
 		VotedBallots: make(map[int]*elgamal.Ballot),
 		CspKey:       cspKey,
 		CensusOrigin: 4,
@@ -451,12 +465,16 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 	}
 
 	// ── ResultsAdd: accumulate re-encrypted ballots and update key 0x04 ──────
-	batchSum := elgamal.NewBallot(bjjgnark.New())
+	// Snapshot old accumulators for BallotProofData before mutation.
+	oldResultsAdd := e.ResultsAdd
+	oldResultsSub := e.ResultsSub
+
+	// Accumulate using coordinate-wise Fr addition (matches circuit's ballot_add).
+	newResultsAdd := e.ResultsAdd
 	for _, rb := range reencBallots {
-		batchSum = batchSum.Add(batchSum, rb)
+		newResultsAdd = frAccumAdd(newResultsAdd, frAccumFromBallot(rb))
 	}
-	newResultsAdd := elgamal.NewBallot(bjjgnark.New()).Add(e.ResultsAdd, batchSum)
-	newResultsAddLeaf := ballotLeafHash(newResultsAdd)
+	newResultsAddLeaf := frAccumLeafHash(newResultsAdd)
 
 	resultsAddEntry, err := buildArboUpdateEntry(
 		e.ProcTree,
@@ -472,12 +490,11 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 	// ── ResultsSub: when any voter overwrote a ballot, update key 0x05 ───────
 	var resultsSubEntry *davinci.SmtEntry
 	if len(overwrittenBallots) > 0 {
-		overwrittenSum := elgamal.NewBallot(bjjgnark.New())
+		newResultsSub := e.ResultsSub
 		for _, ob := range overwrittenBallots {
-			overwrittenSum = overwrittenSum.Add(overwrittenSum, ob)
+			newResultsSub = frAccumAdd(newResultsSub, frAccumFromBallot(ob))
 		}
-		newResultsSub := elgamal.NewBallot(bjjgnark.New()).Add(e.ResultsSub, overwrittenSum)
-		newResultsSubLeaf := ballotLeafHash(newResultsSub)
+		newResultsSubLeaf := frAccumLeafHash(newResultsSub)
 
 		entry, err := buildArboUpdateEntry(
 			e.ProcTree,
@@ -502,6 +519,22 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 	oldRoot := e.OldRoot
 	e.OldRoot = newRoot
 
+	// Build BallotProofData for the result accumulator verification.
+	voterBallotStrs := make([][]string, n)
+	for i, rb := range reencBallots {
+		voterBallotStrs[i] = ballotToFrStrings(rb)
+	}
+	overwrittenBallotStrs := make([][]string, len(overwrittenBallots))
+	for i, ob := range overwrittenBallots {
+		overwrittenBallotStrs[i] = ballotToFrStrings(ob)
+	}
+	ballotProofs := &davinci.BallotProofData{
+		OldResultsAdd:      frAccumToStrings(oldResultsAdd),
+		OldResultsSub:      frAccumToStrings(oldResultsSub),
+		VoterBallots:       voterBallotStrs,
+		OverwrittenBallots: overwrittenBallotStrs,
+	}
+
 	return &davinci.StateTransitionData{
 		VotersCount:      uint64(n),
 		OverwrittenCount: uint64(len(overwrittenBallots)),
@@ -513,6 +546,7 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 		ResultsAddSmt:    &resultsAddEntry,
 		ResultsSubSmt:    resultsSubEntry,
 		ProcessSmt:       processSmtProofs,
+		BallotProofs:     ballotProofs,
 	}, overwrittenBallots, nil
 }
 
@@ -822,4 +856,28 @@ func encKeyLeafValue(encKey *bjjgnark.BJJ) *big.Int {
 	// SHA-256 → BigInt (stored as arbo LE bytes in the tree).
 	digest := sha256.Sum256(buf[:])
 	return new(big.Int).SetBytes(digest[:])
+}
+
+// ballotToFrStrings converts an ElGamal ballot (8 ciphertexts × 4 coordinates)
+// to 32 big-endian hex strings suitable for BallotProofData.
+// The order is: for each ciphertext i: C1.X, C1.Y, C2.X, C2.Y (TE coordinates).
+func ballotToFrStrings(b *elgamal.Ballot) []string {
+	out := make([]string, 32)
+	for i := 0; i < 8; i++ {
+		if b.Ciphertexts[i] == nil {
+			// Zero ciphertext: identity point (0, 1) in TE
+			out[i*4] = bigIntToFr32(big.NewInt(0))
+			out[i*4+1] = bigIntToFr32(big.NewInt(1))
+			out[i*4+2] = bigIntToFr32(big.NewInt(0))
+			out[i*4+3] = bigIntToFr32(big.NewInt(1))
+			continue
+		}
+		c1x, c1y := bjjPointToFr32Hex(b.Ciphertexts[i].C1)
+		c2x, c2y := bjjPointToFr32Hex(b.Ciphertexts[i].C2)
+		out[i*4] = c1x
+		out[i*4+1] = c1y
+		out[i*4+2] = c2x
+		out[i*4+3] = c2y
+	}
+	return out
 }

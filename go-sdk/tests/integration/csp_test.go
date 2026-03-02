@@ -15,11 +15,11 @@ import (
 )
 
 // TestCSPChainedStateTransitions runs 4 state transitions using CSP census mode.
-// Batch 1-3: fresh voters. Batch 4: overwrites voters from batch 1.
+// Batches 1-3: fresh voters (2 each). Batch 4: overwrites voters from batch 1.
 func TestCSPChainedStateTransitions(t *testing.T) {
 	cspBatches := []batchSpec{
 		{2, -1, 0},  // batch 1: 2 fresh voters
-		{3, -1, 0},  // batch 2: 3 fresh voters
+		{2, -1, 0},  // batch 2: 2 fresh voters
 		{2, -1, 0},  // batch 3: 2 fresh voters
 		{2, 0, 7},   // batch 4: overwrite voters 0,1 from batch 1
 	}
