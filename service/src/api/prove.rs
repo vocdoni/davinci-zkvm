@@ -1,10 +1,11 @@
 //! POST /prove — submit a batch of Groth16 proofs for ZisK proving
 
 use crate::api::AppState;
-use crate::types::{ProveRequest, ProveResponse, SmtEntryJson};
+use crate::types::{ProveRequest, SmtEntryJson};
+use anyhow::{bail, Context};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use davinci_zkvm_input_gen::{census_proof_from_hex, generate_input, write_census_block, write_reenc_block, write_smt_block, write_state_block, BjjCiphertextData, ReencEntryData, SmtEntry, StateData};
-use tracing::{error, info};
+use davinci_zkvm_input_gen::{census_proof_from_hex, generate_input, write_census_block, write_kzg_block, write_reenc_block, write_smt_block, write_state_block, be_hex32_to_fr_le, BjjCiphertextData, KzgData, ReencEntryData, SmtEntry, StateData};
+use tracing::{debug, error, info, warn};
 
 pub async fn submit_prove(
     State(state): State<AppState>,
@@ -22,6 +23,61 @@ pub async fn submit_prove(
         ).into_response();
     }
 
+    // ── Log request summary ────────────────────────────────────────────────
+    info!("Received prove request: {} ballot proof(s)", num_proofs);
+
+    if let Some(st) = &req.state {
+        info!(
+            process_id = %st.process_id,
+            old_root   = %st.old_state_root,
+            new_root   = %st.new_state_root,
+            voters     = st.voters_count,
+            overwrites = st.overwritten_count,
+            vote_id_smt_entries = st.vote_id_smt.len(),
+            ballot_smt_entries  = st.ballot_smt.len(),
+            process_smt_entries = st.process_smt.len(),
+            has_results_add     = st.results_add_smt.is_some(),
+            has_results_sub     = st.results_sub_smt.is_some(),
+            "State-transition block"
+        );
+    } else if !req.smt.is_empty() {
+        let old = req.smt.first().map(|e| e.old_root.as_str()).unwrap_or("?");
+        let new = req.smt.last().map(|e| e.new_root.as_str()).unwrap_or("?");
+        info!(entries = req.smt.len(), old_root = %old, new_root = %new, "Legacy SMT block");
+    } else {
+        warn!("No state/SMT block in request");
+    }
+
+    if !req.census_proofs.is_empty() {
+        let root = req.census_proofs.first().map(|p| p.root.as_str()).unwrap_or("?");
+        debug!(count = req.census_proofs.len(), census_root = %root, "Census proofs");
+    }
+
+    if let Some(r) = &req.reencryption {
+        debug!(
+            entries     = r.entries.len(),
+            enc_key_x   = %r.encryption_key_x,
+            "Re-encryption block"
+        );
+    }
+
+    if let Some(k) = &req.kzg {
+        debug!(
+            process_id       = %k.process_id,
+            root_hash_before = %k.root_hash_before,
+            commitment       = %k.commitment,
+            y_claimed        = %k.y_claimed,
+            blob_bytes       = k.blob.len() / 2,   // hex len / 2
+            "KZG barycentric-evaluation block"
+        );
+    }
+
+    debug!(
+        sigs          = req.sigs.len(),
+        queue_len     = state.prover.queue_len(),
+        "Request accepted; generating ZisK input"
+    );
+
     // Generate ZisK binary input (CPU-bound — runs in blocking thread pool)
     let vk = req.vk.clone();
     let proofs = req.proofs.clone();
@@ -31,6 +87,7 @@ pub async fn submit_prove(
     let state_json = req.state.clone();
     let census_json = req.census_proofs.clone();
     let reenc_json = req.reencryption.clone();
+    let kzg_json = req.kzg.clone();
     let input_bytes = match tokio::task::spawn_blocking(move || {
         let mut bytes = generate_input(&vk, &proofs, &public_inputs, &sigs)?;
 
@@ -80,16 +137,61 @@ pub async fn submit_prove(
                         c2y: davinci_zkvm_input_gen::hex32_to_smt_fr(&ct.c2.y)?,
                     })
                 };
-                let original: [BjjCiphertextData; 8] = std::array::from_fn(|i| parse_ct(&e.original[i]).unwrap());
-                let reencrypted: [BjjCiphertextData; 8] = std::array::from_fn(|i| parse_ct(&e.reencrypted[i]).unwrap());
+                let mut original_arr = Vec::with_capacity(8);
+                for (j, ct) in e.original.iter().enumerate() {
+                    original_arr.push(parse_ct(ct).with_context(|| format!("reenc original[{}]", j))?);
+                }
+                let original: [BjjCiphertextData; 8] = original_arr.try_into()
+                    .map_err(|_| anyhow::anyhow!("expected 8 original ciphertexts"))?;
+                let mut reenc_arr = Vec::with_capacity(8);
+                for (j, ct) in e.reencrypted.iter().enumerate() {
+                    reenc_arr.push(parse_ct(ct).with_context(|| format!("reenc reencrypted[{}]", j))?);
+                }
+                let reencrypted: [BjjCiphertextData; 8] = reenc_arr.try_into()
+                    .map_err(|_| anyhow::anyhow!("expected 8 reencrypted ciphertexts"))?;
                 entries.push(ReencEntryData { k, original, reencrypted });
             }
             bytes.extend(write_reenc_block(pub_key_x, pub_key_y, &entries)?);
         }
 
+        // Append KZG blob barycentric evaluation block.
+        if let Some(k) = kzg_json {
+            let commitment_hex = k.commitment.trim_start_matches("0x");
+            let commitment_bytes = hex::decode(commitment_hex)
+                .with_context(|| "invalid commitment hex")?;
+            if commitment_bytes.len() != 48 {
+                bail!("commitment must be 48 bytes, got {}", commitment_bytes.len());
+            }
+            let y_claimed_hex = k.y_claimed.trim_start_matches("0x");
+            let y_claimed_bytes = hex::decode(y_claimed_hex)
+                .with_context(|| "invalid y_claimed hex")?;
+            if y_claimed_bytes.len() != 32 {
+                bail!("y_claimed must be 32 bytes, got {}", y_claimed_bytes.len());
+            }
+            let blob_hex = k.blob.trim_start_matches("0x");
+            let blob_bytes = hex::decode(blob_hex)
+                .with_context(|| "invalid blob hex")?;
+
+            let mut commitment = [0u8; 48];
+            commitment.copy_from_slice(&commitment_bytes);
+            let mut y_claimed = [0u8; 32];
+            y_claimed.copy_from_slice(&y_claimed_bytes);
+
+            bytes.extend(write_kzg_block(&KzgData {
+                process_id:       be_hex32_to_fr_le(&k.process_id)?,
+                root_hash_before: be_hex32_to_fr_le(&k.root_hash_before)?,
+                commitment,
+                y_claimed,
+                blob: blob_bytes,
+            })?);
+        }
+
         anyhow::Ok(bytes)
     }).await {
-        Ok(Ok(bytes)) => bytes,
+        Ok(Ok(bytes)) => {
+            debug!("Input generation succeeded: {} bytes", bytes.len());
+            bytes
+        }
         Ok(Err(e)) => {
             error!("Input generation failed: {}", e);
             return (
@@ -107,13 +209,13 @@ pub async fn submit_prove(
     let proof_output_dir = state.config.proof_output_dir.clone();
     match state.prover.submit(input_bytes, &proof_output_dir).await {
         Ok(job_id) => {
-            info!("Job {} queued ({} proofs)", job_id, num_proofs);
+            info!("Job {} queued: {} ballot proof(s), queue_position={}", job_id, num_proofs, state.prover.queue_len());
             (
                 StatusCode::ACCEPTED,
-                Json(serde_json::to_value(ProveResponse {
-                    job_id,
-                    status: crate::types::JobStatus::Queued,
-                }).unwrap()),
+                Json(serde_json::json!({
+                    "job_id": job_id,
+                    "status": "queued",
+                })),
             ).into_response()
         }
         Err(e) => {

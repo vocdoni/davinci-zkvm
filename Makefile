@@ -112,7 +112,16 @@ build-zisk-gpu:  ## Rebuild cargo-zisk with CUDA 12.8 GPU support (RTX 5000 / Bl
 
 # ── Proving ────────────────────────────────────────────────────────────────────
 
-prove: gen-input  ## Run full ZisK proof (set PROOF_DIR= and PROVING_KEY= as needed). Reports elapsed time.
+FULL_INPUT_BIN  := $(DATA_DIR)/aggregated_bn254/zisk_full_input.bin
+
+gen-full-input: gen-input  ## Generate the full combined ZisK input (all 8 protocol blocks including KZG).
+	@echo "=== Generating full combined input with all protocol blocks ==="
+	@cd go-sdk && \
+	FULL_INPUT_OUT="$(abspath $(FULL_INPUT_BIN))" \
+	go test ./tests/ -run TestFullE2E -v -timeout 120s
+	@echo "=== Full input: $(FULL_INPUT_BIN) ==="
+
+prove: gen-input  ## Run full ZisK proof on base Groth16 input (set PROOF_DIR= and PROVING_KEY= as needed). Reports elapsed time.
 	@if [ ! -d "$(PROVING_KEY)" ]; then \
 		echo "ERROR: Proving key not found at $(PROVING_KEY)"; \
 		echo "Run 'make setup' then 'make setup-trees' to install it."; \
@@ -138,6 +147,34 @@ prove: gen-input  ## Run full ZisK proof (set PROOF_DIR= and PROVING_KEY= as nee
 	end=$$(date +%s); \
 	echo ""; \
 	echo "=== ZisK prove finished at $$(date) ==="; \
+	echo "=== Total proving time: $$((end - start)) seconds ==="
+
+prove-full: gen-full-input  ## Run full ZisK proof on complete protocol input (all 8 blocks, including KZG). Reports elapsed time.
+	@if [ ! -d "$(PROVING_KEY)" ]; then \
+		echo "ERROR: Proving key not found at $(PROVING_KEY)"; \
+		echo "Run 'make setup' then 'make setup-trees' to install it."; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(PROVING_KEY)/zisk/Zisk/airs/ArithEq/compressor/compressor.consttree" ] && \
+	    [ ! -f "$(PROVING_KEY)/zisk/Zisk/airs/ArithEq/compressor/compressor.consttree_gpu" ]; then \
+		echo "ERROR: Constant tree files are missing. Run 'make setup-trees'."; \
+		exit 1; \
+	fi
+	@mkdir -p $(PROOF_DIR)
+	@echo "=== ZisK full prove started at $$(date) (input: $(FULL_INPUT_BIN)) ==="
+	@start=$$(date +%s); \
+	$(CARGO_ZISK) prove \
+		--elf $(CIRCUIT_DIR)/elf/circuit.elf \
+		--input $(FULL_INPUT_BIN) \
+		--proving-key $(PROVING_KEY) \
+		--output-dir $(PROOF_DIR) \
+		--emulator \
+		--aggregation \
+		--final-snark \
+		--verify-proofs; \
+	end=$$(date +%s); \
+	echo ""; \
+	echo "=== ZisK full prove finished at $$(date) ==="; \
 	echo "=== Total proving time: $$((end - start)) seconds ==="
 
 # ── Docker ─────────────────────────────────────────────────────────────────────

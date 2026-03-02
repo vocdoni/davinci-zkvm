@@ -9,4 +9,3 @@ ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", tag = "v0.15.0" 
 ark-ff = { version = "0.4", default-features = false }
 ark-ec = { version = "0.4", default-features = false }
 ark-bn254 = { version = "0.4", default-features = false, features = ["curve"] }
-ark-serialize = { version = "0.4", default-features = false }

@@ -404,20 +404,55 @@ pub fn verify_chain(
 
 /// Verify the full DAVINCI state-transition block (STATETX).
 ///
-/// Returns `(ok, old_root_lo, old_root_hi, new_root_lo, new_root_hi, voters, overwritten)`.
-/// When no state block is present, returns `(true, 0, 0, 0, 0, 0, 0)` — absence is not a failure.
+/// Returns `(ok, old_root, new_root, voters, overwritten)`.
+/// `old_root` and `new_root` are the full 256-bit Arbo SHA-256 roots as `FrRaw`.
+/// When no state block is present, returns `(true, ZERO, ZERO, 0, 0)` — absence is not a failure.
 pub fn verify_state(
     parsed: &ParsedInput,
     fail_mask: &mut u32,
-) -> (bool, u64, u64, u64, u64, u64, u64) {
+) -> (bool, FrRaw, FrRaw, u64, u64) {
     let state = match &parsed.state {
-        None => return (true, 0, 0, 0, 0, 0, 0),
+        None => return (true, ZERO_FR, ZERO_FR, 0, 0),
         Some(s) => s,
     };
 
     let mut ok = true;
 
+    // ── Validate chain lengths vs declared voter counts ─────────────────────
+    // The voteID chain length must equal n_voters (one insertion per real voter).
+    // The ballot chain length must also equal n_voters (one insert or update per voter).
+    let nv = state.n_voters;
+    if state.vote_id_chain.len() != nv {
+        *fail_mask |= FAIL_SMT_VOTEID;
+        ok = false;
+    }
+    if state.ballot_chain.len() != nv {
+        *fail_mask |= FAIL_SMT_BALLOT;
+        ok = false;
+    }
+
+    // ── Validate overwritten count against actual ballot UPDATEs ─────────────
+    // In the SMT Processor, an UPDATE operation has fnc0=false, fnc1=true.
+    // Each ballot UPDATE corresponds to an overwritten vote. The declared
+    // n_overwritten must match the actual count.
+    let actual_overwrites = state.ballot_chain.iter()
+        .filter(|t| !t.fnc0 && t.fnc1)
+        .count();
+    if actual_overwrites != state.n_overwritten {
+        *fail_mask |= FAIL_SMT_BALLOT;
+        ok = false;
+    }
+
     // ── VoteID chain: OldStateRoot → (intermediate after voteIDs) ────────────
+    // Every voteID transition MUST be an INSERT (fnc0=true, fnc1=false).
+    // VoteIDs are unique identifiers that can never be updated or deleted.
+    for t in &state.vote_id_chain {
+        if !t.fnc0 || t.fnc1 {
+            *fail_mask |= FAIL_SMT_VOTEID;
+            ok = false;
+            break;
+        }
+    }
     // The end of the voteID chain must equal the start of the ballot chain
     // (or new_state_root when no ballot chain is present).
     let after_vote_ids = if state.ballot_chain.is_empty() {
@@ -440,6 +475,17 @@ pub fn verify_state(
     );
 
     // ── Ballot chain: (after voteIDs) → (before resultsAdd or new_state_root) ─
+    // Each ballot transition must be an INSERT (new vote) or UPDATE (overwrite).
+    // DELETE (fnc0=true, fnc1=true) and NOOP (fnc0=false, fnc1=false) are not allowed.
+    for t in &state.ballot_chain {
+        let is_insert = t.fnc0 && !t.fnc1;
+        let is_update = !t.fnc0 && t.fnc1;
+        if !is_insert && !is_update {
+            *fail_mask |= FAIL_SMT_BALLOT;
+            ok = false;
+            break;
+        }
+    }
     let after_ballots = match &state.results_add {
         Some(r) => &r.old_root,
         None => match &state.results_sub {
@@ -494,9 +540,10 @@ pub fn verify_state(
     }
 
     // ── Process read-proofs: inclusion in OldStateRoot (no mutation) ──────────
-    // Config keys are read-only this batch; old_root == new_root == old_state_root.
+    // Config keys are read-only; each proof must have old_root == new_root == old_state_root
+    // (ensured by fnc0=0, fnc1=0 in the SMT Processor, but we check explicitly).
     for p in &state.process_proofs {
-        if p.old_root != state.old_state_root {
+        if p.old_root != state.old_state_root || p.new_root != state.old_state_root {
             *fail_mask |= FAIL_SMT_PROCESS;
             ok = false;
             break;
@@ -508,14 +555,8 @@ pub fn verify_state(
         }
     }
 
-    let old = &state.old_state_root;
-    let new = &state.new_state_root;
+    let old = state.old_state_root;
+    let new = state.new_state_root;
 
-    (
-        ok,
-        old[0], old[1],
-        new[0], new[1],
-        state.n_voters as u64,
-        state.n_overwritten as u64,
-    )
+    (ok, old, new, state.n_voters as u64, state.n_overwritten as u64)
 }

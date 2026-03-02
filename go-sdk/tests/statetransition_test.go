@@ -215,17 +215,24 @@ func TestChainedSMT(t *testing.T) {
 	if outputs[0] != 1 {
 		t.Errorf("output[0] (overall_ok) = %d, want 1", outputs[0])
 	}
-	if outputs[9] != 2 {
+	if outputs[42] != 2 {
 		// 2 = legacy SMTBLK absent (not a failure); 1 = present+ok
-		t.Errorf("output[9] (legacy_smt_ok) = %d, want 2", outputs[9])
+		t.Errorf("output[42] (legacy_smt_ok) = %d, want 2", outputs[42])
 	}
-	// Outputs 10-11: old root lo/hi; 12-13: new root lo/hi.
-	if outputs[14] != uint32(votesPerBatch) {
-		t.Errorf("output[14] (voters_count) = %d, want %d", outputs[14], votesPerBatch)
+	// Outputs 2-9: old root (8 × u32); 10-17: new root (8 × u32).
+	if outputs[18] != uint32(votesPerBatch) {
+		t.Errorf("output[18] (voters_count) = %d, want %d", outputs[18], votesPerBatch)
 	}
-	// Verify old/new root is non-zero when n_voters > 0.
-	if outputs[12] == 0 && outputs[13] == 0 {
-		t.Errorf("output[12-13] (new_state_root) is zero, expected non-zero")
+	// Verify new root is non-zero when n_voters > 0.
+	newRootNonZero := false
+	for i := 10; i <= 17; i++ {
+		if outputs[i] != 0 {
+			newRootNonZero = true
+			break
+		}
+	}
+	if !newRootNonZero {
+		t.Errorf("output[10-17] (new_state_root) is zero, expected non-zero")
 	}
 }
 
@@ -353,8 +360,8 @@ func TestStateTxEmulator(t *testing.T) {
 	if outputs[0] != 1 {
 		t.Errorf("output[0] (overall_ok) = %d, want 1", outputs[0])
 	}
-	if outputs[14] != nVotes {
-		t.Errorf("output[14] (voters_count) = %d, want %d", outputs[14], nVotes)
+	if outputs[18] != nVotes {
+		t.Errorf("output[18] (voters_count) = %d, want %d", outputs[18], nVotes)
 	}
 }
 

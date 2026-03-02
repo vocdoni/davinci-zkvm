@@ -133,6 +133,25 @@ fn scalar_mult(point: &BJJProj, scalar: &FrRaw) -> BJJProj {
     result
 }
 
+// ─── Curve membership ─────────────────────────────────────────────────────────
+
+/// Check that `(x, y)` satisfies the BabyJubJub twisted Edwards equation:
+///   `a·x² + y² = 1 + d·x²·y²`  (with a = 168700, d = 168696).
+///
+/// This validates that a point is **on the curve** (necessary but not sufficient
+/// for full subgroup membership; subgroup order verification would require a
+/// scalar multiplication by the group order and is not performed here).
+/// A point not on the curve would cause the re-encryption verification to silently
+/// fail rather than produce an exploitable result, but we check here for defence
+/// in depth.
+fn is_on_bjj_curve(x: Fr, y: Fr) -> bool {
+    let x2 = x.square();
+    let y2 = y.square();
+    let lhs = curve_a() * x2 + y2;          // a·x² + y²
+    let rhs = Fr::from(1u64) + curve_d() * x2 * y2; // 1 + d·x²·y²
+    lhs == rhs
+}
+
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 /// Verify that `reencrypted[i] = original[i] + encZero(k', pubKey)` for all i.
@@ -140,6 +159,10 @@ fn scalar_mult(point: &BJJProj, scalar: &FrRaw) -> BJJProj {
 /// `k` is the raw re-encryption seed; `k' = poseidon1(k)` is derived inside.
 /// `pub_key` is the ElGamal encryption public key point.
 /// All 8 fields use the same delta since `EncryptedZero` uses the same k' for all fields.
+///
+/// # Security
+/// The public key is validated to be on the BabyJubJub curve before use, preventing
+/// degenerate inputs from causing silent incorrect results.
 pub fn verify_reencryption(
     k: &FrRaw,
     pub_key_x: &FrRaw,
@@ -148,6 +171,13 @@ pub fn verify_reencryption(
     reencrypted: &[BjjCiphertext],
 ) -> bool {
     if original.len() != reencrypted.len() {
+        return false;
+    }
+
+    // Validate public key is on the BabyJubJub curve.
+    let pk_x = raw_to_fr(pub_key_x);
+    let pk_y = raw_to_fr(pub_key_y);
+    if !is_on_bjj_curve(pk_x, pk_y) {
         return false;
     }
 
@@ -160,7 +190,7 @@ pub fn verify_reencryption(
     let (d1x, d1y) = delta1_proj.to_affine();
 
     // delta2 = k' * pubKey
-    let pub_key_proj = BJJProj::from_affine(raw_to_fr(pub_key_x), raw_to_fr(pub_key_y));
+    let pub_key_proj = BJJProj::from_affine(pk_x, pk_y);
     let delta2_proj = scalar_mult(&pub_key_proj, &k_prime);
     let (d2x, d2y) = delta2_proj.to_affine();
 

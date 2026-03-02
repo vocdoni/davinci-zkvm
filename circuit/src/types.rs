@@ -16,6 +16,7 @@
 //! |  15 | `FAIL_BALLOT_NS`        | consistency.rs | Ballot namespace / address binding mismatch|
 //! |  16 | `FAIL_CENSUS`           | census.rs      | Census membership proof failed             |
 //! |  17 | `FAIL_REENC`            | babyjubjub.rs  | Re-encryption verification failed          |
+//! |  18 | `FAIL_KZG`              | kzg.rs         | KZG barycentric evaluation mismatch        |
 //! |  31 | `FAIL_PARSE`            | io.rs          | Binary format / parse error                |
 
 /// BN254 G1 affine point: (x[4], y[4]) in 256-bit little-endian limbs.
@@ -65,6 +66,8 @@ pub const FAIL_CONSISTENCY: u32 = 1 << 14;
 pub const FAIL_BALLOT_NS:   u32 = 1 << 15;
 pub const FAIL_CENSUS:      u32 = 1 << 16;
 pub const FAIL_REENC:       u32 = 1 << 17;
+/// Bit 18 — KZG barycentric evaluation mismatch.
+pub const FAIL_KZG:         u32 = 1 << 18;
 
 /// One Groth16 proof and its associated public inputs.
 #[derive(Clone)]
@@ -116,6 +119,26 @@ pub const CENSUS_MAGIC: u64 = u64::from_le_bytes(*b"CENSUS!!");
 
 /// Magic bytes `"REENCBLK"` — identifies the optional re-encryption verification block.
 pub const REENC_MAGIC: u64 = u64::from_le_bytes(*b"REENCBLK");
+
+/// Magic bytes `"KZGBLK!!"` — identifies the optional KZG barycentric evaluation block.
+pub const KZG_MAGIC: u64 = u64::from_le_bytes(*b"KZGBLK!!");
+
+/// KZG EIP-4844 blob barycentric evaluation block.
+///
+/// Contains all data needed to verify Y = P(Z) where P is the polynomial interpolating
+/// the blob, and Z is derived from the process context via SHA-256.
+pub struct KZGBlock {
+    /// Process identifier (BN254 Fr, 4×u64 LE). Used to derive the evaluation point Z.
+    pub process_id: FrRaw,
+    /// Arbo SHA-256 state root before the batch (BN254 Fr, 4×u64 LE). Also used for Z.
+    pub root_hash_before: FrRaw,
+    /// Compressed BLS12-381 G1 KZG commitment (48 bytes, big-endian).
+    pub commitment: [u8; 48],
+    /// Claimed evaluation Y at point Z (32 bytes, big-endian BLS12-381 Fr).
+    pub y_claimed: [u8; 32],
+    /// Blob data: 4096 cells of 32 big-endian bytes each (131072 bytes total).
+    pub blob: Vec<u8>,
+}
 
 /// One ElGamal ciphertext: (C1.x, C1.y, C2.x, C2.y) in BN254 Fr.
 #[derive(Clone, Default)]

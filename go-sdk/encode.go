@@ -284,15 +284,12 @@ func EncodeReencBlock(r *ReencryptionData) ([]byte, error) {
 if r == nil || len(r.Entries) == 0 {
 return nil, nil
 }
-const magic = uint64(0x4b4c434e45455200) // "REENCBLK" LE bytes -> magic value
 
-// Build magic as literal bytes matching the Rust b"REENCBLK" interpretation
-magicBytes := []byte("REENCBLK")
+// reencMagic matches Rust b"REENCBLK" interpreted as a LE u64.
 var magicU64 uint64
-for i := 0; i < 8; i++ {
-magicU64 |= uint64(magicBytes[i]) << (8 * i)
+for i, b := range []byte("REENCBLK") {
+magicU64 |= uint64(b) << (8 * i)
 }
-_ = magic
 
 pKeyX, err := beHexToFrLE(r.EncryptionKeyX)
 if err != nil {
@@ -361,4 +358,78 @@ buf = appendFr(buf, c2y)
 }
 }
 return buf, nil
+}
+
+// kzgMagic is "KZGBLK!!" as literal bytes (matches circuit/src/types.rs KZG_MAGIC).
+var kzgMagic = []byte("KZGBLK!!")
+
+// KZGEvalData holds all inputs needed to encode a KZG blob barycentric evaluation block.
+type KZGEvalData struct {
+// ProcessID is the BN254 Fr process identifier (big-endian bytes, up to 32).
+ProcessID []byte
+// RootHashBefore is the Arbo state root before the batch (big-endian bytes, up to 32).
+RootHashBefore []byte
+// Commitment is the 48-byte compressed BLS12-381 G1 KZG commitment.
+Commitment [48]byte
+// YClaimed is the 32-byte big-endian BLS12-381 Fr claimed evaluation result Y = P(Z).
+YClaimed [32]byte
+// Blob is the full EIP-4844 blob data (131072 bytes = 4096 × 32-byte big-endian cells).
+Blob []byte
+}
+
+// EncodeKZGBlock encodes the KZG blob barycentric evaluation block.
+//
+// Block format (binary, appended after the last optional block):
+//
+//KZGBLK!! (8 bytes LE magic)
+//processID       (32 bytes: 4×u64 LE words, converted from big-endian input)
+//rootHashBefore  (32 bytes: 4×u64 LE words)
+//commitment      (48 raw bytes, big-endian compressed BLS12-381 G1)
+//y_claimed       (32 raw bytes, big-endian BLS12-381 Fr)
+//blob            (131072 bytes = 4096 × 32-byte big-endian cells)
+func EncodeKZGBlock(d *KZGEvalData) ([]byte, error) {
+if len(d.Blob) != 4096*32 {
+return nil, fmt.Errorf("blob must be exactly 131072 bytes, got %d", len(d.Blob))
+}
+if len(d.ProcessID) > 32 {
+return nil, fmt.Errorf("processID too large: %d bytes", len(d.ProcessID))
+}
+if len(d.RootHashBefore) > 32 {
+return nil, fmt.Errorf("rootHashBefore too large: %d bytes", len(d.RootHashBefore))
+}
+
+// Build magic u64 from literal bytes (LE interpretation matching Rust b"KZGBLK!!")
+var magicU64 uint64
+for i := 0; i < 8; i++ {
+magicU64 |= uint64(kzgMagic[i]) << (8 * i)
+}
+
+pid := beBytes32ToFrLE(d.ProcessID)
+rhb := beBytes32ToFrLE(d.RootHashBefore)
+
+buf := appendU64(nil, magicU64)
+buf = appendFr(buf, pid)
+buf = appendFr(buf, rhb)
+buf = append(buf, d.Commitment[:]...)
+buf = append(buf, d.YClaimed[:]...)
+buf = append(buf, d.Blob...)
+return buf, nil
+}
+
+// beBytes32ToFrLE converts a big-endian byte slice (≤32 bytes) into the 4×u64
+// little-endian FrRaw representation used by the Rust circuit.
+// word[0] = least-significant 64 bits = bytes[24..32] read as a big-endian u64.
+func beBytes32ToFrLE(b []byte) [4]uint64 {
+var padded [32]byte
+if len(b) <= 32 {
+copy(padded[32-len(b):], b)
+} else {
+copy(padded[:], b[len(b)-32:])
+}
+var out [4]uint64
+out[0] = binary.BigEndian.Uint64(padded[24:32])
+out[1] = binary.BigEndian.Uint64(padded[16:24])
+out[2] = binary.BigEndian.Uint64(padded[8:16])
+out[3] = binary.BigEndian.Uint64(padded[0:8])
+return out
 }

@@ -12,6 +12,16 @@ import (
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 )
 
+// testDataDir returns the path to the ballot proof test fixtures.
+// Override with TEST_DATA_DIR environment variable.
+func testDataDir() string {
+	if d := os.Getenv("TEST_DATA_DIR"); d != "" {
+		return d
+	}
+	// Default: relative to this package (go-sdk/tests/)
+	return filepath.Join("..", "data", "ballot_proof_bn254")
+}
+
 // loadProveRequestFromDir builds a ProveRequest by reading proof, public, and sig
 // files from dir. It expects:
 //   - verification_key.json

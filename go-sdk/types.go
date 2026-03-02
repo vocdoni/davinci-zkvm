@@ -6,6 +6,46 @@ package davinci
 
 import "encoding/json"
 
+// Output register layout for the ZisK circuit.
+// These constants identify the index of each u32 output register returned
+// by the ZisK emulator / prover and mirror the public inputs of the
+// davinci-node StateTransitionCircuit.
+//
+// To reconstruct a 256-bit root from its 8 u32 output slots (LE):
+//
+//	var root [4]uint64
+//	for i := 0; i < 4; i++ {
+//	    root[i] = uint64(outputs[base+i*2]) | (uint64(outputs[base+i*2+1]) << 32)
+//	}
+const (
+	OutputOverallOk  = 0  // 1 = all checks passed, 0 = failure
+	OutputFailMask   = 1  // bit-flag mask (see FAIL_* in types.rs)
+
+	// RootHashBefore: 256-bit Arbo SHA-256 state root before the batch (8 × u32, LE)
+	OutputOldRoot    = 2  // base index; occupies slots [2..9]
+
+	// RootHashAfter: 256-bit Arbo SHA-256 state root after the batch (8 × u32, LE)
+	OutputNewRoot    = 10 // base index; occupies slots [10..17]
+
+	OutputVotersCount     = 18 // number of non-dummy votes in this batch
+	OutputOverwrittenCount = 19 // number of votes that overwrote an earlier ballot
+
+	// CensusRoot: 256-bit lean-IMT Poseidon BN254 census root (8 × u32, LE)
+	OutputCensusRoot = 20 // base index; occupies slots [20..27]
+
+	// BlobCommitmentLimbs: 3 × 128-bit KZG blob commitment limbs (12 × u32)
+	// Populated from the KZG commitment when a KZGBLK block is present, zero otherwise.
+	OutputBlobCommitment = 28 // base index; occupies slots [28..39]
+
+	// Diagnostic outputs (not used as public inputs)
+	OutputBatchOk    = 40 // Groth16 batch verification result (1=ok)
+	OutputECDSAOk    = 41 // ECDSA signature batch result (1=ok)
+	OutputSMTOk      = 42 // legacy SMTBLK batch (1=ok, 2=absent, 0=fail)
+	OutputNProofs    = 43 // number of Groth16 proofs verified
+	OutputNPublic    = 44 // number of public inputs per Groth16 proof
+	OutputLogN       = 45 // log₂ of the aggregation tree depth
+)
+
 // SmtEntry represents one Arbo-compatible SMT state-transition proof.
 // All 32-byte field values are hex-encoded strings (with "0x" prefix).
 // Siblings must be padded with "0x00..00" entries to n_levels length.
@@ -142,6 +182,24 @@ type ProveRequest struct {
 	// Reencryption contains the re-encryption verification data.
 	// When non-nil, the circuit verifies ElGamal re-encryption for each voter.
 	Reencryption *ReencryptionData `json:"reencryption,omitempty"`
+	// KZG contains the EIP-4844 blob barycentric evaluation data.
+	// When non-nil, the circuit verifies the KZG commitment and evaluation.
+	KZG *KZGRequest `json:"kzg,omitempty"`
+}
+
+// KZGRequest holds the KZG blob barycentric evaluation inputs for the API.
+// All byte fields are hex-encoded with optional "0x" prefix.
+type KZGRequest struct {
+	// ProcessID is the 32-byte big-endian hex BN254 Fr process identifier.
+	ProcessID string `json:"process_id"`
+	// RootHashBefore is the 32-byte big-endian hex Arbo state root before the batch.
+	RootHashBefore string `json:"root_hash_before"`
+	// Commitment is the 48-byte big-endian hex compressed BLS12-381 G1 KZG commitment.
+	Commitment string `json:"commitment"`
+	// YClaimed is the 32-byte big-endian hex BLS12-381 Fr claimed evaluation Y = P(Z).
+	YClaimed string `json:"y_claimed"`
+	// Blob is the 131072-byte big-endian hex full EIP-4844 blob (4096 × 32-byte cells).
+	Blob string `json:"blob"`
 }
 
 // JobResponse is the response body for GET /jobs/{id}.
