@@ -4,7 +4,7 @@ use crate::api::AppState;
 use crate::types::{ProveRequest, SmtEntryJson};
 use anyhow::{bail, Context};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use davinci_zkvm_input_gen::{census_proof_from_hex, generate_input, write_census_block, write_kzg_block, write_reenc_block, write_state_block, be_hex32_to_fr_le, BjjCiphertextData, KzgData, ReencEntryData, SmtEntry, StateData};
+use davinci_zkvm_input_gen::{census_proof_from_hex, generate_input, write_census_block, write_csp_block, write_kzg_block, write_reenc_block, write_state_block, be_hex32_to_fr_le, address_hex_to_fr_le, BjjCiphertextData, CspBlockData, CspEntryData, KzgData, ReencEntryData, SmtEntry, StateData};
 use tracing::{debug, error, info, warn};
 
 pub async fn submit_prove(
@@ -81,6 +81,7 @@ pub async fn submit_prove(
     let sigs = req.sigs.clone();
     let state_json = req.state.clone();
     let census_json = req.census_proofs.clone();
+    let csp_json = req.csp_data.clone();
     let reenc_json = req.reencryption.clone();
     let kzg_json = req.kzg.clone();
     let input_bytes = match tokio::task::spawn_blocking(move || {
@@ -110,6 +111,22 @@ pub async fn submit_prove(
                 .map(|cp| census_proof_from_hex(&cp.root, &cp.leaf, cp.index, &cp.siblings))
                 .collect::<anyhow::Result<Vec<_>>>()?;
             bytes.extend(write_census_block(&proofs)?);
+        }
+
+        // Append CSP ECDSA census block.
+        if let Some(csp) = csp_json {
+            let csp_pub_key_x = be_hex32_to_fr_le(&csp.csp_pub_key_x)?;
+            let csp_pub_key_y = be_hex32_to_fr_le(&csp.csp_pub_key_y)?;
+            let entries = csp.proofs.iter().map(|p| {
+                Ok(CspEntryData {
+                    r: be_hex32_to_fr_le(&p.r)?,
+                    s: be_hex32_to_fr_le(&p.s)?,
+                    voter_address: address_hex_to_fr_le(&p.voter_address)?,
+                    weight: be_hex32_to_fr_le(&p.weight)?,
+                    index: p.index,
+                })
+            }).collect::<anyhow::Result<Vec<_>>>()?;
+            bytes.extend(write_csp_block(&CspBlockData { csp_pub_key_x, csp_pub_key_y, entries })?);
         }
 
         // Append re-encryption block.

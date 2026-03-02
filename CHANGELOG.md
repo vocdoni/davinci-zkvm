@@ -4,6 +4,34 @@ All notable changes to davinci-zkvm are documented here.
 
 ## Unreleased — Security Audit & Cross-Block Binding
 
+### CSP ECDSA Census (censusOrigin=4)
+
+- **New `csp.rs` circuit module** — CSP (Credential Service Provider) ECDSA
+  authentication. When `censusOrigin == 4` in the process config, voters are
+  authenticated via secp256k1 ECDSA signatures from a trusted CSP authority
+  instead of Merkle tree inclusion proofs.
+
+- **CSP message format**: Ethereum personal-sign of
+  `processID(32BE) ‖ address(20) ‖ weight(32BE) ‖ index(8BE)`.
+  The CSP's Ethereum address serves as the census root.
+
+- **New `CSPBLK!!` binary block** in the input format, parsed in `io.rs`.
+  Contains the CSP public key (shared header) and per-voter `(r, s, address,
+  weight, index)` entries.
+
+- **Go SDK**: `CspProof`, `CspData` types in `types.go`; `EncodeCspBlock()`
+  encoder in `encode.go`; `VoterBallot.Csp` field and `ProveBatch.CspPubKey`
+  in `batch.go` for seamless CSP election integration.
+
+- **Service**: `CspProofJson`, `CspDataJson` types; CSPBLK encoding in the
+  `/prove` API handler.
+
+- **Binding checks**: Phase 6 checks 6.4 and 6.6 are census-origin aware,
+  comparing CSP entry count and voter addresses for CSP mode.
+
+- **CIRCUIT.md**: Updated Phase 3 specification with CSP ECDSA verification
+  details, message format, and constraint checks.
+
 ### Go SDK
 
 - **High-level `ProveBatch` API** (`go-sdk/batch.go`). New per-voter `VoterBallot`

@@ -33,7 +33,12 @@ type VoterBallot struct {
 	Signature *EcdsaSignature
 
 	// Census is the lean-IMT Poseidon membership proof for this voter.
+	// Used when censusOrigin is Merkle (1-3). Ignored when Csp is set.
 	Census CensusProof
+
+	// Csp is the CSP ECDSA attestation for this voter.
+	// Used when censusOrigin is CSP (4). Mutually exclusive with Census.
+	Csp *CspProof
 
 	// Reencryption holds the per-voter re-encryption data.
 	// When nil, no re-encryption entry is submitted for this voter.
@@ -91,6 +96,11 @@ type ProveBatch struct {
 	// big-endian hex strings.
 	EncryptionKey *BjjPoint
 
+	// CspPubKey holds the CSP's secp256k1 public key coordinates when using
+	// CSP census (censusOrigin == 4). Required when voters have Csp proofs.
+	// X and Y are 32-byte big-endian hex strings.
+	CspPubKey *BjjPoint
+
 	// KZG is the data-availability blob proof. Nil when blobs are not used.
 	KZG *KZGRequest
 }
@@ -132,8 +142,10 @@ func (b *ProveBatch) toRequest() (*ProveRequest, error) {
 	pubInputs := make([][]string, len(b.Voters))
 	sigs := make([]json.RawMessage, len(b.Voters))
 	var censusProofs []CensusProof
+	var cspProofs []CspProof
 	var reencEntries []ReencryptionEntry
 	hasReenc := false
+	hasCsp := false
 
 	for i, v := range b.Voters {
 		// Proof
@@ -166,8 +178,13 @@ func (b *ProveBatch) toRequest() (*ProveRequest, error) {
 		}
 		sigs[i] = raw
 
-		// Census
-		censusProofs = append(censusProofs, v.Census)
+		// Census (Merkle or CSP — mutually exclusive)
+		if v.Csp != nil {
+			hasCsp = true
+			cspProofs = append(cspProofs, *v.Csp)
+		} else {
+			censusProofs = append(censusProofs, v.Census)
+		}
 
 		// Re-encryption
 		if v.Reencryption != nil {
@@ -187,8 +204,24 @@ func (b *ProveBatch) toRequest() (*ProveRequest, error) {
 		PublicInputs: pubInputs,
 		Sigs:         sigs,
 		State:        b.State,
-		CensusProofs: censusProofs,
 		KZG:          b.KZG,
+	}
+
+	// Census proofs (Merkle) — only when not using CSP
+	if !hasCsp {
+		req.CensusProofs = censusProofs
+	}
+
+	// CSP data — only when at least one voter uses CSP
+	if hasCsp {
+		if b.CspPubKey == nil {
+			return nil, fmt.Errorf("CspPubKey is required when voters have CSP proofs")
+		}
+		req.CspData = &CspData{
+			CspPubKeyX: b.CspPubKey.X,
+			CspPubKeyY: b.CspPubKey.Y,
+			Proofs:     cspProofs,
+		}
 	}
 
 	if hasReenc {
@@ -207,9 +240,6 @@ func (b *ProveBatch) toRequest() (*ProveRequest, error) {
 
 // Prove submits a ProveBatch for proving and blocks until the proof is ready
 // or the context is cancelled.
-//
-// This is the high-level entry point that replaces the 3-stage Gnark pipeline
-// (VoteVerifier → Aggregator → StateTransition) with a single ZisK proof.
 //
 // The returned ProveResult contains the raw proof bytes and service metadata.
 // Use PublicOutputs for on-chain public inputs once the service supports

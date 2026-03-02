@@ -57,6 +57,8 @@ pub struct ParsedInput {
     pub state: Option<StateBlock>,
     /// Census lean-IMT Poseidon proofs (CENSUS!! magic). Empty if absent.
     pub census_proofs: Vec<CensusProofEntry>,
+    /// CSP ECDSA census block (CSPBLK!! magic). None if absent.
+    pub csp_block: Option<CspBlock>,
     /// Re-encryption verification entries (REENCBLK magic). Empty if absent.
     pub reenc_pub_key: Option<(FrRaw, FrRaw)>,
     pub reenc_entries: Vec<ReencEntry>,
@@ -163,6 +165,7 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
     // --- State-transition block (STATETX!) ---
     let mut state: Option<StateBlock> = None;
     let mut census_proofs: Vec<CensusProofEntry> = Vec::new();
+    let mut csp_block: Option<CspBlock> = None;
     let mut reenc_pub_key: Option<(FrRaw, FrRaw)> = None;
     let mut reenc_entries: Vec<ReencEntry> = Vec::new();
     let mut kzg: Option<KZGBlock> = None;
@@ -195,6 +198,30 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
                 }
                 census_proofs.push(CensusProofEntry { root, leaf, index, siblings });
             }
+        }
+    }
+
+    // --- CSP block (optional, after census block) ---
+    // Format: CSPBLK!!(u64) | n_entries(u64) | csp_pub_key_x(FrRaw) | csp_pub_key_y(FrRaw)
+    //         Per entry: r(FrRaw) s(FrRaw) voter_address(FrRaw) weight(FrRaw) index(u64)
+    if off + 8 <= input.len() {
+        let maybe_magic = u64::from_le_bytes(input[off..off + 8].try_into().unwrap());
+        if maybe_magic == CSP_MAGIC {
+            off += 8;
+            let n_entries = read1!(&mut off, 0) as usize;
+            if n_entries > 4096 { *fail_mask |= 1 << 31; }
+            let csp_pub_key_x = read_fr!(&mut off);
+            let csp_pub_key_y = read_fr!(&mut off);
+            let mut entries = Vec::with_capacity(n_entries);
+            for _ in 0..n_entries {
+                let r = read_fr!(&mut off);
+                let s = read_fr!(&mut off);
+                let voter_address = read_fr!(&mut off);
+                let weight = read_fr!(&mut off);
+                let index = read1!(&mut off, 0);
+                entries.push(CspEntry { r, s, voter_address, weight, index });
+            }
+            csp_block = Some(CspBlock { csp_pub_key_x, csp_pub_key_y, entries });
         }
     }
 
@@ -269,7 +296,7 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
         log_n, nproofs, n_public,
         vk_alpha_g1, vk_beta_g2, vk_gamma_g2, vk_delta_g2, vk_gamma_abc,
         proofs, scaled_a, neg_alpha_rsum, neg_g_ic, neg_acc_c,
-        ecdsa, state, census_proofs,
+        ecdsa, state, census_proofs, csp_block,
         reenc_pub_key, reenc_entries, kzg,
         bytes_consumed: off,
     }

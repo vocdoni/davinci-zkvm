@@ -495,3 +495,91 @@ out[2] = binary.BigEndian.Uint64(padded[8:16])
 out[3] = binary.BigEndian.Uint64(padded[0:8])
 return out
 }
+
+// cspMagic is "CSPBLK!!" in little-endian.
+var cspMagic = [8]byte{'C', 'S', 'P', 'B', 'L', 'K', '!', '!'}
+
+// EncodeCspBlock serializes CSP ECDSA census data into the CSPBLK binary block.
+//
+// Format:
+//
+//	magic:         u64 = "CSPBLK!!"
+//	n_entries:     u64
+//	csp_pub_key_x: [u64; 4] (LE limbs)
+//	csp_pub_key_y: [u64; 4] (LE limbs)
+//	Per entry:
+//	  r:              [u64; 4] (LE limbs)
+//	  s:              [u64; 4] (LE limbs)
+//	  voter_address:  [u64; 4] (LE limbs, uint160 zero-padded)
+//	  weight:         [u64; 4] (LE limbs)
+//	  index:          u64
+func EncodeCspBlock(data *CspData) ([]byte, error) {
+	if data == nil || len(data.Proofs) == 0 {
+		return nil, nil
+	}
+	pkX, err := beHexToFrLE(data.CspPubKeyX)
+	if err != nil {
+		return nil, fmt.Errorf("csp pub_key_x: %w", err)
+	}
+	pkY, err := beHexToFrLE(data.CspPubKeyY)
+	if err != nil {
+		return nil, fmt.Errorf("csp pub_key_y: %w", err)
+	}
+
+	buf := append([]byte{}, cspMagic[:]...)
+	buf = appendU64(buf, uint64(len(data.Proofs)))
+	buf = appendFr(buf, pkX)
+	buf = appendFr(buf, pkY)
+
+	for i, p := range data.Proofs {
+		r, err := beHexToFrLE(p.R)
+		if err != nil {
+			return nil, fmt.Errorf("csp proof[%d] r: %w", i, err)
+		}
+		s, err := beHexToFrLE(p.S)
+		if err != nil {
+			return nil, fmt.Errorf("csp proof[%d] s: %w", i, err)
+		}
+		// VoterAddress: 20-byte hex → pad to 32-byte BE → LE Fr
+		addrFr, err := addressHexToFrLE(p.VoterAddress)
+		if err != nil {
+			return nil, fmt.Errorf("csp proof[%d] address: %w", i, err)
+		}
+		w, err := beHexToFrLE(p.Weight)
+		if err != nil {
+			return nil, fmt.Errorf("csp proof[%d] weight: %w", i, err)
+		}
+		buf = appendFr(buf, r)
+		buf = appendFr(buf, s)
+		buf = appendFr(buf, addrFr)
+		buf = appendFr(buf, w)
+		buf = appendU64(buf, p.Index)
+	}
+	return buf, nil
+}
+
+// addressHexToFrLE converts a 0x-prefixed Ethereum address hex string (20 bytes)
+// to a [4]uint64 LE circuit word representation (uint160 in Fr).
+func addressHexToFrLE(s string) ([4]uint64, error) {
+	h := strings.TrimPrefix(s, "0x")
+	if len(h) < 40 {
+		h = strings.Repeat("0", 40-len(h)) + h
+	}
+	b, err := hex.DecodeString(h)
+	if err != nil {
+		return [4]uint64{}, fmt.Errorf("invalid address hex %q: %w", s, err)
+	}
+	if len(b) != 20 {
+		return [4]uint64{}, fmt.Errorf("expected 20 bytes for address, got %d: %q", len(b), s)
+	}
+	// b is big-endian 20 bytes: [b19, b18, ..., b0]
+	// Pack into 32-byte big-endian (12 zero prefix bytes + 20 address bytes)
+	var padded [32]byte
+	copy(padded[12:], b)
+	var out [4]uint64
+	out[0] = binary.BigEndian.Uint64(padded[24:32])
+	out[1] = binary.BigEndian.Uint64(padded[16:24])
+	out[2] = binary.BigEndian.Uint64(padded[8:16])
+	out[3] = binary.BigEndian.Uint64(padded[0:8])
+	return out, nil
+}

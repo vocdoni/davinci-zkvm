@@ -28,28 +28,26 @@ updated whenever the circuit logic changes.
 
 ## 1. Architecture Overview
 
-The DAVINCI zkVM circuit is a single RISC-V program (compiled for `riscv64ima-zisk-zkvm`)
-that replaces three Gnark circuits (VoteVerifier + Aggregator + StateTransition) with one
-unified verifier. It runs inside the ZisK zkVM and produces a STARK proof attesting that
+The DAVINCI zkVM circuit is a single RISC-V program (compiled for `riscv64ima-zisk-zkvm`).
+It runs inside the ZisK zkVM and produces a STARK proof attesting that
 all protocol constraints hold for a given batch of votes.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     ZisK Guest Circuit                       │
-│                                                              │
-│  Binary Input ──→ Parse ──→ Phase 1 (Groth16 Batch)         │
-│                         ├──→ Phase 2 (ECDSA Auth)            │
-│                         ├──→ Phase 3 (Census Eligibility)    │
-│                         ├──→ Phase 4 (State Transition)      │
-│                         │     ├─ 4.1 Consistency             │
-│                         │     ├─ 4.2 SMT Chains              │
-│                         │     ├─ 4.3 Re-encryption           │
-│                         │     └─ 4.4 Result Accumulator      │
-│                         ├──→ Phase 5 (KZG Data Availability) │
-│                         └──→ Phase 6 (Cross-Block Binding)   │
-│                                                              │
-│  ──→ Final Verdict ──→ 46 Output Registers                   │
-└─────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│                     ZisK Circuit                               │
+│                                                                │
+│  Binary Input ---> Parse ---> Phase 1 (Groth16 Batch)          │
+│                         ├---> Phase 2 (Signature Auth)         │
+│                         ├---> Phase 3 (Census Eligibility)     │
+│                         ├---> Phase 4 (State Transition)       │
+│                         │     ├─ 4.1 Consistency               │
+│                         │     ├─ 4.2 SMT Chains                │
+│                         │     ├─ 4.3 Re-encryption             │
+│                         │     └─ 4.4 Result Accumulator        │
+│                         ├---> Phase 5 (KZG Data Availability)  │
+│                         └---> Phase 6 (Cross-Block Binding)    │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
 ```
 
 **All six phases are mandatory.** If any block is absent from the input, the
@@ -69,9 +67,12 @@ little-endian ASCII magic number.
 |-------|-------------|-----------|------------------------------------------|
 | 1     | `GROTH16B`  | `io.rs`   | Header + VK + Proofs + Hints + ECDSA     |
 | 2     | `STATETX!`  | `io.rs`   | Full state-transition data               |
-| 3     | `CENSUS!!`  | `io.rs`   | Census lean-IMT Poseidon proofs          |
+| 3     | `CENSUS!!`  | `io.rs`   | Census lean-IMT Poseidon proofs (censusOrigin 1-3) |
+| 3'    | `CSPBLK!!`  | `io.rs`   | CSP ECDSA census proofs (censusOrigin 4) |
 | 4     | `REENCBLK`  | `io.rs`   | Re-encryption entries + public key       |
 | 5     | `KZGBLK!!`  | `io.rs`   | KZG blob + evaluation claim              |
+
+> Blocks 3 and 3' are mutually exclusive based on `censusOrigin`.
 
 ### Groth16 Header
 
@@ -239,16 +240,22 @@ selected by a process configuration parameter (similar to `censusOrigin`).
 
 ## 6. Phase 3: Eligibility
 
-**Module:** `census.rs`  
-**Fail bits:** `FAIL_CENSUS` (bit 16), `FAIL_MISSING_BLOCK` (bit 19)
+**Module:** `census.rs`, `csp.rs`  
+**Fail bits:** `FAIL_CENSUS` (bit 16), `FAIL_CSP` (bit 23), `FAIL_MISSING_BLOCK` (bit 19)
 
 ### Purpose
 
-Verify that each voter is authorized to participate in the election by proving
-membership in the census tree. The census is a lean incremental Merkle tree
-(lean-IMT) using iden3 Poseidon over BN254.
+Verify that each voter is authorized to participate in the election. The method
+is selected by the `censusOrigin` process config parameter (key 0x06):
 
-### Census leaf encoding
+| censusOrigin | Method | Module | Description |
+|:---:|--------|--------|-------------|
+| 1-3 | lean-IMT Poseidon | `census.rs` | Merkle tree membership proof |
+| 4   | CSP ECDSA | `csp.rs` | Credential Service Provider signature |
+
+### 3A. Merkle Census (censusOrigin 1-3)
+
+#### Census leaf encoding
 
 ```
 leaf = PackAddressWeight(address, weight) = (address << 88) | weight
@@ -257,16 +264,16 @@ leaf = PackAddressWeight(address, weight) = (address << 88) | weight
 Where `address` is the 160-bit Ethereum address and `weight` is the voter's
 weight (up to 88 bits). The leaf is stored as a BN254 Fr element.
 
-### Constraint checks
+#### Constraint checks
 
 | # | Check | Fails on |
 |---|-------|----------|
-| 3.1 | Census block is present (non-empty) | FAIL_MISSING_BLOCK |
-| 3.2 | All proofs reference the **same census root** | FAIL_CENSUS |
-| 3.3 | No duplicate leaves across all proofs in the batch | FAIL_CENSUS |
-| 3.4 | Each proof's Merkle path is valid: recomputed root matches declared root | FAIL_CENSUS |
+| 3A.1 | Census block is present (non-empty) | FAIL_MISSING_BLOCK |
+| 3A.2 | All proofs reference the **same census root** | FAIL_CENSUS |
+| 3A.3 | No duplicate leaves across all proofs in the batch | FAIL_CENSUS |
+| 3A.4 | Each proof's Merkle path is valid: recomputed root matches declared root | FAIL_CENSUS |
 
-### Merkle path verification
+#### Merkle path verification
 
 For each proof `(root, leaf, index, siblings[])`:
 
@@ -280,11 +287,55 @@ for i in 0..siblings.len():
 assert node == root
 ```
 
+The `census_root` output is taken from the first census proof's root field.
+
+### 3B. CSP ECDSA Census (censusOrigin 4)
+
+In CSP mode, a trusted Credential Service Provider signs each voter's eligibility
+using secp256k1 ECDSA. The census root is the CSP's Ethereum address (20-byte, uint160).
+
+#### CSP message format (Ethereum personal-sign)
+
+```
+payload  = processID_BE32(32) ‖ address_BE20(20) ‖ weight_BE32(32) ‖ index_BE8(8)  = 92 bytes
+envelope = "\x19Ethereum Signed Message:\n92" ‖ payload                             = 120 bytes
+z        = keccak256(envelope)
+```
+
+- **processID**: read from the state tree (process_proofs[0], key 0x00)
+- **address**: voter's 20-byte Ethereum address
+- **weight**: voter's voting weight (256-bit big-endian)
+- **index**: CSP-assigned auto-increment index (used as ballot SMT key)
+
+#### CSPBLK binary block format
+
+```
+Header:  CSP_MAGIC("CSPBLK!!") | n_entries(u64) | csp_pub_key_x(FrRaw) | csp_pub_key_y(FrRaw)
+Entry:   r(FrRaw) | s(FrRaw) | voter_address(FrRaw) | weight(FrRaw) | index(u64)
+```
+
+All voters in a batch share the same CSP public key (stored once in the header).
+
+#### CSP address derivation
+
+```
+csp_address = keccak256(csp_pub_key_x_BE32 ‖ csp_pub_key_y_BE32)[12..32]
+census_root = uint160(csp_address) as FrRaw
+```
+
+#### Constraint checks
+
+| # | Check | Fails on |
+|---|-------|----------|
+| 3B.1 | CSP block is present when censusOrigin=4 | FAIL_MISSING_BLOCK |
+| 3B.2 | CSP block has at least 1 entry | FAIL_CSP |
+| 3B.3 | No duplicate `(voter_address, index)` pairs | FAIL_CSP |
+| 3B.4 | Each CSP signature is valid: `secp256k1_ecdsa_verify(csp_pk, z, r, s)` | FAIL_CSP |
+
 ### Extensibility
 
-The eligibility method is currently lean-IMT Poseidon. Future census mechanisms
-(e.g., CSP blind signatures, ZK-credential proofs) will be selected by the
-`censusOrigin` process config parameter (key 0x06).
+The eligibility dispatch reads `censusOrigin` from the process config (key 0x06).
+New census mechanisms can be added by extending the dispatch in `main.rs` Phase 3.
 
 ---
 
@@ -554,14 +605,18 @@ correctly bound across blocks.
 | 6.1 | `kzg.process_id == state.process_id` | KZG blob bound to correct election | FAIL_BINDING |
 | 6.2 | `kzg.root_hash_before == state.old_state_root` | KZG blob bound to correct state | FAIL_BINDING |
 | 6.3 | `SHA-256(reenc_pubkey_X_BE32 ‖ reenc_pubkey_Y_BE32) == process_proofs[2].new_value` | Re-encryption key matches process config (key 0x03) | FAIL_BINDING |
-| 6.4 | `census_proofs.len() == state.n_voters` | One census proof per voter | FAIL_BINDING |
+| 6.4 | Eligibility proof count == `state.n_voters` | One eligibility proof per voter (Merkle or CSP) | FAIL_BINDING |
 | 6.5 | `reenc_entries.len() == state.n_voters` | One re-encryption entry per voter | FAIL_BINDING |
-| 6.6 | For each voter `i`: address extracted from `census_proofs[i].leaf` matches `proofs[i].public_inputs[0]` | Census proof bound to the specific voter | FAIL_BINDING |
+| 6.6 | For each voter `i`: address from eligibility proof matches `proofs[i].public_inputs[0]` | Eligibility bound to the specific voter | FAIL_BINDING |
 
-### Census address extraction
+### Eligibility address extraction
 
-The census leaf is `(address << 88) | weight`. The address is extracted by
-right-shifting 88 bits:
+**Merkle mode** (censusOrigin 1-3): The census leaf is `(address << 88) | weight`.
+The address is extracted by right-shifting 88 bits.
+
+**CSP mode** (censusOrigin 4): The `CspEntry.voter_address` field contains the
+voter's Ethereum address directly as uint160 in FrRaw. The lower 3 limbs (160 bits)
+are compared against the ballot proof's `public_inputs[0]`.
 
 ```rust
 addr[0] = (leaf[1] >> 24) | (leaf[2] << 40)   // bits 88..152 → bits 0..64
@@ -615,6 +670,7 @@ must be rejected by the verifier.
 | 20 | `FAIL_RESULT_ACCUM` | results.rs | Homomorphic ballot sum doesn't match results |
 | 21 | `FAIL_LEAF_HASH` | results.rs | Ballot SMT leaf hash mismatch |
 | 22 | `FAIL_BINDING` | main.rs | Cross-block binding mismatch |
+| 23 | `FAIL_CSP` | csp.rs | CSP ECDSA signature verification failed |
 | 31 | `FAIL_PARSE` | io.rs | Binary format / parse error |
 
 ---
@@ -637,9 +693,14 @@ voteID. The public key hash matches the address declared in the ballot proof.
 
 ### 12.3 Census Membership
 
-Every voter has a valid Merkle inclusion proof in the census tree. The census
-address is bound to the ballot proof address (Phase 6.6), preventing reuse of
-census proofs across voters. No duplicate census leaves exist within a batch.
+Every voter has a valid eligibility proof:
+- **Merkle mode** (censusOrigin 1-3): valid lean-IMT Poseidon inclusion proof in the census tree.
+- **CSP mode** (censusOrigin 4): valid ECDSA signature from the CSP authority.
+
+The eligibility address is bound to the ballot proof address (Phase 6.6),
+preventing reuse of eligibility proofs across voters. In Merkle mode, no
+duplicate census leaves exist within a batch. In CSP mode, no duplicate
+`(voter_address, index)` pairs are allowed.
 
 ### 12.4 State Integrity
 
@@ -716,10 +777,13 @@ This matches the Gnark `VerifyBarycentricEvaluation` circuit.
 **Mitigation:** The full KZG opening proof will be verified once BLS12-381
 pairing precompiles are available in ZisK.
 
-### 13.4 CSP Census Proofs
+### 13.4 CSP Census — Revocation
 
-Only lean-IMT Poseidon census proofs are supported. The Gnark circuit also
-supports CSP/blind-signature census proofs, which are not yet implemented.
+CSP ECDSA census proofs are now supported (censusOrigin=4). However, CSP
+credential revocation is not implemented — once the CSP signs a voter's
+eligibility, it cannot be revoked within the circuit. Revocation would need
+to be handled at the application layer (e.g., by not including the voter
+in subsequent batches).
 
 ### 13.5 Blob Content Verification
 

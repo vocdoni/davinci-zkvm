@@ -117,6 +117,32 @@ pub struct KzgEvalJson {
     pub blob: String,
 }
 
+/// One CSP ECDSA attestation for a voter in JSON format.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CspProofJson {
+    /// ECDSA signature R component, 32-byte big-endian hex.
+    pub r: String,
+    /// ECDSA signature S component, 32-byte big-endian hex.
+    pub s: String,
+    /// Voter's Ethereum address, 20-byte hex (0x-prefixed).
+    pub voter_address: String,
+    /// Voter's census weight, 32-byte big-endian hex.
+    pub weight: String,
+    /// CSP-assigned auto-increment ballot index.
+    pub index: u64,
+}
+
+/// CSP ECDSA census data for the full batch in JSON format.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CspDataJson {
+    /// CSP public key X coordinate, 32-byte big-endian hex.
+    pub csp_pub_key_x: String,
+    /// CSP public key Y coordinate, 32-byte big-endian hex.
+    pub csp_pub_key_y: String,
+    /// Per-voter CSP ECDSA attestations.
+    pub proofs: Vec<CspProofJson>,
+}
+
 /// HTTP request body for POST /prove
 #[derive(Debug, Deserialize)]
 pub struct ProveRequest {
@@ -134,6 +160,10 @@ pub struct ProveRequest {
     /// Census lean-IMT Poseidon membership proofs (one per voter).
     #[serde(default)]
     pub census_proofs: Vec<CensusProofJson>,
+    /// CSP ECDSA census data (used when censusOrigin == 4).
+    /// Mutually exclusive with census_proofs.
+    #[serde(default)]
+    pub csp_data: Option<CspDataJson>,
     /// ElGamal re-encryption verification data.
     #[serde(default)]
     pub reencryption: Option<ReencryptionDataJson>,

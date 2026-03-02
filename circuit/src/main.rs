@@ -7,6 +7,7 @@ mod bn254;
 mod bn254_fr;
 mod census;
 mod consistency;
+mod csp;
 mod ecdsa;
 mod groth16;
 mod hash;
@@ -73,7 +74,7 @@ fn hash_enc_key(x: &FrRaw, y: &FrRaw) -> FrRaw {
 //   [10..17] RootHashAfter     — 256-bit Arbo SHA-256 root AFTER  batch (8 × u32, LE)
 //   [18]     VotersCount       — number of real (non-dummy) votes in the batch
 //   [19]     OverwrittenVotesCount — number of ballots that replaced an existing vote
-//   [20..27] CensusRoot        — 256-bit lean-IMT Poseidon census root (8 × u32, LE)
+//   [20..27] CensusRoot        — 256-bit census root (Merkle root or CSP address, 8 × u32, LE)
 //
 // Indices 28-39: BlobCommitmentLimbs (3 × 128-bit, 12 × u32)
 //   [28..31] BlobCommitment limb 0 (128 bits)
@@ -144,17 +145,48 @@ fn main() {
     //
     // Verify each voter's right to participate in this election by checking
     // their membership in the census. The verification method depends on the
-    // censusOrigin parameter stored in the process configuration.
+    // censusOrigin parameter stored in the process configuration (key 0x06).
     //
-    // Currently supported: lean-IMT Poseidon Merkle tree proofs.
-    //   Each voter proves inclusion of (address, weight) in the census tree.
-    //   The circuit enforces: same root for all proofs, no duplicate leaves.
+    // Supported census origins:
+    //   1-3: lean-IMT Poseidon Merkle tree proofs.
+    //        Each voter proves inclusion of (address, weight) in the census tree.
+    //        Enforces: same root for all proofs, no duplicate leaves.
     //
-    // Extensible to: CSP blind signatures (authority signs voter's key),
-    // ZK-credential proofs, or other census mechanisms. The census proof
-    // format and verification logic will be selected by censusOrigin.
+    //   4:   CSP (Credential Service Provider) ECDSA.
+    //        An authority signs each voter's (processID, address, weight, index)
+    //        using secp256k1 ECDSA. The censusRoot is the CSP's Ethereum address.
+    //        Enforces: valid CSP signatures, no duplicate (address, index) pairs.
+    //
+    // Extensible: future census origins (ZK-credential proofs, on-chain lookups)
+    // can be added as new branches without modifying existing logic.
     // ═════════════════════════════════════════════════════════════════════════
-    let eligibility_ok = census::verify_batch(&parsed, &mut fail_mask);
+
+    // Read censusOrigin from process config (process_proofs[3], key 0x06).
+    let census_origin: u64 = parsed.state.as_ref()
+        .and_then(|s| s.process_proofs.get(3))
+        .map(|p| p.new_value[0])
+        .unwrap_or(0);
+
+    let (eligibility_ok, census_root) = if census_origin == crate::types::CENSUS_ORIGIN_CSP {
+        // CSP ECDSA mode: verify CSP signatures for each voter.
+        match &parsed.csp_block {
+            Some(csp) => {
+                let process_id = parsed.state.as_ref()
+                    .map(|s| s.process_id)
+                    .unwrap_or(ZERO_FR);
+                csp::verify_csp(csp, &process_id, &mut fail_mask)
+            }
+            None => {
+                fail_mask |= crate::types::FAIL_MISSING_BLOCK;
+                (false, ZERO_FR)
+            }
+        }
+    } else {
+        // Merkle tree mode (censusOrigin 1-3): lean-IMT Poseidon proofs.
+        let ok = census::verify_batch(&parsed, &mut fail_mask);
+        let root = parsed.census_proofs.first().map(|cp| cp.root).unwrap_or(ZERO_FR);
+        (ok, root)
+    };
 
     // ═════════════════════════════════════════════════════════════════════════
     // PHASE 4: STATE TRANSITION
@@ -262,12 +294,17 @@ fn main() {
         }
     }
 
-    // 6.3 Census proof count must equal the voter count from STATETX.
+    // 6.3 Census/CSP proof count must equal the voter count from STATETX.
     //
     // Without this check, a malicious prover could provide fewer census
     // proofs than voters, allowing non-census-members to submit votes.
     if let Some(state) = &parsed.state {
-        if parsed.census_proofs.len() != state.n_voters {
+        let eligibility_count = if census_origin == crate::types::CENSUS_ORIGIN_CSP {
+            parsed.csp_block.as_ref().map(|c| c.entries.len()).unwrap_or(0)
+        } else {
+            parsed.census_proofs.len()
+        };
+        if eligibility_count != state.n_voters {
             fail_mask |= crate::types::FAIL_BINDING;
             binding_ok = false;
         }
@@ -284,27 +321,46 @@ fn main() {
         }
     }
 
-    // 6.5 Census leaf address must match the ballot proof's address.
+    // 6.5 Eligibility address must match the ballot proof's address.
     //
-    // The census leaf encodes PackAddressWeight(address, weight) = (address << 88) | weight.
+    // For Merkle census: the leaf encodes PackAddressWeight(address, weight) = (address << 88) | weight.
+    // For CSP census: each CspEntry has voter_address directly as uint160 in FrRaw.
     // The ballot proof's public_inputs[0] is the voter's Ethereum address (uint160).
-    // This check binds each census membership proof to the specific voter who submitted
-    // the corresponding ballot proof, preventing reuse of a single census proof across
-    // multiple voters.
+    // This check binds each eligibility proof to the specific voter who submitted
+    // the corresponding ballot proof.
     if let Some(state) = &parsed.state {
-        let n = state.n_voters.min(parsed.census_proofs.len()).min(parsed.proofs.len());
         if parsed.n_public >= 1 {
-            for i in 0..n {
-                let leaf_addr = extract_address_from_census_leaf(&parsed.census_proofs[i].leaf);
-                let proof_addr = &parsed.proofs[i].public_inputs[0];
-                // Compare lower 3 limbs (160 bits); limb[3] must be zero for valid addresses.
-                if leaf_addr[0] != proof_addr[0]
-                    || leaf_addr[1] != proof_addr[1]
-                    || (leaf_addr[2] & 0xFFFFFFFF) != (proof_addr[2] & 0xFFFFFFFF)
-                {
-                    fail_mask |= crate::types::FAIL_BINDING;
-                    binding_ok = false;
-                    break;
+            if census_origin == crate::types::CENSUS_ORIGIN_CSP {
+                // CSP mode: compare CspEntry.voter_address with proof address.
+                if let Some(csp) = &parsed.csp_block {
+                    let n = state.n_voters.min(csp.entries.len()).min(parsed.proofs.len());
+                    for i in 0..n {
+                        let csp_addr = &csp.entries[i].voter_address;
+                        let proof_addr = &parsed.proofs[i].public_inputs[0];
+                        if csp_addr[0] != proof_addr[0]
+                            || csp_addr[1] != proof_addr[1]
+                            || (csp_addr[2] & 0xFFFFFFFF) != (proof_addr[2] & 0xFFFFFFFF)
+                        {
+                            fail_mask |= crate::types::FAIL_BINDING;
+                            binding_ok = false;
+                            break;
+                        }
+                    }
+                }
+            } else {
+                // Merkle mode: extract address from census leaf.
+                let n = state.n_voters.min(parsed.census_proofs.len()).min(parsed.proofs.len());
+                for i in 0..n {
+                    let leaf_addr = extract_address_from_census_leaf(&parsed.census_proofs[i].leaf);
+                    let proof_addr = &parsed.proofs[i].public_inputs[0];
+                    if leaf_addr[0] != proof_addr[0]
+                        || leaf_addr[1] != proof_addr[1]
+                        || (leaf_addr[2] & 0xFFFFFFFF) != (proof_addr[2] & 0xFFFFFFFF)
+                    {
+                        fail_mask |= crate::types::FAIL_BINDING;
+                        binding_ok = false;
+                        break;
+                    }
                 }
             }
         }
@@ -327,11 +383,7 @@ fn main() {
         && kzg_ok
         && binding_ok;
 
-    // Extract census root: all proofs use the same root (validated in census.rs).
-    let census_root: FrRaw = parsed.census_proofs
-        .first()
-        .map(|cp| cp.root)
-        .unwrap_or(ZERO_FR);
+    // census_root was computed in Phase 3 (Merkle root or CSP Ethereum address).
 
     // ── Status ──────────────────────────────────────────────────────────────
     set_output(0, overall_ok as u32);

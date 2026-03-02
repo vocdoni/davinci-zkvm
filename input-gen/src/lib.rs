@@ -816,3 +816,74 @@ pub fn be_hex32_to_fr_le(s: &str) -> Result<[u64; 4]> {
         u64::from_be_bytes(padded[0..8].try_into().unwrap()),
     ])
 }
+
+// ─── CSP ECDSA census block ─────────────────────────────────────────────────
+
+const CSP_MAGIC: u64 = u64::from_le_bytes(*b"CSPBLK!!");
+
+/// One CSP ECDSA attestation for a single voter.
+#[derive(Debug, Clone)]
+pub struct CspEntryData {
+    /// ECDSA signature R component ([u64;4] LE limbs).
+    pub r: [u64; 4],
+    /// ECDSA signature S component ([u64;4] LE limbs).
+    pub s: [u64; 4],
+    /// Voter's Ethereum address as uint160 in [u64;4] LE limbs.
+    pub voter_address: [u64; 4],
+    /// Voter's census weight ([u64;4] LE limbs).
+    pub weight: [u64; 4],
+    /// CSP-assigned auto-increment ballot index.
+    pub index: u64,
+}
+
+/// CSP census block data.
+#[derive(Debug, Clone)]
+pub struct CspBlockData {
+    /// CSP public key X coordinate ([u64;4] LE limbs).
+    pub csp_pub_key_x: [u64; 4],
+    /// CSP public key Y coordinate ([u64;4] LE limbs).
+    pub csp_pub_key_y: [u64; 4],
+    /// Per-voter CSP ECDSA attestations.
+    pub entries: Vec<CspEntryData>,
+}
+
+/// Write the CSPBLK!! binary block.
+///
+/// Format:
+/// ```text
+/// CSP_MAGIC(u64) | n_entries(u64) | csp_pub_key_x(FrRaw) | csp_pub_key_y(FrRaw)
+/// Per entry: r(FrRaw) | s(FrRaw) | voter_address(FrRaw) | weight(FrRaw) | index(u64)
+/// ```
+pub fn write_csp_block(data: &CspBlockData) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&CSP_MAGIC.to_le_bytes());
+    buf.extend_from_slice(&(data.entries.len() as u64).to_le_bytes());
+    for &w in &data.csp_pub_key_x { buf.extend_from_slice(&w.to_le_bytes()); }
+    for &w in &data.csp_pub_key_y { buf.extend_from_slice(&w.to_le_bytes()); }
+    for entry in &data.entries {
+        for &w in &entry.r { buf.extend_from_slice(&w.to_le_bytes()); }
+        for &w in &entry.s { buf.extend_from_slice(&w.to_le_bytes()); }
+        for &w in &entry.voter_address { buf.extend_from_slice(&w.to_le_bytes()); }
+        for &w in &entry.weight { buf.extend_from_slice(&w.to_le_bytes()); }
+        buf.extend_from_slice(&entry.index.to_le_bytes());
+    }
+    Ok(buf)
+}
+
+/// Convert a 0x-prefixed 20-byte Ethereum address hex string to [u64;4] LE (uint160).
+pub fn address_hex_to_fr_le(s: &str) -> Result<[u64; 4]> {
+    let hex = s.trim_start_matches("0x");
+    let bytes = hex::decode(hex).with_context(|| format!("invalid address hex: {s}"))?;
+    if bytes.len() != 20 {
+        bail!("expected 20 bytes for address, got {}: {}", bytes.len(), s);
+    }
+    // 20 bytes big-endian → pad to 32 bytes → LE u64 limbs
+    let mut padded = [0u8; 32];
+    padded[12..].copy_from_slice(&bytes);
+    Ok([
+        u64::from_be_bytes(padded[24..32].try_into().unwrap()),
+        u64::from_be_bytes(padded[16..24].try_into().unwrap()),
+        u64::from_be_bytes(padded[8..16].try_into().unwrap()),
+        u64::from_be_bytes(padded[0..8].try_into().unwrap()),
+    ])
+}
