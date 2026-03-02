@@ -2,6 +2,33 @@
 
 All notable changes to davinci-zkvm are documented here.
 
+## Unreleased — Go SDK Strongly-Typed Integration API
+
+### Go SDK (`go-sdk/`)
+
+- **Strongly-typed converter functions** (`converters.go`). Added native Go types
+  (`EcdsaSignature`, `Groth16Proof`, `VerificationKey`, `PublicInput`, `ArboTransition`)
+  with custom JSON marshaling that produces the exact format expected by the Rust service.
+  Constructor functions accept `*big.Int` values and handle all hex encoding internally:
+  `SmtEntryFromArboTransition`, `SmtReadProof`, `CensusProofFromBigInts`,
+  `ReencryptionEntryFromBigInts`, `NewReencryptionData`, `NewStateTransitionData`,
+  `NewKZGRequest`, `BigIntToHex32BE` (exported).
+
+- **Public outputs parser** (`outputs.go`). Added `ParseOutputs([]uint32)` to decode
+  the 46 u32 ZisK output registers into `PublicOutputs` — matching davinci-node's
+  `StateTransitionBatchProofInputs`. Added `ABIEncode()` for on-chain uint256[8]
+  encoding, `ABIValues()` for go-ethereum integration, `FailString()` for
+  human-readable fail mask decoding, and `String()` for one-line summaries.
+
+- **Fluent request builder** (`builder.go`). Added `ProveRequestBuilder` with
+  `SetVerificationKey` / `SetVerificationKeyJSON`, `AddProof` / `AddProofJSON`,
+  `AddEcdsaSignature`, `SetStateTransition`, `SetCensusProofs`, `SetReencryption`,
+  `SetKZG`, and `Build()` with validation. Supports both strongly-typed inputs and
+  raw snarkjs JSON pass-through for zero-copy integration.
+
+- **Unit tests** (`converters_test.go`). 19 tests covering all new types, constructors,
+  JSON marshaling, builder validation, ABI encoding, fail mask decoding, and edge cases.
+
 ## Unreleased — BN254 Fr Precompile Optimization
 
 ### Performance
