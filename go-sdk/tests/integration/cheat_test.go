@@ -344,13 +344,14 @@ func TestCheatWrongKZG(t *testing.T) {
 	}
 	comm48 := [48]byte(commitment)
 
-	// Use the election's initial state root as processID / rootHashBefore.
-	pidHex := trimHex(election.OldRoot)
-	processIDBytes, _ := hex.DecodeString(pidHex)
+	// Use the election's correct processID (BE hex) and root (LE→BE hex)
+	// so only FAIL_KZG is triggered (not FAIL_BINDING from mismatched IDs).
+	pidBE, _ := hex.DecodeString(trimHex(election.ProcessIDHex()))
+	rootBE, _ := hex.DecodeString(trimHex(arboHexToBEHex(election.OldRoot)))
 
 	wrongKZG, err := davinci.EncodeKZGBlock(&davinci.KZGEvalData{
-		ProcessID:      processIDBytes,
-		RootHashBefore: processIDBytes,
+		ProcessID:      pidBE,
+		RootHashBefore: rootBE,
 		Commitment:     comm48,
 		YClaimed:       wrongY,
 		Blob:           blob[:],
@@ -462,7 +463,8 @@ func TestCheatMismatchedVoteID(t *testing.T) {
 }
 
 // TestCheatValidKZGRoundTrip verifies the KZG evaluation against multiple blob types
-// to ensure the KZG encoding is correct.
+// to ensure the KZG encoding is correct. The processID and rootHashBefore must match
+// the STATETX block values so the cross-block binding check passes.
 func TestCheatValidKZGRoundTrip(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -492,7 +494,7 @@ func TestCheatValidKZGRoundTrip(t *testing.T) {
 			if blob == nil {
 				t.Skip("blob data not available")
 			}
-			base, _, _ := buildCheatInput(t)
+			base, election, _ := buildCheatInput(t)
 
 			commitment, err := blob.ComputeCommitment()
 			if err != nil {
@@ -500,16 +502,12 @@ func TestCheatValidKZGRoundTrip(t *testing.T) {
 			}
 			comm48 := [48]byte(commitment)
 
-			processIDBytes := make([]byte, 4)
-			processIDBytes[0] = 0x42
-			rootHashBytes := make([]byte, 4)
-			rootHashBytes[0] = 0x07
+			// Use the election's actual processID (BE) and root (arbo LE→BE)
+			// so the circuit's cross-block binding check passes.
+			pidHex := election.ProcessIDHex()
+			rootBEHex := arboHexToBEHex(election.OldRoot)
 
-			z := deriveKZGZ(
-				"0x"+hex.EncodeToString(processIDBytes),
-				"0x"+hex.EncodeToString(rootHashBytes),
-				comm48,
-			)
+			z := deriveKZGZ(pidHex, rootBEHex, comm48)
 
 			y, err := blobs.EvaluateBarycentricNative(blob, z, false)
 			if err != nil {
@@ -518,9 +516,12 @@ func TestCheatValidKZGRoundTrip(t *testing.T) {
 			var yClaimed [32]byte
 			y.FillBytes(yClaimed[:])
 
+			processIDBytes, _ := hex.DecodeString(trimHex(pidHex))
+			rootBytes, _ := hex.DecodeString(trimHex(rootBEHex))
+
 			kzgBlock, err := davinci.EncodeKZGBlock(&davinci.KZGEvalData{
 				ProcessID:      processIDBytes,
-				RootHashBefore: rootHashBytes,
+				RootHashBefore: rootBytes,
 				Commitment:     comm48,
 				YClaimed:       yClaimed,
 				Blob:           blob[:],

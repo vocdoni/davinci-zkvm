@@ -7,6 +7,7 @@ package integration
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -16,6 +17,7 @@ import (
 	"github.com/vocdoni/davinci-node/crypto/blobs"
 	bjjgnark "github.com/vocdoni/davinci-node/crypto/ecc/bjj_gnark"
 	"github.com/vocdoni/davinci-node/crypto/ecc"
+	"github.com/vocdoni/davinci-node/crypto/ecc/format"
 	"github.com/vocdoni/davinci-node/crypto/elgamal"
 	nodesig "github.com/vocdoni/davinci-node/crypto/signatures/ethereum"
 	"github.com/vocdoni/davinci-node/types"
@@ -58,8 +60,8 @@ type Election struct {
 	censusLeaves []*big.Int
 	// OldRoot is the current state root (updated after each batch).
 	OldRoot string
-	// configVals are the process config values inserted at setup.
-	configVals []uint64
+	// configVals are the process config BigInt values inserted at setup.
+	configVals []*big.Int
 	// ResultsAdd is the accumulated homomorphic sum of all re-encrypted ballots.
 	ResultsAdd *elgamal.Ballot
 	// ResultsSub is the accumulated homomorphic sum of overwritten (replaced) ballots.
@@ -73,6 +75,25 @@ type Election struct {
 // It builds the process state tree (with config), the census IMT, and
 // generates random ElGamal and ECDSA keys.
 func NewElection(nVoters int) (*Election, error) {
+	// ── ProcessID (for ballot proofs and state tree key 0x00) ────────────────
+	var processID types.ProcessID
+	copy(processID[:], "DAVINCI_INTEGRATION_TEST")
+	processIDBI := new(big.Int).SetBytes(processID[:])
+
+	// ── ElGamal encryption key ───────────────────────────────────────────────
+	// Generated BEFORE tree setup because the encryption key hash is stored
+	// in the process config tree under key 0x03.
+	encKeyPoint, encPrivKey, err := elgamal.GenerateKey(bjjgnark.New())
+	if err != nil {
+		return nil, fmt.Errorf("elgamal.GenerateKey: %w", err)
+	}
+	encKey := encKeyPoint.(*bjjgnark.BJJ)
+
+	// Compute the encryption key leaf value: SHA-256(X_BE32 || Y_BE32).
+	// This binds the re-encryption public key to the state tree, enforced by
+	// the circuit's cross-block binding check (FAIL_BINDING).
+	encKeyHashBI := encKeyLeafValue(encKey)
+
 	// ── Process state tree ───────────────────────────────────────────────────
 	procDB := memdb.New()
 	procTree, err := arbo.NewTree(arbo.Config{
@@ -85,19 +106,24 @@ func NewElection(nVoters int) (*Election, error) {
 	}
 
 	bLen := arbo.HashFunctionSha256.Len()
-	configVals := []uint64{0xABCDEF, 0x01, 0x1234, 0x01}
+	// Config values stored under their respective keys.
+	// The circuit validates these keys and cross-checks processID and encKey.
+	configValsBI := []*big.Int{
+		processIDBI,        // 0x00 = ProcessID (must match STATETX block header)
+		big.NewInt(0x01),   // 0x02 = BallotMode
+		encKeyHashBI,       // 0x03 = EncryptionKey (SHA-256 of pubkey coordinates)
+		big.NewInt(0x01),   // 0x06 = CensusOrigin
+	}
 	for i, k := range configKeys {
 		if err := procTree.Add(
 			arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(k)),
-			arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(configVals[i])),
+			arbo.BigIntToBytes(bLen, configValsBI[i]),
 		); err != nil {
 			return nil, fmt.Errorf("procTree.Add config[%d]: %w", i, err)
 		}
 	}
 
 	// ── ResultsAdd (0x04) and ResultsSub (0x05) ──────────────────────────────
-	// Initialize with the leaf hash of the zero ballot so that subsequent
-	// batches can build valid update transitions.
 	zeroBallot := elgamal.NewBallot(bjjgnark.New())
 	zeroLeafBI := ballotLeafHash(zeroBallot)
 	for _, k := range []uint64{keyResultsAdd, keyResultsSub} {
@@ -114,22 +140,6 @@ func NewElection(nVoters int) (*Election, error) {
 		return nil, fmt.Errorf("initial root: %w", err)
 	}
 	oldRoot := "0x" + hex.EncodeToString(pad32(rootBytes))
-
-	// ── ProcessID (for ballot proofs) ────────────────────────────────────────
-	// Use a fixed test process ID with a recognizable pattern.
-	var processID types.ProcessID
-	copy(processID[:], "DAVINCI_INTEGRATION_TEST")
-
-	// ── ElGamal encryption key ───────────────────────────────────────────────
-	// Use elgamal.GenerateKey to generate a proper ElGamal key pair on bjjgnark.
-	// The returned public key is encKey (ecc.Point on bjjgnark) and the private
-	// scalar encPrivKey can directly decrypt homomorphically accumulated ciphertexts.
-	encKeyPoint, encPrivKey, err := elgamal.GenerateKey(bjjgnark.New())
-	if err != nil {
-		return nil, fmt.Errorf("elgamal.GenerateKey: %w", err)
-	}
-	// Type-assert to *bjjgnark.BJJ for use in BuildReencBlock and ballot proofs.
-	encKey := encKeyPoint.(*bjjgnark.BJJ)
 
 	// ── Voters ───────────────────────────────────────────────────────────────
 	voters := make([]*Voter, nVoters)
@@ -173,18 +183,28 @@ func NewElection(nVoters int) (*Election, error) {
 		Census:       imt,
 		censusLeaves: leaves,
 		OldRoot:      oldRoot,
-		configVals:   configVals,
+		configVals:   configValsBI,
 		ResultsAdd:   elgamal.NewBallot(bjjgnark.New()),
 		ResultsSub:   elgamal.NewBallot(bjjgnark.New()),
 		VotedBallots: make(map[int]*elgamal.Ballot),
 	}, nil
 }
 
-// processIDHex returns the election's fixed 31-byte ProcessID left-padded to
-// 32 bytes and encoded as "0x"-prefixed big-endian hex.  This value is used as
-// the process_id field in STATETX and KZGBLK protocol blocks.
-func (e *Election) processIDHex() string {
-	return "0x" + hex.EncodeToString(pad32(e.ProcessID[:]))
+// processIDArboHex returns the processID as arbo-LE hex for the STATETX block.
+// The service's hex32_to_smt_fr interprets this as LE bytes → LE u64 words.
+// This value matches the arbo leaf value for process config key 0x00.
+func (e *Election) processIDArboHex() string {
+	bLen := arbo.HashFunctionSha256.Len()
+	pidBI := new(big.Int).SetBytes(e.ProcessID[:])
+	return "0x" + hex.EncodeToString(arbo.BigIntToBytes(bLen, pidBI))
+}
+
+// ProcessIDHex returns the processID as standard BE hex for the KZG block
+// and Z derivation. The service's be_hex32_to_fr_le interprets this as
+// BE bytes → LE u64 words. Both methods produce the same FrRaw in the circuit.
+func (e *Election) ProcessIDHex() string {
+	pidBI := new(big.Int).SetBytes(e.ProcessID[:])
+	return "0x" + hex.EncodeToString(pad32(pidBI.Bytes()))
 }
 
 // BuildStateBlock builds the STATETX protocol block for a batch of voters.
@@ -324,7 +344,7 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 	return &davinci.StateTransitionData{
 		VotersCount:      uint64(n),
 		OverwrittenCount: uint64(len(overwrittenBallots)),
-		ProcessID:        e.processIDHex(),
+		ProcessID:        e.processIDArboHex(),
 		OldStateRoot:     oldRoot,
 		NewStateRoot:     newRoot,
 		VoteIDSmt:        voteIDChain,
@@ -437,9 +457,11 @@ func (e *Election) BuildKZGBlock(batchIdx int, oldRoot string) (*davinci.KZGRequ
 
 	// Derive Z using SHA-256(processID_be32 ‖ rootHashBefore_be32 ‖ commitment_48).
 	// processID is the election's fixed identifier; rootHashBefore is the state
-	// root before this batch.
-	pidHex := e.processIDHex()
-	kzgZ := deriveKZGZ(pidHex, oldRoot, comm48)
+	// root before this batch. Both must be in big-endian hex format to match
+	// the circuit's compute_z which converts FrRaw limbs to 32-byte BE.
+	pidHex := e.ProcessIDHex()
+	rootBEHex := arboHexToBEHex(oldRoot)
+	kzgZ := deriveKZGZ(pidHex, rootBEHex, comm48)
 
 	kzgY, err := blobs.EvaluateBarycentricNative(&blob, kzgZ, false)
 	if err != nil {
@@ -450,7 +472,7 @@ func (e *Election) BuildKZGBlock(batchIdx int, oldRoot string) (*davinci.KZGRequ
 
 	return &davinci.KZGRequest{
 		ProcessID:      pidHex,
-		RootHashBefore: oldRoot,
+		RootHashBefore: rootBEHex,
 		Commitment:     "0x" + hex.EncodeToString(comm48[:]),
 		YClaimed:       "0x" + hex.EncodeToString(yClaimed[:]),
 		Blob:           "0x" + hex.EncodeToString(blob[:]),
@@ -622,4 +644,21 @@ func discreteLog(point ecc.Point, maxVal int64) (int64, error) {
 	}
 
 	return 0, fmt.Errorf("discrete log not found in [0, %d]", maxVal)
+}
+
+// encKeyLeafValue computes the arbo leaf value for a BabyJubJub encryption key:
+// SHA-256(X_BE32 || Y_BE32) → BigInt. This encoding matches the circuit's
+// hash_enc_key function (circuit/src/main.rs), binding the re-encryption
+// public key to the process config entry in the state tree.
+func encKeyLeafValue(encKey *bjjgnark.BJJ) *big.Int {
+	// Convert from Reduced Twisted Edwards to Twisted Edwards (circuit convention).
+	rx, ry := encKey.Point()
+	tx, ty := format.FromRTEtoTE(rx, ry)
+	// Serialize each coordinate as 32-byte big-endian.
+	var buf [64]byte
+	tx.FillBytes(buf[:32])
+	ty.FillBytes(buf[32:])
+	// SHA-256 → BigInt (stored as arbo LE bytes in the tree).
+	digest := sha256.Sum256(buf[:])
+	return new(big.Int).SetBytes(digest[:])
 }

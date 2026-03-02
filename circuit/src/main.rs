@@ -20,6 +20,33 @@ mod types;
 use crate::types::{FrRaw, ZERO_FR};
 use ziskos::{read_input_slice, set_output};
 
+/// Compute the arbo leaf value for the encryption key: SHA-256(X_BE32 || Y_BE32) → FrRaw.
+///
+/// This encoding matches the sequencer's convention for storing a BabyJubJub public key
+/// as a single 256-bit value in the arbo SHA-256 state tree (config key 0x03).
+fn hash_enc_key(x: &FrRaw, y: &FrRaw) -> FrRaw {
+    let mut buf = [0u8; 64];
+    // FrRaw [u64;4] LE limbs → 32-byte big-endian (arbo convention for hash inputs)
+    for (i, &limb) in x.iter().enumerate() {
+        let bytes = limb.to_be_bytes();
+        let dst = (3 - i) * 8;
+        buf[dst..dst + 8].copy_from_slice(&bytes);
+    }
+    for (i, &limb) in y.iter().enumerate() {
+        let bytes = limb.to_be_bytes();
+        let dst = 32 + (3 - i) * 8;
+        buf[dst..dst + 8].copy_from_slice(&bytes);
+    }
+    let digest = hash::sha256_once(&buf);
+    // 32-byte hash (big-endian) → FrRaw [u64;4] LE limbs
+    let mut fr = ZERO_FR;
+    for i in 0..4 {
+        let off = (3 - i) * 8;
+        fr[i] = u64::from_be_bytes(digest[off..off + 8].try_into().unwrap());
+    }
+    fr
+}
+
 // ─── Output register layout ─────────────────────────────────────────────────
 //
 // Indices 0-1: circuit status
@@ -174,6 +201,53 @@ fn main() {
     let (kzg_ok, kzg_commitment) = kzg::verify_kzg(&parsed.kzg, &mut fail_mask);
 
     // ═════════════════════════════════════════════════════════════════════════
+    // PHASE 6: CROSS-BLOCK BINDING
+    //
+    // The input contains independently-parsed binary blocks (STATETX, KZGBLK,
+    // REENCBLK). Each block carries its own copy of shared values like
+    // processID and rootHashBefore. An attacker could provide a valid KZG
+    // evaluation for a *different* election or a *different* state root if
+    // these copies are not cross-checked. This phase enforces that all blocks
+    // agree on the same process context.
+    //
+    // Checks:
+    //   1. KZG processID     == State processID
+    //   2. KZG rootHashBefore == State old_state_root
+    //   3. Encryption key hash from re-encryption block matches the value
+    //      stored under process config key 0x03 in the state tree.
+    // ═════════════════════════════════════════════════════════════════════════
+    let mut binding_ok = true;
+
+    // 6.1 KZG ↔ State processID and rootHashBefore
+    if let (Some(kzg_block), Some(state)) = (&parsed.kzg, &parsed.state) {
+        if kzg_block.process_id != state.process_id {
+            fail_mask |= crate::types::FAIL_BINDING;
+            binding_ok = false;
+        }
+        if kzg_block.root_hash_before != state.old_state_root {
+            fail_mask |= crate::types::FAIL_BINDING;
+            binding_ok = false;
+        }
+    }
+
+    // 6.2 Re-encryption public key ↔ process config encryption key (key 0x03)
+    //
+    // The sequencer stores SHA-256(pubKeyX_BE32 || pubKeyY_BE32) as the arbo
+    // leaf value for config key 0x03. The circuit recomputes this hash from
+    // the re-encryption block's public key and verifies it matches the
+    // process proof value, ensuring the re-encryption key is the one
+    // authorized by the election configuration.
+    if let (Some((pub_x, pub_y)), Some(state)) = (&parsed.reenc_pub_key, &parsed.state) {
+        if state.process_proofs.len() == 4 {
+            let enc_key_hash = hash_enc_key(pub_x, pub_y);
+            if enc_key_hash != state.process_proofs[2].new_value {
+                fail_mask |= crate::types::FAIL_BINDING;
+                binding_ok = false;
+            }
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     // FINAL VERDICT
     //
     // Every phase must pass. The fail_mask provides granular diagnostics
@@ -187,7 +261,8 @@ fn main() {
         && state_ok
         && reenc_ok
         && results_ok
-        && kzg_ok;
+        && kzg_ok
+        && binding_ok;
 
     // Extract census root: all proofs use the same root (validated in census.rs).
     let census_root: FrRaw = parsed.census_proofs
