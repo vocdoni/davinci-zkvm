@@ -17,6 +17,7 @@ import (
 	"math/big"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +48,23 @@ func proofTimeout() time.Duration {
 		}
 	}
 	return 5 * time.Minute
+}
+
+// votesPerBatchFromEnv reads VOTES_PER_BATCH and returns the largest power of 2
+// <= the specified value, capped at davinci.MaxBatchSize. Default is 4 (matches
+// the current test batch layout: max batch size of 4 voters).
+func votesPerBatchFromEnv() int {
+	if s := os.Getenv("VOTES_PER_BATCH"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err == nil && n >= 2 {
+			p := 2
+			for p*2 <= n && p*2 <= davinci.MaxBatchSize {
+				p *= 2
+			}
+			return p
+		}
+	}
+	return 4
 }
 
 // newClient returns a new davinci SDK client.

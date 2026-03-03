@@ -101,9 +101,9 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
     let nproofs  = read1!(&mut off, 0) as usize;
     let n_public = read1!(&mut off, 0) as usize;
 
-    if magic != MAGIC              { *fail_mask |= 1 << 31; }
-    if nproofs == 0 || nproofs > 4096 { *fail_mask |= 1 << 31; }
-    if n_public > 256              { *fail_mask |= 1 << 31; }
+    if magic != MAGIC                              { *fail_mask |= 1 << 31; }
+    if nproofs == 0 || nproofs > crate::types::MAX_BATCH_SIZE { *fail_mask |= 1 << 31; }
+    if n_public > 256                              { *fail_mask |= 1 << 31; }
 
     // --- Verification key ---
     let vk_alpha_g1 = read_g1!(&mut off);

@@ -5,7 +5,7 @@ pub mod prove;
 
 use crate::config::Config;
 use crate::prover::ProverHandle;
-use axum::{extract::State, routing::get, routing::post, Json, Router};
+use axum::{extract::{DefaultBodyLimit, State}, routing::get, routing::post, Json, Router};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -18,11 +18,15 @@ pub struct AppState {
 }
 
 pub fn router(state: AppState) -> Router {
+    // 512 MB body limit to accommodate large batch prove requests
+    // (256 ballot proofs + SMT siblings can exceed the 2 MB axum default).
+    const MAX_BODY: usize = 512 * 1024 * 1024;
     Router::new()
         .route("/prove", post(prove::submit_prove))
         .route("/jobs/:id", get(jobs::get_job_status))
         .route("/jobs/:id/proof", get(jobs::get_job_proof))
         .route("/health", get(health))
+        .layer(DefaultBodyLimit::max(MAX_BODY))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state)

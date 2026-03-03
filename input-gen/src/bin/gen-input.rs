@@ -16,7 +16,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let mut proofs_dir: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
-    let mut nproofs: usize = 128;
+    let mut nproofs: usize = 256;
 
     let mut i = 1;
     while i < args.len() {

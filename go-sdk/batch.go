@@ -122,6 +122,9 @@ func (b *ProveBatch) toRequest() (*ProveRequest, error) {
 	if len(b.Voters) == 0 {
 		return nil, fmt.Errorf("at least one voter ballot is required")
 	}
+	if len(b.Voters) > MaxBatchSize {
+		return nil, fmt.Errorf("batch size %d exceeds MaxBatchSize (%d)", len(b.Voters), MaxBatchSize)
+	}
 
 	// Serialize VK
 	var vkJSON json.RawMessage
