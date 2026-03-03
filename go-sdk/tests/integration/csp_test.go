@@ -13,18 +13,23 @@ import (
 )
 
 // TestCSPChainedStateTransitions runs 4 state transitions using CSP census mode.
-// Batches 1-3: fresh voters (2 each). Batch 4: overwrites voters from batch 1.
+// Batches 1-3: fresh voters. Batch 4: overwrites voters from batch 1.
+// Batch size scales with VOTES_PER_BATCH (default 4, i.e. 2*scale per batch).
 func TestCSPChainedStateTransitions(t *testing.T) {
+	scale := votesPerBatchFromEnv() / 4
+	if scale < 1 {
+		scale = 1
+	}
 	cspBatches := []batchSpec{
-		{2, -1, 0},  // batch 1: 2 fresh voters
-		{2, -1, 0},  // batch 2: 2 fresh voters
-		{2, -1, 0},  // batch 3: 2 fresh voters
-		{2, 0, 7},   // batch 4: overwrite voters 0,1 from batch 1
+		{2 * scale, -1, 0},  // batch 1: fresh voters
+		{2 * scale, -1, 0},  // batch 2: fresh voters
+		{2 * scale, -1, 0},  // batch 3: fresh voters
+		{2 * scale, 0, 7},   // batch 4: overwrite voters from batch 1
 	}
 
 	nFresh := freshVoterCount(cspBatches)
-	t.Logf("=== TestCSPChainedStateTransitions: %d transitions, %d fresh voters ===",
-		len(cspBatches), nFresh)
+	t.Logf("=== TestCSPChainedStateTransitions: %d transitions, %d fresh voters (scale=%d) ===",
+		len(cspBatches), nFresh, scale)
 
 	// 1. Create CSP election
 	election, err := NewCSPElection(nFresh)

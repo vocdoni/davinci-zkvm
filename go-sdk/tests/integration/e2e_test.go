@@ -12,21 +12,25 @@ package integration
 //   4. CENSUS lean-IMT Poseidon membership proofs
 //   5. REENCBLK BabyJubJub ElGamal re-encryption verification
 //   6. KZGBLK EIP-4844 blob barycentric evaluation
-// Scenario (8 transitions, 14 fresh voters):
-//   Batch 1:  2 fresh voters   (idx 0-1)
-//   Batch 2:  4 fresh voters   (idx 2-5)
-// Batch 3:  2 overwrites     (idx 0-1 vote again => 1st overwrite)
-//   Batch 4:  2 fresh voters   (idx 6-7)
-//   Batch 5:  4 fresh voters   (idx 8-11)
-// Batch 6:  4 overwrites     (idx 2-5 vote again => 1st overwrite)
-// Batch 7:  2 overwrites     (idx 0-1 vote a 3rd time => 2nd overwrite)
-//   Batch 8:  2 fresh voters   (idx 12-13)
+//
+// Batch layout (8 transitions): scale = VOTES_PER_BATCH / 4 (rounded down to power of 2).
+// Default VOTES_PER_BATCH=4 gives the historic layout (max 4 voters per batch).
+// Set VOTES_PER_BATCH=256 for full-scale batches of up to 256 voters.
+//   Batch 1:  2*scale fresh voters   (idx 0 .. 2s-1)
+//   Batch 2:  4*scale fresh voters   (idx 2s .. 6s-1)
+//   Batch 3:  2*scale overwrites     (idx 0 .. 2s-1 => 1st overwrite)
+//   Batch 4:  2*scale fresh voters   (idx 6s .. 8s-1)
+//   Batch 5:  4*scale fresh voters   (idx 8s .. 12s-1)
+//   Batch 6:  4*scale overwrites     (idx 2s .. 6s-1 => 1st overwrite)
+//   Batch 7:  2*scale overwrites     (idx 0 .. 2s-1 => 2nd overwrite)
+//   Batch 8:  2*scale fresh voters   (idx 12s .. 14s-1)
 // After all transitions the test decrypts the ElGamal-accumulated tally and
 // verifies that each vote field matches the analytically expected total.
 // Prerequisites:
 //   - docker compose up -d --build (starts davinci-zkvm service)
 //   - DAVINCI_API_URL (default: http://localhost:8080)
 //   - DAVINCI_PROOF_TIMEOUT (default: 5m per ZisK proof)
+//   - VOTES_PER_BATCH (default: 4, max: 256)
 
 import (
 	"testing"
@@ -34,27 +38,37 @@ import (
 )
 
 func TestFullE2E(t *testing.T) {
+	// Scale all batch sizes by VOTES_PER_BATCH / 4.
+	// With the default VOTES_PER_BATCH=4, scale=1 and sizes are unchanged.
+	// With VOTES_PER_BATCH=256, scale=64 and each batch has up to 256 voters.
+	votesPerBatch := votesPerBatchFromEnv()
+	scale := votesPerBatch / 4
+	if scale < 1 {
+		scale = 1
+	}
+	t.Logf("VOTES_PER_BATCH=%d => scale=%d (max batch size=%d)", votesPerBatch, scale, 4*scale)
+
 	// Batch layout
-	// Size: voters in this batch (must be power of two ≥ 2).
-	// VoterStart: -1 → fresh voters; ≥ 0 → overwrite voters at that index.
-	// SeedOffset: shifts the deterministic ballot‐field seed so overwrite
+	// Size: voters in this batch (must be power of two >= 2).
+	// VoterStart: -1 => fresh voters; >= 0 => overwrite voters at that index.
+	// SeedOffset: shifts the deterministic ballot-field seed so overwrite
 	//   values differ from the originals, making the tally verifiable.
 	batches := []batchSpec{
 		// Phase A: initial fresh votes
-		{Size: 2, VoterStart: -1, SeedOffset: 0},   // batch 1: fresh 0-1
-		{Size: 4, VoterStart: -1, SeedOffset: 0},   // batch 2: fresh 2-5
+		{Size: 2 * scale, VoterStart: -1, SeedOffset: 0},          // batch 1: fresh
+		{Size: 4 * scale, VoterStart: -1, SeedOffset: 0},          // batch 2: fresh
 
 		// Phase B: first round of overwrites (interleaved with fresh)
-		{Size: 2, VoterStart: 0, SeedOffset: 7},    // batch 3: overwrite 0-1 (1st time)
-		{Size: 2, VoterStart: -1, SeedOffset: 0},   // batch 4: fresh 6-7
-		{Size: 4, VoterStart: -1, SeedOffset: 0},   // batch 5: fresh 8-11
+		{Size: 2 * scale, VoterStart: 0, SeedOffset: 7},           // batch 3: overwrite batch-1 voters (1st time)
+		{Size: 2 * scale, VoterStart: -1, SeedOffset: 0},          // batch 4: fresh
+		{Size: 4 * scale, VoterStart: -1, SeedOffset: 0},          // batch 5: fresh
 
 		// Phase C: more overwrites and double overwrite
-		{Size: 4, VoterStart: 2, SeedOffset: 7},    // batch 6: overwrite 2-5 (1st time)
-		{Size: 2, VoterStart: 0, SeedOffset: 13},   // batch 7: overwrite 0-1 (2nd time = 3rd vote)
+		{Size: 4 * scale, VoterStart: 2 * scale, SeedOffset: 7},   // batch 6: overwrite batch-2 voters (1st time)
+		{Size: 2 * scale, VoterStart: 0, SeedOffset: 13},          // batch 7: overwrite batch-1 voters (2nd time = 3rd vote)
 
 		// Phase D: final fresh votes after all overwrites
-		{Size: 2, VoterStart: -1, SeedOffset: 0},   // batch 8: fresh 12-13
+		{Size: 2 * scale, VoterStart: -1, SeedOffset: 0},          // batch 8: fresh
 	}
 
 	nFresh := freshVoterCount(batches)
