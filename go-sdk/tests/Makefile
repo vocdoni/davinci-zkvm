@@ -6,8 +6,11 @@ COMPOSE_PROJECT  ?= davinci-zkvm-test
 PROVING_KEY_PATH ?= $(HOME)/.zisk/provingKey
 PROFILE          ?= cuda
 
+# Repo root relative to this directory
+REPO_ROOT        := $(realpath $(dir $(COMPOSE_FILE)))
+
 .PHONY: test test-unit test-full test-full-cpu \
-        docker-build docker-up docker-up-cpu docker-down docker-logs \
+        docker-build docker-build-cpu docker-up docker-up-cpu docker-down docker-logs \
         clean help
 
 # Run ALL integration tests (requires GPU service with proving support)
@@ -19,13 +22,13 @@ test-unit:  ## Run lightweight tests (no proving required)
 	DAVINCI_API_URL=$(API_URL) DAVINCI_SKIP_PROVING=1 \
 	    go test -v -timeout 60s -run "TestHealth|TestInvalid|TestJobNotFound" ./...
 
-# ── Docker ────────────────────────────────────────────────────────────────────
+# Docker
 
 docker-build:  ## Build the CUDA GPU image
-	docker build -t davinci-zkvm-cuda:latest -f $(COMPOSE_FILE)/../Dockerfile.cuda $(COMPOSE_FILE)/..
+	docker build -t davinci-zkvm-cuda:latest -f $(REPO_ROOT)/Dockerfile.cuda $(REPO_ROOT)
 
 docker-build-cpu:  ## Build the CPU-only image
-	docker build -t davinci-zkvm:latest -f $(COMPOSE_FILE)/../Dockerfile $(COMPOSE_FILE)/..
+	docker build -t davinci-zkvm:latest -f $(REPO_ROOT)/Dockerfile $(REPO_ROOT)
 
 define WAIT_HEALTHY
 @echo "=== Waiting for service at $(API_URL) ==="; \

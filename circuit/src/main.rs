@@ -22,7 +22,6 @@ use crate::types::{FrRaw, ZERO_FR};
 use ziskos::{read_input_slice, set_output};
 
 /// Extract the Ethereum address (uint160) from a packed census leaf.
-///
 /// Census leaves encode `PackAddressWeight(address, weight) = (address << 88) | weight`.
 /// This function right-shifts the leaf value by 88 bits to recover the address.
 /// The returned FrRaw holds the 160-bit address in the lower 3 limbs.
@@ -37,7 +36,6 @@ fn extract_address_from_census_leaf(leaf: &FrRaw) -> FrRaw {
 }
 
 /// Compute the arbo leaf value for the encryption key: SHA-256(X_BE32 || Y_BE32) → FrRaw.
-///
 /// This encoding matches the sequencer's convention for storing a BabyJubJub public key
 /// as a single 256-bit value in the arbo SHA-256 state tree (config key 0x03).
 fn hash_enc_key(x: &FrRaw, y: &FrRaw) -> FrRaw {
@@ -63,31 +61,27 @@ fn hash_enc_key(x: &FrRaw, y: &FrRaw) -> FrRaw {
     fr
 }
 
-// ─── Output register layout ─────────────────────────────────────────────────
-//
+// Output register layout
 // Indices 0-1: circuit status
-//   [0]  overall_ok            — 1 = all checks passed, 0 = at least one failed
-//   [1]  fail_mask             — per-check failure bits (see types.rs FAIL_* constants)
-//
+// [0]  overall_ok            => 1 = all checks passed, 0 = at least one failed
+// [1]  fail_mask             => per-check failure bits (see types.rs FAIL_* constants)
 // Indices 2-27: public inputs mirroring the davinci-node StateTransitionCircuit
-//   [2..9]   RootHashBefore    — 256-bit Arbo SHA-256 root BEFORE batch (8 × u32, LE)
-//   [10..17] RootHashAfter     — 256-bit Arbo SHA-256 root AFTER  batch (8 × u32, LE)
-//   [18]     VotersCount       — number of real (non-dummy) votes in the batch
-//   [19]     OverwrittenVotesCount — number of ballots that replaced an existing vote
-//   [20..27] CensusRoot        — 256-bit census root (Merkle root or CSP address, 8 × u32, LE)
-//
+// [2..9]   RootHashBefore    => 256-bit Arbo SHA-256 root BEFORE batch (8 × u32, LE)
+// [10..17] RootHashAfter     => 256-bit Arbo SHA-256 root AFTER  batch (8 × u32, LE)
+// [18]     VotersCount       => number of real (non-dummy) votes in the batch
+// [19]     OverwrittenVotesCount => number of ballots that replaced an existing vote
+// [20..27] CensusRoot        => 256-bit census root (Merkle root or CSP address, 8 × u32, LE)
 // Indices 28-39: BlobCommitmentLimbs (3 × 128-bit, 12 × u32)
 //   [28..31] BlobCommitment limb 0 (128 bits)
 //   [32..35] BlobCommitment limb 1 (128 bits)
 //   [36..39] BlobCommitment limb 2 (128 bits)
-//
 // Indices 40-45: diagnostic / auxiliary outputs
-//   [40] batch_ok    — Groth16 batch verification result
-//   [41] ecdsa_ok    — ECDSA signature batch result
+// [40] batch_ok    => Groth16 batch verification result
+// [41] ecdsa_ok    => ECDSA signature batch result
 //   [42] (reserved)
-//   [43] nproofs     — number of Groth16 proofs verified
-//   [44] n_public    — number of public inputs per proof
-//   [45] log_n       — log₂ of the aggregation tree depth
+// [43] nproofs     => number of Groth16 proofs verified
+// [44] n_public    => number of public inputs per proof
+// [45] log_n       => log₂ of the aggregation tree depth
 
 /// Emit a 256-bit `FrRaw` (4 × u64 LE words) as 8 consecutive u32 output registers
 /// starting at `base`.  Each u64 word is split into lo (bits 0-31) and hi (bits 32-63).
@@ -103,63 +97,43 @@ fn main() {
     let input = read_input_slice();
     let mut fail_mask: u32 = 0;
 
-    // ═════════════════════════════════════════════════════════════════════════
     // INPUT PARSING
-    //
     // Decode the binary input blob into structured data. All subsequent phases
     // operate on the parsed representation. Parse errors set FAIL_PARSE.
-    // ═════════════════════════════════════════════════════════════════════════
     let parsed = io::parse_input(&input, &mut fail_mask);
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // PHASE 1: BALLOT PROOF VERIFICATION
-    //
+    // Ballot proof verification
     // Verify the BN254 Groth16 ballot proofs using batch pairing. Each proof
     // attests that a voter correctly encrypted their ballot under the election
     // public key. The batch verification aggregates all proofs into a single
     // multi-pairing check with random linear combination (Fiat-Shamir).
-    //
-    // This replaces the 3-circuit recursion chain (VoteVerifier → Aggregator →
-    // StateTransition) of the Gnark implementation: the zkVM directly verifies
-    // up to 128 BN254 ballot proofs in one pass.
-    // ═════════════════════════════════════════════════════════════════════════
     let batch_ok = groth16::verify_batch(&parsed, &mut fail_mask);
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // PHASE 2: AUTHENTICATION
-    //
+    // Authentication
     // Verify voter identity via cryptographic signatures. Each voter must prove
     // they control the private key corresponding to their registered address.
     // The signature covers the voteID, binding the voter's identity to their
     // specific ballot.
-    //
     // Currently supported: secp256k1 ECDSA (Ethereum-compatible).
     // Extensible to: RSA, BLS, EdDSA, or other signature schemes. The
     // authentication method will be determined by a process parameter
     // (similar to how censusOrigin selects the eligibility check).
-    // ═════════════════════════════════════════════════════════════════════════
     let auth_ok = ecdsa::verify_batch(&parsed, &mut fail_mask);
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // PHASE 3: ELIGIBILITY
-    //
+    // Eligibility
     // Verify each voter's right to participate in this election by checking
     // their membership in the census. The verification method depends on the
     // censusOrigin parameter stored in the process configuration (key 0x06).
-    //
     // Supported census origins:
     //   1-3: lean-IMT Poseidon Merkle tree proofs.
     //        Each voter proves inclusion of (address, weight) in the census tree.
     //        Enforces: same root for all proofs, no duplicate leaves.
-    //
     //   4:   CSP (Credential Service Provider) ECDSA.
     //        An authority signs each voter's (processID, address, weight, index)
     //        using secp256k1 ECDSA. The censusRoot is the CSP's Ethereum address.
     //        Enforces: valid CSP signatures, no duplicate (address, index) pairs.
-    //
     // Extensible: future census origins (ZK-credential proofs, on-chain lookups)
     // can be added as new branches without modifying existing logic.
-    // ═════════════════════════════════════════════════════════════════════════
 
     // Read censusOrigin from process config (process_proofs[3], key 0x06).
     let census_origin: u64 = parsed.state.as_ref()
@@ -188,35 +162,30 @@ fn main() {
         (ok, root)
     };
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // PHASE 4: STATE TRANSITION
-    //
+    // State transition
     // Verify the Sparse Merkle Tree (SMT) state transition that records votes
     // into the election state. This is the core of the DAVINCI protocol,
     // ensuring that each vote is correctly inserted into the state tree and
     // that the election results are properly accumulated.
-    //
     // Sub-checks:
-    //   4.1 Consistency — namespace validation and proof-to-state binding
-    //   4.2 SMT chains  — VoteID insertions, ballot insertions/updates,
-    //                      ResultsAdd/Sub transitions, process config reads
-    //   4.3 Re-encryption — ElGamal ballot re-encryption correctness,
-    //                        ensuring votes are blinded before storage
-    // ═════════════════════════════════════════════════════════════════════════
+    //   - Consistency: namespace validation and proof-to-state binding
+    //   - SMT chains:  VoteID insertions, ballot insertions/updates,
+    //                  ResultsAdd/Sub transitions, process config reads
+    //   - Re-encryption: ElGamal ballot re-encryption correctness
 
-    // 4.1 Consistency: namespace validation and proof-to-state binding.
+    // Consistency: namespace validation and proof-to-state binding.
     //     - VoteID keys fall in [0x8000000000000000, 0xFFFFFFFFFFFFFFFF]
     //     - VoteID keys match the voteID from the ballot proofs
     //     - Ballot keys fall in [0x10, 0x7FFFFFFFFFFFFFFF]
     //     - Ballot keys encode the voter's address (lower 16 bits)
     let consistency_ok = consistency::verify_consistency(&parsed, &mut fail_mask);
 
-    // 4.2 SMT chain verification: the full state-transition integrity check.
+    // SMT chain verification: the full state-transition integrity check.
     //     Returns the old/new state roots and vote counts.
     let (state_ok, old_root, new_root, voters, overwritten) =
         smt::verify_state(&parsed, &mut fail_mask);
 
-    // 4.3 Re-encryption: verify that each stored ballot is the original
+    // Re-encryption: verify that each stored ballot is the original
     //     ballot re-encrypted with a deterministic key derived from k_seed.
     //     This ensures votes are blinded (unlinkable to the voter after storage)
     //     while preserving the homomorphic structure for tallying.
@@ -226,7 +195,7 @@ fn main() {
         &mut fail_mask,
     );
 
-    // 4.4 Result accumulation and ballot leaf hashes:
+    // Result accumulation and ballot leaf hashes:
     //     - Each ballot SMT leaf hash = SHA-256(serialized_ballot_data)
     //     - NewResultsAdd = OldResultsAdd + Σ(all re-encrypted voter ballots)
     //     - NewResultsSub = OldResultsSub + Σ(overwritten ballots)
@@ -236,36 +205,29 @@ fn main() {
         None => false, // already caught by FAIL_MISSING_BLOCK above
     };
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // PHASE 5: DATA AVAILABILITY
-    //
+    // Data availability
     // Verify the EIP-4844 KZG blob commitment. The blob contains the complete
     // vote data (ballots, voteIDs, addresses, results) for on-chain data
     // availability. The circuit verifies the barycentric evaluation Y = P(Z)
     // where Z is derived from the process context (processID, rootHashBefore,
     // commitment) to bind the blob to this specific state transition.
-    // ═════════════════════════════════════════════════════════════════════════
     let (kzg_ok, kzg_commitment) = kzg::verify_kzg(&parsed.kzg, &mut fail_mask);
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // PHASE 6: CROSS-BLOCK BINDING
-    //
+    // Cross-block binding
     // The input contains independently-parsed binary blocks (STATETX, KZGBLK,
     // REENCBLK). Each block carries its own copy of shared values like
     // processID and rootHashBefore. An attacker could provide a valid KZG
     // evaluation for a *different* election or a *different* state root if
     // these copies are not cross-checked. This phase enforces that all blocks
     // agree on the same process context.
-    //
     // Checks:
-    //   1. KZG processID     == State processID
+    //   1. KZG processID      == State processID
     //   2. KZG rootHashBefore == State old_state_root
     //   3. Encryption key hash from re-encryption block matches the value
     //      stored under process config key 0x03 in the state tree.
-    // ═════════════════════════════════════════════════════════════════════════
     let mut binding_ok = true;
 
-    // 6.1 KZG ↔ State processID and rootHashBefore
+    // KZG <=> State processID and rootHashBefore
     if let (Some(kzg_block), Some(state)) = (&parsed.kzg, &parsed.state) {
         if kzg_block.process_id != state.process_id {
             fail_mask |= crate::types::FAIL_BINDING;
@@ -277,8 +239,7 @@ fn main() {
         }
     }
 
-    // 6.2 Re-encryption public key ↔ process config encryption key (key 0x03)
-    //
+    // Re-encryption public key <=> process config encryption key (key 0x03)
     // The sequencer stores SHA-256(pubKeyX_BE32 || pubKeyY_BE32) as the arbo
     // leaf value for config key 0x03. The circuit recomputes this hash from
     // the re-encryption block's public key and verifies it matches the
@@ -294,8 +255,7 @@ fn main() {
         }
     }
 
-    // 6.3 Census/CSP proof count must equal the voter count from STATETX.
-    //
+    // Census/CSP proof count must equal the voter count from STATETX.
     // Without this check, a malicious prover could provide fewer census
     // proofs than voters, allowing non-census-members to submit votes.
     if let Some(state) = &parsed.state {
@@ -310,8 +270,7 @@ fn main() {
         }
     }
 
-    // 6.4 Re-encryption entry count must equal the voter count from STATETX.
-    //
+    // Re-encryption entry count must equal the voter count from STATETX.
     // Ensures every voter ballot has a corresponding re-encryption entry,
     // preventing the prover from omitting re-encryption for some ballots.
     if let Some(state) = &parsed.state {
@@ -321,8 +280,7 @@ fn main() {
         }
     }
 
-    // 6.5 Eligibility address must match the ballot proof's address.
-    //
+    // Eligibility address must match the ballot proof's address.
     // For Merkle census: the leaf encodes PackAddressWeight(address, weight) = (address << 88) | weight.
     // For CSP census: each CspEntry has voter_address directly as uint160 in FrRaw.
     // The ballot proof's public_inputs[0] is the voter's Ethereum address (uint160).
@@ -366,12 +324,9 @@ fn main() {
         }
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
     // FINAL VERDICT
-    //
     // Every phase must pass. The fail_mask provides granular diagnostics
     // for debugging when overall_ok is false.
-    // ═════════════════════════════════════════════════════════════════════════
     let overall_ok = fail_mask == 0
         && batch_ok
         && auth_ok
@@ -383,13 +338,13 @@ fn main() {
         && kzg_ok
         && binding_ok;
 
-    // census_root was computed in Phase 3 (Merkle root or CSP Ethereum address).
+    // census_root is the Merkle root or CSP Ethereum address depending on censusOrigin.
 
-    // ── Status ──────────────────────────────────────────────────────────────
+    // Status
     set_output(0, overall_ok as u32);
     set_output(1, fail_mask);
 
-    // ── Public inputs (davinci-node StateTransitionCircuit) ─────────────────
+    // Public inputs (davinci-node StateTransitionCircuit)
     set_fr_output( 2, &old_root);      // RootHashBefore
     set_fr_output(10, &new_root);      // RootHashAfter
     set_output(18, voters as u32);     // VotersCount
@@ -404,7 +359,7 @@ fn main() {
         }
     }
 
-    // ── Diagnostics ─────────────────────────────────────────────────────────
+    // Diagnostics
     set_output(40, batch_ok as u32);
     set_output(41, auth_ok as u32);
     set_output(43, parsed.nproofs as u32);

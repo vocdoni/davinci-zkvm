@@ -1,23 +1,23 @@
 //! Sparse Merkle Tree (SMT) state-transition verifier.
 //!
-//! Implements the Circomlib / gnark-crypto-primitives `Processor` circuit:
+//! Implements the arbo SMT `Processor` logic:
 //! given an old root, a new root, a key, a value, and Merkle siblings, verifies
 //! that inserting / updating / deleting the key transitions the tree correctly.
 //!
 //! **Hash compatibility**: Arbo `HashFunctionSha256`
-//! - Leaf hash  : `SHA256(key_le32 || value_le32 || 0x01)` — 65 bytes
-//! - Node hash  : `SHA256(left_le32 || right_le32)`         — 64 bytes
+// ! - Leaf hash  : `SHA256(key_le32 || value_le32 || 0x01)` => 65 bytes
+// ! - Node hash  : `SHA256(left_le32 || right_le32)`         => 64 bytes
 //! All byte arrays are **little-endian** (arbo's `BigIntToBytes` = LE).
 //!
 //! **Sibling ordering**: index 0 = root level, index n-1 = leaf level (same as arbo).
-//! **Path bits**: LSB-first — `bit[level] = key_u256_le[level/64] >> (level%64) & 1`.
+// ! **Path bits**: LSB-first => `bit[level] = key_u256_le[level/64] >> (level%64) & 1`.
 
 use crate::hash::sha256_once;
 use crate::io::ParsedInput;
 use crate::types::{FrRaw, SmtTransition, ZERO_FR,
     FAIL_SMT_VOTEID, FAIL_SMT_BALLOT, FAIL_SMT_RESULTS, FAIL_SMT_PROCESS};
 
-// ─── Byte-order helpers ────────────────────────────────────────────────────
+// Byte-order helpers
 
 /// FrRaw (LE word order) → little-endian 32 bytes (Arbo's byte format).
 /// Arbo stores all values (keys, values, hashes) in little-endian byte order.
@@ -40,9 +40,9 @@ fn le_to_fr(b: &[u8; 32]) -> FrRaw {
     ]
 }
 
-// ─── Arbo-compatible hash functions ────────────────────────────────────────
+// Arbo-compatible hash functions
 
-/// Arbo leaf hash: `SHA256(key_le32 || value_le32 || 0x01)` — 65 bytes.
+/// Arbo leaf hash: `SHA256(key_le32 || value_le32 || 0x01)` => 65 bytes.
 fn leaf_hash(key: &FrRaw, value: &FrRaw) -> FrRaw {
     let mut input = [0u8; 65];
     input[0..32].copy_from_slice(&fr_to_le(key));
@@ -51,7 +51,7 @@ fn leaf_hash(key: &FrRaw, value: &FrRaw) -> FrRaw {
     le_to_fr(&sha256_once(&input))
 }
 
-/// Arbo internal node hash: `SHA256(left_le32 || right_le32)` — 64 bytes.
+/// Arbo internal node hash: `SHA256(left_le32 || right_le32)` => 64 bytes.
 fn node_hash(left: &FrRaw, right: &FrRaw) -> FrRaw {
     let mut input = [0u8; 64];
     input[0..32].copy_from_slice(&fr_to_le(left));
@@ -59,7 +59,7 @@ fn node_hash(left: &FrRaw, right: &FrRaw) -> FrRaw {
     le_to_fr(&sha256_once(&input))
 }
 
-// ─── Path helpers ───────────────────────────────────────────────────────────
+// Path helpers
 
 /// Switcher: `sel=0 → (l, r)`, `sel=1 → (r, l)`.
 fn switcher(sel: bool, l: FrRaw, r: FrRaw) -> (FrRaw, FrRaw) {
@@ -75,13 +75,11 @@ fn get_bit(key: &FrRaw, level: usize) -> bool {
     (key[word_idx] >> bit_idx) & 1 == 1
 }
 
-// ─── LevIns ─────────────────────────────────────────────────────────────────
+// LevIns
 
 /// Detect the insertion level in an SMT Merkle proof.
-///
 /// Based on circomlib `smtlevins.circom`.  `siblings[0]` = root-level sibling,
 /// `siblings[n-1]` = leaf-level sibling (must be zero).
-///
 /// Returns `(valid, lev_ins[n])` where exactly one `lev_ins[i]` is `true`.
 fn lev_ins_flag(siblings: &[FrRaw], enabled: bool) -> (bool, Vec<bool>) {
     let n = siblings.len();
@@ -99,17 +97,17 @@ fn lev_ins_flag(siblings: &[FrRaw], enabled: bool) -> (bool, Vec<bool>) {
     let mut lev_ins = vec![false; n];
     let mut done = vec![false; n - 1];
 
-    // levIns[n-1] = 1 − isZero[n-2]
+    // levIns[n-1] = 1 - isZero[n-2]
     lev_ins[n - 1] = !is_zero[n - 2];
     done[n - 2] = lev_ins[n - 1];
 
-    // levIns[i] = (1 − done[i]) ⋅ (1 − isZero[i-1])  for i = n-2 … 1
+    // levIns[i] = (1 - done[i]) * (1 - isZero[i-1])  for i = n-2 … 1
     for i in (1..n - 1).rev() {
         lev_ins[i] = !done[i] && !is_zero[i - 1];
         done[i - 1] = lev_ins[i] || done[i];
     }
 
-    // levIns[0] = 1 − done[0]
+    // levIns[0] = 1 - done[0]
     lev_ins[0] = !done[0];
 
     // Validity: leaf-level sibling must be 0, and exactly one levIns is set.
@@ -120,10 +118,9 @@ fn lev_ins_flag(siblings: &[FrRaw], enabled: bool) -> (bool, Vec<bool>) {
     (valid, lev_ins)
 }
 
-// ─── Processor state machine ────────────────────────────────────────────────
+// Processor state machine
 
 /// Per-level Processor state machine.
-///
 /// Direct port of `ProcessorSM` from `smtprocessorsm.circom`.  All values are
 /// in {0, 1}; the state is one-hot across (top, old0, bot, new1, na, upd).
 #[allow(clippy::too_many_arguments)]
@@ -151,10 +148,9 @@ fn processor_sm(
     (st_top, st_old0, st_bot, st_new1, st_na, st_upd)
 }
 
-// ─── Processor level ────────────────────────────────────────────────────────
+// Processor level
 
 /// Compute `(old_root, new_root)` for one level of the SMT proof.
-///
 /// Direct port of `ProcessorLevel` from `smtprocessorlevel.circom`.
 #[allow(clippy::too_many_arguments)]
 fn processor_level(
@@ -170,7 +166,7 @@ fn processor_level(
     old_child: &FrRaw,
     new_child: &FrRaw,
 ) -> (FrRaw, FrRaw) {
-    // old_root = old1leaf⋅(stBot + stNew1 + stUpd) + node_hash(switcher(bit, oldChild, sibling))⋅stTop
+    // old_root = old1leaf*(stBot + stNew1 + stUpd) + node_hash(switcher(bit, oldChild, sibling))*stTop
     let old_root = if st_top == 1 {
         let (l, r) = switcher(new_lr_bit, *old_child, *sibling);
         node_hash(&l, &r)
@@ -180,7 +176,7 @@ fn processor_level(
         [0u64; 4]
     };
 
-    // new_root left arg = newChild⋅(stTop + stBot) + new1leaf⋅stNew1
+    // new_root left arg = newChild*(stTop + stBot) + new1leaf*stNew1
     let left_val = if st_top == 1 || st_bot == 1 {
         *new_child
     } else if st_new1 == 1 {
@@ -189,7 +185,7 @@ fn processor_level(
         [0u64; 4]
     };
 
-    // new_root right arg = sibling⋅stTop + old1leaf⋅stNew1
+    // new_root right arg = sibling*stTop + old1leaf*stNew1
     let right_val = if st_top == 1 {
         *sibling
     } else if st_new1 == 1 {
@@ -201,7 +197,7 @@ fn processor_level(
     let (nl, nr) = switcher(new_lr_bit, left_val, right_val);
     let new_proof_hash = node_hash(&nl, &nr);
 
-    // new_root = new_proof_hash⋅(stTop + stBot + stNew1) + new1leaf⋅(stOld0 + stUpd)
+    // new_root = new_proof_hash*(stTop + stBot + stNew1) + new1leaf*(stOld0 + stUpd)
     let new_root = if st_top == 1 || st_bot == 1 || st_new1 == 1 {
         new_proof_hash
     } else if st_old0 == 1 || st_upd == 1 {
@@ -213,10 +209,9 @@ fn processor_level(
     (old_root, new_root)
 }
 
-// ─── Top-level verifier ─────────────────────────────────────────────────────
+// Top-level verifier
 
 /// Verify a single SMT state-transition.
-///
 /// Implements the `Processor` function from `smtprocessor.circom`.
 /// Returns `true` iff the transition (old_root → new_root) is valid.
 pub fn verify_transition(t: &SmtTransition) -> bool {
@@ -324,14 +319,13 @@ pub fn verify_transition(t: &SmtTransition) -> bool {
     computed_new_root == t.new_root
 }
 
-// ─── Chain verifier ──────────────────────────────────────────────────────────
+// Chain verifier
 
 /// Verify a sequence of SMT transitions forms a consistent chain:
 /// - `transitions[0].old_root == declared_old_root`
 /// - `transitions[i].new_root == transitions[i+1].old_root` for all i
 /// - `transitions[N-1].new_root == declared_new_root`
 /// - Each individual transition is valid
-///
 /// Returns `true` if the chain is valid, `false` otherwise.
 /// Sets `fail_flag` in `fail_mask` on failure.
 pub fn verify_chain(
@@ -378,13 +372,12 @@ pub fn verify_chain(
     true
 }
 
-// ─── State-transition verifier ───────────────────────────────────────────────
+// State-transition verifier
 
 /// Verify the full DAVINCI state-transition block (STATETX).
-///
 /// Returns `(ok, old_root, new_root, voters, overwritten)`.
 /// `old_root` and `new_root` are the full 256-bit Arbo SHA-256 roots as `FrRaw`.
-/// When no state block is present, returns `(true, ZERO, ZERO, 0, 0)` — absence is not a failure.
+/// When no state block is present, returns `(true, ZERO, ZERO, 0, 0)` => absence is not a failure.
 pub fn verify_state(
     parsed: &ParsedInput,
     fail_mask: &mut u32,
@@ -399,7 +392,7 @@ pub fn verify_state(
 
     let mut ok = true;
 
-    // ── Validate chain lengths vs declared voter counts ─────────────────────
+    // Validate chain lengths vs declared voter counts
     // The voteID chain length must equal n_voters (one insertion per real voter).
     // The ballot chain length must also equal n_voters (one insert or update per voter).
     let nv = state.n_voters;
@@ -412,7 +405,7 @@ pub fn verify_state(
         ok = false;
     }
 
-    // ── Validate overwritten count against actual ballot UPDATEs ─────────────
+    // Validate overwritten count against actual ballot UPDATEs
     // In the SMT Processor, an UPDATE operation has fnc0=false, fnc1=true.
     // Each ballot UPDATE corresponds to an overwritten vote. The declared
     // n_overwritten must match the actual count.
@@ -424,7 +417,7 @@ pub fn verify_state(
         ok = false;
     }
 
-    // ── VoteID chain: OldStateRoot → (intermediate after voteIDs) ────────────
+    // VoteID chain: OldStateRoot → (intermediate after voteIDs)
     // Every voteID transition MUST be an INSERT (fnc0=true, fnc1=false).
     // VoteIDs are unique identifiers that can never be updated or deleted.
     for t in &state.vote_id_chain {
@@ -455,7 +448,7 @@ pub fn verify_state(
         FAIL_SMT_VOTEID,
     );
 
-    // ── Ballot chain: (after voteIDs) → (before resultsAdd or new_state_root) ─
+    // Ballot chain: (after voteIDs) → (before resultsAdd or new_state_root)
     // Each ballot transition must be an INSERT (new vote) or UPDATE (overwrite).
     // DELETE (fnc0=true, fnc1=true) and NOOP (fnc0=false, fnc1=false) are not allowed.
     for t in &state.ballot_chain {
@@ -488,7 +481,7 @@ pub fn verify_state(
         FAIL_SMT_BALLOT,
     );
 
-    // ── Results chain: resultsAdd → resultsSub → new_state_root ───────────────
+    // Results chain: resultsAdd → resultsSub → new_state_root
     // Each results transition is verified individually, AND we require that:
     //   1. resultsAdd.new_root == resultsSub.old_root   (when both present)
     //   2. Final results root == new_state_root
@@ -520,7 +513,7 @@ pub fn verify_state(
         }
     }
 
-    // ── Process read-proofs: inclusion in OldStateRoot (no mutation) ──────────
+    // Process read-proofs: inclusion in OldStateRoot (no mutation)
     // Exactly 4 proofs are required, one per config key in fixed order:
     //   [0] key=0x00 (ProcessID), [1] key=0x02 (BallotMode),
     //   [2] key=0x03 (EncryptionKey), [3] key=0x06 (CensusOrigin).

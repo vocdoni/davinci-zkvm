@@ -1,4 +1,4 @@
-//! POST /prove — submit a batch of Groth16 proofs for ZisK proving
+// ! POST /prove => submit a batch of Groth16 proofs for ZisK proving
 
 use crate::api::AppState;
 use crate::types::{ProveRequest, SmtEntryJson};
@@ -23,7 +23,7 @@ pub async fn submit_prove(
         ).into_response();
     }
 
-    // ── Log request summary ────────────────────────────────────────────────
+    // Log request summary
     info!("Received prove request: {} ballot proof(s)", num_proofs);
 
     if let Some(st) = &req.state {
@@ -74,7 +74,7 @@ pub async fn submit_prove(
         "Request accepted; generating ZisK input"
     );
 
-    // Generate ZisK binary input (CPU-bound — runs in blocking thread pool)
+    // Generate ZisK binary input (CPU-bound => runs in blocking thread pool)
     let vk = req.vk.clone();
     let proofs = req.proofs.clone();
     let public_inputs = req.public_inputs.clone();

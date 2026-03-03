@@ -241,8 +241,14 @@ github.com/tklauser/go-sysconf v0.3.12 h1:0QaGUFOdQaIVdPgfITYzaTegZvdCjmYO52cSFA
 github.com/tklauser/go-sysconf v0.3.12/go.mod h1:Ho14jnntGE1fpdOqQEEaiKRpvIavV0hSfmBq8nJbHYI=
 github.com/tklauser/numcpus v0.6.1 h1:ng9scYS7az0Bk4OZLvrNXNSAO2Pxr1XXRAPyjhIx+Fk=
 github.com/tklauser/numcpus v0.6.1/go.mod h1:1XfjsgE2zo8GVw7POkMbHENHzVg3GzmoZ9fESEdAacY=
-github.com/vocdoni/arbo v0.0.0-20260216104828-6bf3dbaeb1af h1:naevAspPry5jSYcJHj0LNorN9BzZFM0TV/cEpFCdK3U=
-github.com/vocdoni/arbo v0.0.0-20260216104828-6bf3dbaeb1af/go.mod h1:SUsNx5GJJunlEMBo6ETTmys88B4bkTgqNV5N1jN3iic=
+github.com/vocdoni/arbo v0.0.0-20260224125436-30808c99dfb2 h1:suWFeg6TRFU0r1qlGpJ7tgATODWIx7k7dCLZsGQrX14=
+github.com/vocdoni/arbo v0.0.0-20260224125436-30808c99dfb2/go.mod h1:SUsNx5GJJunlEMBo6ETTmys88B4bkTgqNV5N1jN3iic=
+github.com/vocdoni/davinci-circom v0.1.0 h1:bx3JlqaUOQ2dStGo9lySA2Eu1ZsIWrJ3BBTyc6cRQd4=
+github.com/vocdoni/davinci-circom v0.1.0/go.mod h1:7CdVIumC1seueKlazgQDPNhCwnZhu9gRDlSiBKEM4Sc=
+github.com/vocdoni/davinci-node v0.0.2-0.20260302160544-e9393d9f6610 h1:AREfCoXg6m4+FH7kRc2SS/oUW+WIsSCYieEvfVllNY4=
+github.com/vocdoni/davinci-node v0.0.2-0.20260302160544-e9393d9f6610/go.mod h1:2k2xAD3mI3/5xmzeGdSNNPEx/drqJ2tG7Up1rP6tf4Q=
+github.com/vocdoni/davinci-node/spec v0.0.0-20260302160544-e9393d9f6610 h1:fFoIOwx5f8EwRLbrEeP5Fzy+NHTm6vce/gtYeYg//B4=
+github.com/vocdoni/davinci-node/spec v0.0.0-20260302160544-e9393d9f6610/go.mod h1:ofv03F4/zRUYw4lFgVs0ZNYJWEru/F7c2JurGNJYVLQ=
 github.com/vocdoni/gnark-crypto-primitives v0.0.2-0.20260115102516-64ce9c3fd55d h1:g/v2DQK3u62nEspG3htAksWof4hGpiPECjwWyBnIkGM=
 github.com/vocdoni/gnark-crypto-primitives v0.0.2-0.20260115102516-64ce9c3fd55d/go.mod h1:vbpZOw6IYuRzO1gdpuW2+Ppnq/v9cscWGcdWiZ2rWi8=
 github.com/vocdoni/lean-imt-go v0.0.0-20260212110350-173da8db474b h1:9h+M1jce5DYHsom6HPLyYGx9wuk4qhhE7byw7RVGM9M=

@@ -33,11 +33,10 @@ func bigIntToHex32BE(v *big.Int) string {
 
 const zeroHex64 = "0000000000000000000000000000000000000000000000000000000000000000"
 
-// ── ECDSA Signatures ─────────────────────────────────────────────────────────
+// ECDSA Signatures
 
 // EcdsaSignature holds the secp256k1 ECDSA signature components needed by the
 // ZisK circuit. This matches the Rust EcdsaSig struct in input-gen.
-//
 // R, S are signature components. PubKeyX, PubKeyY are the uncompressed public
 // key coordinates. VoteID is the vote identifier. Address is the Ethereum
 // address as a decimal uint160 string.
@@ -72,7 +71,7 @@ func (e *EcdsaSignature) MarshalJSON() ([]byte, error) {
 	)), nil
 }
 
-// ── Groth16 BN254 Proofs ─────────────────────────────────────────────────────
+// Groth16 BN254 Proofs
 
 // Groth16Proof is a BN254 Groth16 proof in snarkjs format.
 // The three elliptic curve points (A ∈ G1, B ∈ G2, C ∈ G1) use the same
@@ -146,13 +145,12 @@ func (vk *VerificationKey) MarshalJSON() ([]byte, error) {
 	)), nil
 }
 
-// ── Public Inputs ────────────────────────────────────────────────────────────
+// Public Inputs
 
 // PublicInput holds the public inputs for a single Groth16 ballot proof.
 // The circuit expects Fr elements as decimal strings.
 type PublicInput struct {
-	// Values holds the public signal values in the order expected by the circuit.
-	// For the Circom BallotCircuit: [address, voteID, ballotInputsHash, ...]
+	// Values holds the public signal values in order: [address, voteID, ballotInputsHash, ...]
 	Values []*big.Int
 }
 
@@ -169,7 +167,7 @@ func (pi *PublicInput) toStrings() []string {
 	return result
 }
 
-// ── SMT Converters ───────────────────────────────────────────────────────────
+// SMT Converters
 
 // ArboTransition holds an Arbo SMT state transition in native Go types,
 // mirroring state.ArboTransition from davinci-node.
@@ -188,7 +186,6 @@ type ArboTransition struct {
 
 // SmtEntryFromArboTransition converts a native ArboTransition into the
 // SmtEntry format expected by the API.
-//
 // nLevels specifies the Merkle tree depth; siblings are zero-padded to
 // this length. The hex encoding uses big-endian format (arbo convention).
 func SmtEntryFromArboTransition(t *ArboTransition, nLevels int) SmtEntry {
@@ -235,7 +232,7 @@ func SmtReadProof(root, key, value *big.Int, siblings []*big.Int, nLevels int) S
 	}, nLevels)
 }
 
-// ── Re-encryption Converters ─────────────────────────────────────────────────
+// Re-encryption Converters
 
 // BjjPointFromBigInts creates a BjjPoint from (x, y) big.Int coordinates.
 func BjjPointFromBigInts(x, y *big.Int) BjjPoint {
@@ -246,7 +243,7 @@ func BjjPointFromBigInts(x, y *big.Int) BjjPoint {
 }
 
 // BjjCiphertextFromBigInts creates a BjjCiphertext from 4 big.Int coordinates
-// in the order [C1.X, C1.Y, C2.X, C2.Y] — matching elgamal.Ciphertext layout.
+// in the order [C1.X, C1.Y, C2.X, C2.Y] => matching elgamal.Ciphertext layout.
 func BjjCiphertextFromBigInts(c1x, c1y, c2x, c2y *big.Int) BjjCiphertext {
 	return BjjCiphertext{
 		C1: BjjPointFromBigInts(c1x, c1y),
@@ -256,7 +253,6 @@ func BjjCiphertextFromBigInts(c1x, c1y, c2x, c2y *big.Int) BjjCiphertext {
 
 // ReencryptionEntryFromBigInts builds a ReencryptionEntry from raw big.Int
 // coordinates. Each ballot is 32 big.Int values (8 ciphertexts × 4 coords).
-//
 // k is the re-encryption random seed. original and reencrypted are each
 // slices of 32 *big.Int in the order produced by elgamal.Ballot.BigInts():
 // [ct0.c1x, ct0.c1y, ct0.c2x, ct0.c2y, ct1.c1x, ct1.c1y, ...]
@@ -279,7 +275,7 @@ func ReencryptionEntryFromBigInts(k *big.Int, original, reencrypted []*big.Int) 
 	return entry, nil
 }
 
-// ── Census Proof Converter ───────────────────────────────────────────────────
+// Census Proof Converter
 
 // CensusProofFromBigInts creates a CensusProof from native Go types.
 // root and leaf are BN254 Fr elements. siblings are the non-empty
@@ -297,7 +293,7 @@ func CensusProofFromBigInts(root, leaf *big.Int, index uint64, siblings []*big.I
 	}
 }
 
-// ── KZG Converter ────────────────────────────────────────────────────────────
+// KZG Converter
 
 // NewKZGRequest creates a KZGRequest from native Go types.
 // commitment is the 48-byte compressed BLS12-381 G1 point.
@@ -314,7 +310,7 @@ func NewKZGRequest(processID, rootHashBefore *big.Int,
 	}
 }
 
-// ── Re-encryption Data Constructor ───────────────────────────────────────────
+// Re-encryption Data Constructor
 
 // NewReencryptionData creates a ReencryptionData block from the encryption
 // public key coordinates and a slice of per-voter entries.
@@ -326,7 +322,7 @@ func NewReencryptionData(encKeyX, encKeyY *big.Int, entries []ReencryptionEntry)
 	}
 }
 
-// ── State Transition Data Constructor ────────────────────────────────────────
+// State Transition Data Constructor
 
 // NewStateTransitionData creates a StateTransitionData block from native Go types.
 // The processID, oldRoot, and newRoot must be 256-bit values. SMT proof slices
@@ -359,7 +355,6 @@ func NewStateTransitionData(
 }
 
 // NewBallotProofData creates BallotProofData from native Go types.
-//
 // Each Fr element is a *big.Int in the BN254 scalar field. The slices
 // oldResultsAdd and oldResultsSub must each have exactly 32 elements.
 // Each inner slice of voterBallots and overwrittenBallots must also have

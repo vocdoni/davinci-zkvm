@@ -16,12 +16,11 @@ use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-// "GROTH16B" in little-endian ASCII — matches guest magic constant
+// "GROTH16B" in little-endian ASCII => matches guest magic constant
 const MAGIC: u64 = 0x423631484f545247u64;
 const STATE_MAGIC: u64 = u64::from_le_bytes(*b"STATETX!");
 
 /// One Arbo-compatible SMT state-transition entry for binary encoding.
-///
 /// All `[u64; 4]` fields use little-endian word order (word[0] = least-significant 64 bits),
 /// matching the circuit's `FrRaw` convention.  The values are big-endian 32-byte numbers
 /// as understood by Arbo; the circuit converts them internally for SHA-256 hashing.
@@ -44,7 +43,6 @@ pub struct SmtEntry {
 }
 
 /// Parse a 0x-prefixed 32-byte big-endian hex string into `[u64; 4]` (LE word order).
-///
 /// Convert a 0x-prefixed **little-endian** hex string to `[u64; 4]` LE words.
 /// Arbo stores all values (keys, values, roots, siblings) in little-endian byte
 /// order (`BigIntToBytes` = LE), so the hex bytes map directly to LE words.
@@ -66,7 +64,6 @@ pub fn hex32_to_smt_fr(s: &str) -> Result<[u64; 4]> {
 
 
 /// Full DAVINCI state-transition data for binary serialization.
-///
 /// Matches the `StateTransitionData` JSON type in go-sdk/types.go.
 /// All `[u64;4]` fields use little-endian word order (arbo convention).
 #[derive(Debug, Clone, Default)]
@@ -88,7 +85,6 @@ pub struct StateData {
 }
 
 /// Result accumulator ballot data for binary serialization.
-///
 /// Contains the old results, per-voter ballots, and overwritten ballots needed
 /// to verify the homomorphic tally: NewResultsAdd = OldResultsAdd + Σ(voter_ballots).
 #[derive(Debug, Clone)]
@@ -104,7 +100,6 @@ pub struct BallotProofData {
 }
 
 /// Serialize a `StateData` into the STATETX binary block.
-///
 /// Returns an empty `Vec` if not needed (n_voters==0 and no transitions).
 /// All SMT chains are serialized with their own n_levels (inferred from the first entry's siblings).
 pub fn write_state_block(sd: &StateData) -> Result<Vec<u8>> {
@@ -433,13 +428,11 @@ fn write_u64_slice(buf: &mut Vec<u8>, words: &[u64]) {
 }
 
 /// Compute Fiat-Shamir challenge r_shift from all proof data (must match guest's transcript).
-///
 /// Scheme (must stay in sync with circuit/src/main.rs):
 ///   digest  = SHA256("groth16-batch-v1" || A_0||B_0||C_0||pub_0 || ... )
 ///   d0      = SHA256(digest || counter(8B) || 0x00)
 ///   d1      = SHA256(digest || counter(8B) || 0x01)
 ///   r_shift = Fr::from_random_bytes(d0 || d1)   (retry with counter++ if not invertible)
-///
 /// Pre-hashing the 36KB transcript to 32 bytes before the retry loop avoids re-hashing
 /// the full transcript on each retry attempt.
 fn compute_r_shift(proofs: &[Proof<Bn254>], public_inputs: &[Vec<Fr>]) -> Fr {
@@ -482,10 +475,8 @@ fn compute_r_shift(proofs: &[Proof<Bn254>], public_inputs: &[Vec<Fr>]) -> Fr {
 }
 
 /// Generate ZisK binary input from a snarkjs VK and an array of proofs + public inputs.
-///
 /// The `proofs` and `public_inputs` arrays must have the same length, which must be a
 /// power of two >= 2 and match the circuit's expected batch size (typically 128).
-///
 /// Returns raw bytes suitable for writing to disk and passing to `cargo-zisk prove --input`.
 pub fn generate_input(vk: &SnarkJsVk, proofs_json: &[SnarkJsProof], public_inputs_json: &[Vec<String>], sigs: &[EcdsaSig]) -> Result<Vec<u8>> {
     let num_proofs = proofs_json.len();
@@ -610,7 +601,7 @@ fn read_json<T: for<'de> serde::Deserialize<'de>>(path: &Path) -> Result<T> {
 
 /// Load ECDSA signatures from a directory.
 /// Reads `sig_1.json..sig_N.json` (produced by davinci-circom generate-proofs.sh).
-/// Fails if no sig files are found — ECDSA signatures are mandatory.
+/// Fails if no sig files are found => ECDSA signatures are mandatory.
 pub fn load_signatures_from_dir(dir: &Path, num_proofs: usize) -> Result<Vec<EcdsaSig>> {
     let mut sig_paths = collect_paths(dir, "sig_")?;
     if sig_paths.is_empty() {
@@ -654,7 +645,6 @@ pub struct CensusProofData {
 }
 
 /// Serialize census membership proofs into the CENSUS binary block.
-///
 /// Format:
 /// ```
 /// magic:    u64 = "CENSUS!!"
@@ -715,7 +705,6 @@ pub struct ReencEntryData {
 }
 
 /// Serialize re-encryption entries into the REENCBLK binary block.
-///
 /// Format:
 /// ```
 /// magic:     u64 = "REENCBLK"
@@ -774,7 +763,6 @@ pub struct KzgData {
 }
 
 /// Encode the KZG blob barycentric evaluation block.
-///
 /// Block format (binary, appended after the last optional block):
 ///   "KZGBLK!!" (8 bytes LE magic)
 ///   process_id      (32 bytes: 4×u64 LE words)
@@ -798,7 +786,6 @@ pub fn write_kzg_block(d: &KzgData) -> Result<Vec<u8>> {
 }
 
 /// Convert a big-endian 32-byte hex string into a 4×u64 LE FrRaw word array.
-///
 /// Accepts optional "0x" prefix.  Pads with leading zeros if shorter than 32 bytes.
 /// word[0] = least-significant 64 bits = bytes[24..32] read as big-endian u64.
 pub fn be_hex32_to_fr_le(s: &str) -> Result<[u64; 4]> {
@@ -817,7 +804,7 @@ pub fn be_hex32_to_fr_le(s: &str) -> Result<[u64; 4]> {
     ])
 }
 
-// ─── CSP ECDSA census block ─────────────────────────────────────────────────
+// CSP ECDSA census block
 
 const CSP_MAGIC: u64 = u64::from_le_bytes(*b"CSPBLK!!");
 
@@ -848,7 +835,6 @@ pub struct CspBlockData {
 }
 
 /// Write the CSPBLK!! binary block.
-///
 /// Format:
 /// ```text
 /// CSP_MAGIC(u64) | n_entries(u64) | csp_pub_key_x(FrRaw) | csp_pub_key_y(FrRaw)

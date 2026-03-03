@@ -1,5 +1,4 @@
 // election.go manages the DAVINCI election state for integration testing.
-//
 // An Election holds the process state arbo-SHA256 tree, the census lean-IMT,
 // the ElGamal encryption key pair, and all voter accounts. It provides methods
 // to build each protocol block for a state-transition batch.
@@ -83,12 +82,12 @@ type Election struct {
 // It builds the process state tree (with config), the census IMT, and
 // generates random ElGamal and ECDSA keys.
 func NewElection(nVoters int) (*Election, error) {
-	// ── ProcessID (for ballot proofs and state tree key 0x00) ────────────────
+	// ProcessID (for ballot proofs and state tree key 0x00)
 	var processID types.ProcessID
 	copy(processID[:], "DAVINCI_INTEGRATION_TEST")
 	processIDBI := new(big.Int).SetBytes(processID[:])
 
-	// ── ElGamal encryption key ───────────────────────────────────────────────
+	// ElGamal encryption key
 	// Generated BEFORE tree setup because the encryption key hash is stored
 	// in the process config tree under key 0x03.
 	encKeyPoint, encPrivKey, err := elgamal.GenerateKey(bjjgnark.New())
@@ -102,7 +101,7 @@ func NewElection(nVoters int) (*Election, error) {
 	// the circuit's cross-block binding check (FAIL_BINDING).
 	encKeyHashBI := encKeyLeafValue(encKey)
 
-	// ── Process state tree ───────────────────────────────────────────────────
+	// Process state tree
 	procDB := memdb.New()
 	procTree, err := arbo.NewTree(arbo.Config{
 		Database:     procDB,
@@ -131,7 +130,7 @@ func NewElection(nVoters int) (*Election, error) {
 		}
 	}
 
-	// ── ResultsAdd (0x04) and ResultsSub (0x05) ──────────────────────────────
+	// ResultsAdd (0x04) and ResultsSub (0x05)
 	zeroAccum := newZeroFrAccum()
 	zeroLeafBI := frAccumLeafHash(zeroAccum)
 	for _, k := range []uint64{keyResultsAdd, keyResultsSub} {
@@ -149,7 +148,7 @@ func NewElection(nVoters int) (*Election, error) {
 	}
 	oldRoot := "0x" + hex.EncodeToString(pad32(rootBytes))
 
-	// ── Voters ───────────────────────────────────────────────────────────────
+	// Voters
 	voters := make([]*Voter, nVoters)
 	for i := 0; i < nVoters; i++ {
 		seed := make([]byte, 32)
@@ -171,7 +170,7 @@ func NewElection(nVoters int) (*Election, error) {
 		}
 	}
 
-	// ── Census lean-IMT ──────────────────────────────────────────────────────
+	// Census lean-IMT
 	imt, err := leanimt.New(poseidonHasher, bigIntEq, nil, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("leanimt.New: %w", err)
@@ -383,12 +382,10 @@ func (e *Election) ProcessIDHex() string {
 }
 
 // BuildStateBlock builds the STATETX protocol block for a batch of voters.
-//
 // It inserts or updates each voter's voteID and ballot key in the process state tree,
 // accumulates the re-encrypted ballots into the ResultsAdd leaf (key 0x04), and, when
 // any voter is casting a replacement ballot, also updates the ResultsSub leaf (key 0x05)
 // with the homomorphic sum of the replaced old ballots.
-//
 // Returns the StateTransitionData, the list of overwritten (old) re-encrypted ballots
 // (may be empty), and an error.  e.OldRoot is advanced to the new root on success.
 // reencBallots must have the same length as ballotResults.
@@ -407,7 +404,7 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 		return nil, nil, fmt.Errorf("buildArboReadProofs: %w", err)
 	}
 
-	// Insert voteID keys for each voter (always a fresh INSERT — even for overwrites,
+	// Insert voteID keys for each voter (always a fresh INSERT => even for overwrites,
 	// each ballot submission carries a new unique voteID).
 	var voteIDChain []davinci.SmtEntry
 	for i, res := range ballotResults {
@@ -464,7 +461,7 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 		e.VotedBallots[v.CensusIdx] = reencBallots[i]
 	}
 
-	// ── ResultsAdd: accumulate re-encrypted ballots and update key 0x04 ──────
+	// ResultsAdd: accumulate re-encrypted ballots and update key 0x04
 	// Snapshot old accumulators for BallotProofData before mutation.
 	oldResultsAdd := e.ResultsAdd
 	oldResultsSub := e.ResultsSub
@@ -487,7 +484,7 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 	}
 	e.ResultsAdd = newResultsAdd
 
-	// ── ResultsSub: when any voter overwrote a ballot, update key 0x05 ───────
+	// ResultsSub: when any voter overwrote a ballot, update key 0x05
 	var resultsSubEntry *davinci.SmtEntry
 	if len(overwrittenBallots) > 0 {
 		newResultsSub := e.ResultsSub
@@ -631,7 +628,6 @@ func (e *Election) BuildReencBlock(ballotResults []*BallotResult) (*davinci.Reen
 }
 
 // BuildKZGBlock builds a KZG blob barycentric evaluation block.
-//
 // oldRoot is the state root BEFORE the current batch (rootHashBefore).
 // The blob is deterministically derived from batchIdx.
 // The evaluation point Z is derived via SHA-256(processID ‖ rootHashBefore ‖ commitment)
@@ -688,8 +684,8 @@ type TallyAccumulator struct {
 func NewTallyAccumulator() *TallyAccumulator {
 	ta := &TallyAccumulator{}
 	for i := 0; i < 8; i++ {
-		// Use SetZero() to set the true BJJ identity (0, 1), not (0, 0).
-		// bjjgnark.New() allocates (0, 0) which is NOT on the curve and acts
+		// Use SetZero() to get the true BJJ identity (0, 1).
+		// New() allocates (0, 0), which is NOT on the curve and acts
 		// as an absorbing element in twisted-Edwards addition.
 		c1 := bjjgnark.New()
 		c1.SetZero()

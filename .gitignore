@@ -13,6 +13,8 @@ circuit/target/
 
 # ── Generated / runtime data ─────────────────────────────────────────────────
 data/
+go-sdk/data/
+proof_output/
 
 # ── Proving key ──────────────────────────────────────────────────────────────
 # Too large (~36 GB) to track; mounted as a volume at runtime.
@@ -40,3 +42,6 @@ go-sdk/tests/*.test
 *~
 .DS_Store
 Thumbs.db
+
+# ── Internal planning ────────────────────────────────────────────────────────
+plan.md

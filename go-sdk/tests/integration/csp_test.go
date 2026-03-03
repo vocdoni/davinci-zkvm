@@ -1,9 +1,7 @@
 // csp_test.go is the CSP ECDSA census integration test.
-//
 // It creates a CSP-mode election (censusOrigin=4), generates ballot proofs,
 // signs each voter with the CSP key, and submits 4 chained state transitions
 // (with overwrites in the last batch) to the running davinci-zkvm service.
-//
 // Prerequisites:
 //   - docker compose up -d --build (starts davinci-zkvm service)
 //   - DAVINCI_API_URL (default: http://localhost:8080)
@@ -28,7 +26,7 @@ func TestCSPChainedStateTransitions(t *testing.T) {
 	t.Logf("=== TestCSPChainedStateTransitions: %d transitions, %d fresh voters ===",
 		len(cspBatches), nFresh)
 
-	// ── 1. Create CSP election ──────────────────────────────────────────────
+	// 1. Create CSP election
 	election, err := NewCSPElection(nFresh)
 	if err != nil {
 		t.Fatalf("NewCSPElection: %v", err)
@@ -41,10 +39,10 @@ func TestCSPChainedStateTransitions(t *testing.T) {
 		t.Skipf("davinci-zkvm service not available at %s: %v (start with 'docker compose up -d --build')", apiURL, err)
 	}
 
-	// ── 2. Tally accumulator ────────────────────────────────────────────────
+	// 2. Tally accumulator
 	tally := NewTallyAccumulator()
 
-	// ── 3. Run CSP transitions ──────────────────────────────────────────────
+	// 3. Run CSP transitions
 	voterOffset := 0
 	for txIdx, spec := range cspBatches {
 		batchSize := spec.Size
@@ -140,7 +138,7 @@ func TestCSPChainedStateTransitions(t *testing.T) {
 		t.Logf("  New state root: %s", election.OldRoot)
 	}
 
-	// ── 4. Verify tally ─────────────────────────────────────────────────────
+	// 4. Verify tally
 	t.Logf("=== All %d CSP transitions done; decrypting tally (%d net ballots) ===",
 		len(cspBatches), tally.count)
 

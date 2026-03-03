@@ -3,9 +3,10 @@ module github.com/vocdoni/davinci-zkvm/go-sdk
 go 1.25.5
 
 require (
+	github.com/ethereum/go-ethereum v1.16.7
 	github.com/iden3/go-iden3-crypto v0.0.17
-	github.com/vocdoni/arbo v0.0.0-20260216104828-6bf3dbaeb1af
-	github.com/vocdoni/davinci-node v0.0.0-20251231145653-c809413014e0
+	github.com/vocdoni/arbo v0.0.0-20260224125436-30808c99dfb2
+	github.com/vocdoni/davinci-node v0.0.2-0.20260302160544-e9393d9f6610
 	github.com/vocdoni/lean-imt-go v0.0.0-20260212110350-173da8db474b
 )
 
@@ -31,7 +32,6 @@ require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
 	github.com/emicklei/dot v1.6.4 // indirect
 	github.com/ethereum/c-kzg-4844/v2 v2.1.5 // indirect
-	github.com/ethereum/go-ethereum v1.16.7 // indirect
 	github.com/ethereum/go-verkle v0.2.2 // indirect
 	github.com/fatih/color v1.16.0 // indirect
 	github.com/ferranbt/fastssz v0.1.4 // indirect
@@ -72,7 +72,7 @@ require (
 	github.com/supranational/blst v0.3.16-0.20250831170142-f48500c1fdbe // indirect
 	github.com/syndtr/goleveldb v1.0.1-0.20220721030215-126854af5e6d // indirect
 	github.com/vocdoni/davinci-circom v0.1.0 // indirect
-	github.com/vocdoni/davinci-node/spec v0.0.0-20260210223636-e85fc7c89da9 // indirect
+	github.com/vocdoni/davinci-node/spec v0.0.0-20260302160544-e9393d9f6610 // indirect
 	github.com/vocdoni/gnark-crypto-primitives v0.0.2-0.20260115102516-64ce9c3fd55d // indirect
 	github.com/vocdoni/poseidon377 v0.0.0-20260107010505-905fd2aadb69 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
@@ -92,9 +92,3 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
-
-replace github.com/vocdoni/davinci-node => /home/p4u/davinci-node
-
-replace github.com/vocdoni/davinci-node/spec => /home/p4u/davinci-node/spec
-
-replace github.com/vocdoni/davinci-circom => /home/p4u/davinci-circom

@@ -7,8 +7,8 @@
 //!
 //! The `ark-crypto-primitives` crate provides a `PoseidonSponge` implementation,
 //! but it uses the **Fractal/COS** parameterization (IACR 2019/1076) with round
-//! constants derived via a Grain LFSR.  The **iden3/circom** Poseidon variant —
-//! used by lean-imt-go, go-iden3-crypto, and the BallotCircuit — uses a different
+//! constants derived via a Grain LFSR.  The **iden3/circom** Poseidon variant :
+//! used by lean-imt-go and go-iden3-crypto: uses a different
 //! set of round constants and MDS matrices that are NOT compatible with the
 //! arkworks defaults.
 //!
@@ -434,9 +434,9 @@ fn ark(state: &mut [BnFr; T], it: usize) {
     }
 }
 
-/// Matrix multiply using fused multiply-add: `newState[i] = Σ_j M[j][i] · state[j]`.
+/// Matrix multiply using fused multiply-add: `newState[i] = sum_j( M[j][i] * state[j] )`.
 ///
-/// Each `muladd` call computes `(constant · state_element + accumulator) mod p` in
+/// Each `muladd` call computes `(constant * state_element + accumulator) mod p` in
 /// a single precompile row, halving the number of calls versus separate mul + add.
 fn mix(state: &mut [BnFr; T], m: &[[[u64; 4]; T]; T]) {
     let mut ns = [bn254_fr::ZERO; T];

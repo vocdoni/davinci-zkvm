@@ -7,7 +7,7 @@
 //!
 //! Each BN254 Fr multiplication via `ark-ff` compiles to ~50 RISC-V instructions
 //! (Montgomery form) in the Fibonacci SM table.  The ZisK `arith256_mod` precompile
-//! computes `(a·b + c) mod p` in a single dedicated ArithMod row — roughly 50×
+// ! computes `(a*b + c) mod p` in a single dedicated ArithMod row => roughly 50×
 //! cheaper per operation.  For 128 voters, Poseidon + BabyJubJub generate ~1.1M
 //! field multiplications; this module reduces prover cost by replacing all of
 //! them with single-row precompile calls.
@@ -29,7 +29,7 @@ pub const BN254_FR_MOD: [u64; 4] = [
     0x30644e72e131a029,
 ];
 
-/// p − 2: exponent for Fermat inversion `a^(p−2) mod p`.
+/// p - 2: exponent for Fermat inversion `a^(p-2) mod p`.
 const PM2: [u64; 4] = [
     0x43e1f593efffffff,
     0x2833e84879b97091,
@@ -43,10 +43,9 @@ pub type BnFr = [u64; 4];
 pub const ZERO: BnFr = [0, 0, 0, 0];
 pub const ONE:  BnFr = [1, 0, 0, 0];
 
-// ─── Core primitive ──────────────────────────────────────────────────────────
+// Core primitive
 
-/// Compute `(a · b + c) mod p` via the ZisK `arith256_mod` precompile.
-///
+/// Compute `(a * b + c) mod p` via the ZisK `arith256_mod` precompile.
 /// One call ≈ 1 ArithMod prover row (vs ~50 Fibonacci SM rows for software
 /// Montgomery multiplication).
 #[inline]
@@ -63,7 +62,7 @@ pub fn muladd(a: &BnFr, b: &BnFr, c: &BnFr) -> BnFr {
     d
 }
 
-// ─── Derived operations ──────────────────────────────────────────────────────
+// Derived operations
 
 #[inline(always)]
 pub fn mul(a: &BnFr, b: &BnFr) -> BnFr { muladd(a, b, &ZERO) }
@@ -74,21 +73,21 @@ pub fn sqr(a: &BnFr) -> BnFr { mul(a, a) }
 #[inline(always)]
 pub fn add(a: &BnFr, b: &BnFr) -> BnFr { muladd(a, &ONE, b) }
 
-/// `(a − b) mod p`.
+/// `(a - b) mod p`.
 #[inline]
 pub fn sub(a: &BnFr, b: &BnFr) -> BnFr {
     if b == &ZERO { return *a; }
     muladd(a, &ONE, &neg(b))
 }
 
-/// `−a mod p = p − a`.  Returns `ZERO` for `a = 0`.
+/// `-a mod p = p - a`.  Returns `ZERO` for `a = 0`.
 #[inline]
 pub fn neg(a: &BnFr) -> BnFr {
     if a == &ZERO { return ZERO; }
     sub_256(&BN254_FR_MOD, a)
 }
 
-/// Fermat inversion: `a^(p−2) mod p`.
+/// Fermat inversion: `a^(p-2) mod p`.
 /// Returns `ZERO` when `a` is `ZERO` (caller should avoid inverting zero).
 #[inline]
 pub fn inv(a: &BnFr) -> BnFr {
@@ -113,7 +112,7 @@ pub fn pow(a: &BnFr, exp: &[u64; 4]) -> BnFr {
     result
 }
 
-/// x^5 — Poseidon S-box.  3 precompile calls (sqr, sqr, mul).
+/// x^5 => Poseidon S-box.  3 precompile calls (sqr, sqr, mul).
 #[inline]
 pub fn exp5(x: &BnFr) -> BnFr {
     let x2 = sqr(x);
@@ -121,10 +120,9 @@ pub fn exp5(x: &BnFr) -> BnFr {
     mul(&x4, x)
 }
 
-// ─── Conversion ──────────────────────────────────────────────────────────────
+// Conversion
 
 /// Reduce a raw 256-bit value modulo p.
-///
 /// Use for values that may be ≥ p (e.g. hash outputs interpreted as integers).
 #[inline]
 #[allow(dead_code)]
@@ -133,7 +131,6 @@ pub fn reduce(a: &BnFr) -> BnFr {
 }
 
 /// Check if a 256-bit value is strictly less than the BN254 Fr modulus.
-///
 /// Compares limbs from most-significant to least-significant.
 #[inline]
 pub fn is_canonical(a: &BnFr) -> bool {
@@ -145,7 +142,6 @@ pub fn is_canonical(a: &BnFr) -> bool {
 }
 
 /// Try to interpret 32 bytes as a canonical Fr element (for Fiat-Shamir).
-///
 /// Reads the first 32 bytes as a little-endian `[u64; 4]`, masks the top 2 bits
 /// (since BN254 Fr has 254-bit modulus), and returns `Some(value)` if the result
 /// is < p and non-zero.  Returns `None` otherwise.
@@ -155,7 +151,7 @@ pub fn from_random_bytes_32(bytes: &[u8; 32]) -> Option<BnFr> {
         let off = i * 8;
         r[i] = u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
     }
-    // BN254 Fr modulus is 254 bits — mask top 2 bits for uniform sampling
+    // BN254 Fr modulus is 254 bits => mask top 2 bits for uniform sampling
     r[3] &= 0x3FFFFFFFFFFFFFFF;
     if !is_canonical(&r) || r == ZERO {
         return None;
@@ -163,9 +159,7 @@ pub fn from_random_bytes_32(bytes: &[u8; 32]) -> Option<BnFr> {
     Some(r)
 }
 
-// ─── Internal ────────────────────────────────────────────────────────────────
-
-/// 256-bit subtraction `a − b` without modular reduction.
+/// 256-bit subtraction `a - b` without modular reduction.
 /// Precondition: `a ≥ b`.
 fn sub_256(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
     let (r0, borrow0) = a[0].overflowing_sub(b[0]);

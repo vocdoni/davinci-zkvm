@@ -1,248 +1,178 @@
 # davinci-zkvm
 
-A production-ready ZisK zkVM service that verifies batches of 128 Groth16 BN254 proofs and generates a single ZisK STARK proof, accessible via a simple HTTP API.
+A [ZisK](https://github.com/0xPolygonHermez/zisk) zkVM service that verifies complete
+[DAVINCI](https://github.com/vocdoni/davinci-node) voting protocol state-transitions
+inside a single RISC-V circuit, producing a STARK (→ FFLONK) proof suitable for
+on-chain verification.
 
-## Overview
+## What it does
 
-`davinci-zkvm` wraps the [ZisK](https://github.com/0xPolygonHermez/zisk) zkVM prover in an HTTP service. Callers submit batches of 128 [snarkjs](https://github.com/iden3/snarkjs) Groth16 BN254 proofs via `POST /prove`. The service queues the request, runs the ZisK STARK prover, and makes the final proof available for download.
+Each state-transition batch is verified end-to-end in a single ZisK circuit execution:
 
-**Key properties:**
-- Single sequential job queue (ZisK prover uses all available GPU resources)
-- Pre-built circuit ELF checked into the repository — no ZisK toolchain required at runtime
-- Requires NVIDIA GPU (RTX/Blackwell, sm_120+) with CUDA 12.8 — ZisK v0.15.0 GPU proving keys use GPU-specific Merkle trees incompatible with CPU proving
-- Fully Dockerized with GPU image (`Dockerfile.cuda`) and API-only CPU image (`Dockerfile`)
+| Step | Description |
+|------|-------------|
+| **Groth16 batch verify** | BN254 pairing-based verification of voter ballot proofs (snarkjs) |
+| **ECDSA batch verify** | secp256k1 signature verification (one per voter) |
+| **State SMT transitions** | Arbo SHA-256 sparse Merkle tree updates for vote-ID, ballot, results, and process chains |
+| **Census membership** | Lean-IMT Poseidon BN254 inclusion proofs (Merkle census) or ECDSA CSP authentication |
+| **ElGamal re-encryption** | BabyJubJub twisted-Edwards re-encryption verification |
+| **KZG blob evaluation** | EIP-4844 barycentric evaluation of encrypted ballot blobs |
+| **Result accumulation** | Homomorphic ballot tally verification with overwrite support |
+| **Cross-block binding** | Cryptographic binding between all protocol blocks |
 
-## Quick Start
+The circuit produces public outputs matching
+[davinci-node](https://github.com/vocdoni/davinci-node)'s `StateTransitionCircuit`
+interface: root hashes, census root, voter counts, KZG blob commitment, and a
+diagnostic fail-mask.
+
+## Architecture
+
+```
+davinci-zkvm/
+├── circuit/            ZisK RISC-V guest circuit (Rust, requires +zisk toolchain)
+│   ├── elf/            Pre-built circuit ELF (checked in)
+│   └── src/            Source: groth16, ecdsa, smt, census, csp, results, kzg, …
+├── input-gen/          Rust library: typed protocol blocks → ZisK binary input
+├── service/            HTTP API service (axum + tokio)
+│   └── src/
+│       ├── api/        POST /prove, GET /jobs/*, GET /health
+│       ├── prover/     Background job queue and worker
+│       ├── config.rs   Environment variable configuration
+│       └── types.rs    Full typed request/response structures
+└── go-sdk/             Go client library with typed builder API
+    ├── *.go            Client, types, ProveBatch, PublicOutputs, converters
+    └── tests/
+        ├── integration/  Cheat tests (emulator), e2e + CSP integration tests
+        └── Makefile      Docker compose test orchestration
+```
+
+## Quick start
 
 ### Prerequisites
 
 - Docker + Docker Compose
-- ZisK proving key (≈36 GB) at `~/.zisk/provingKey` (see [Setup](#proving-key-setup))
-- NVIDIA driver 570+, CUDA 12.8, nvidia-container-toolkit
+- NVIDIA GPU with driver 570+, CUDA 12.8, nvidia-container-toolkit
+- ZisK proving key (~36 GB) — see [Proving key setup](#proving-key-setup)
 
-### GPU (default)
+### Run with Docker
 
 ```bash
-git clone https://github.com/0xPolygonHermez/davinci-zkvm.git
+git clone https://github.com/vocdoni/davinci-zkvm.git
 cd davinci-zkvm
+
+# GPU prover (default)
 docker compose up -d
+
+# CPU-only (API only — ZisK v0.15 GPU keys are incompatible with CPU proving)
+COMPOSE_PROFILES=cpu docker compose up -d
 ```
 
-### CPU (API only — no proof generation)
+### Submit a proof via the Go SDK
 
-> **Note:** ZisK v0.15.0 proving keys use GPU-specific polynomial commitment schemes
-> (blocked Merkle trees via `merkletreeCoalescedBlocks`) that are incompatible with CPU provers.
-> The CPU image provides the full HTTP API (health, queue, proof download) but proof jobs
-> will fail. Use the GPU image for actual proof generation.
+```go
+import davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 
-```bash
-git clone https://github.com/0xPolygonHermez/davinci-zkvm.git
-cd davinci-zkvm
-docker compose -f docker-compose.cpu.yml up -d
+client := davinci.NewClient("http://localhost:8080")
+
+batch := &davinci.ProveBatch{
+    VK:     vk,
+    Voters: voters,       // []VoterBallot with Groth16 proofs + ECDSA sigs
+    State:  stateData,    // StateTransitionData (SMT transitions)
+    Census: censusProofs, // []CensusProof (Merkle) or CspData
+    Reenc:  reencData,    // ReencryptionData (ElGamal)
+    KZG:    kzgData,      // KZGRequest (blob evaluation)
+}
+
+result, err := client.Prove(ctx, batch)
+// result.Outputs.OK, result.Outputs.RootHashAfter, ...
 ```
 
-## API Reference
+See [go-sdk/README.md](go-sdk/README.md) for full API documentation.
+
+## API reference
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/prove` | Submit a state-transition batch for proving |
+| `GET` | `/jobs/{id}` | Get job status |
+| `GET` | `/jobs/{id}/proof` | Download proof binary (once done) |
+| `GET` | `/health` | Service health check |
 
 ### `POST /prove`
 
-Submit a batch of 128 Groth16 BN254 proofs for ZisK proving.
+Accepts a JSON body with typed protocol blocks. See `service/src/types.rs` for the
+full `ProveRequest` schema, or use the Go SDK's `ProveBatch` which handles serialization.
 
-**Request body:**
+### `GET /jobs/{id}`
+
 ```json
 {
-  "vk": { ...snarkjs verification key... },
-  "proofs": [ ...array of 128 snarkjs Groth16 proofs... ],
-  "public_inputs": [ ["input1", "input2"], ... ]
-}
-```
-
-The `vk` and `proofs` fields use the standard [snarkjs](https://github.com/iden3/snarkjs) JSON format (`verification_key.json` and `proof.json` respectively).
-
-**Response `202 Accepted`:**
-```json
-{
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "queued"
-}
-```
-
-**Response `400 Bad Request`:** invalid request (missing/malformed fields).
-
-**Response `503 Service Unavailable`:** queue is full.
-
----
-
-### `GET /jobs/{job_id}`
-
-Get the status of a proof job.
-
-**Response `200 OK`:**
-```json
-{
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "job_id": "...",
   "status": "queued|running|done|failed",
-  "created_at": "2026-02-26T08:52:11Z",
-  "started_at": "2026-02-26T08:52:15Z",
-  "finished_at": "2026-02-26T08:52:41Z",
-  "elapsed_ms": 26500,
+  "elapsed_ms": 35000,
   "error": null
 }
 ```
 
-**Response `404 Not Found`:** job not found.
-
----
-
-### `GET /jobs/{job_id}/proof`
-
-Download the final ZisK proof binary once the job is complete.
-
-**Response `200 OK`:** binary proof file (`Content-Type: application/octet-stream`)
-
-**Response `425 Too Early`:** proof is not ready yet (job is queued or running).
-
-**Response `422 Unprocessable Entity`:** job failed, includes error details.
-
-**Response `404 Not Found`:** job not found.
-
----
-
-### `GET /health`
-
-Service health check.
-
-**Response `200 OK`:**
-```json
-{
-  "status": "ok",
-  "version": "0.1.0",
-  "queue_len": 0
-}
-```
-
-## Proving Key Setup
-
-The ZisK proving key is required and must be available at `/proving-key` inside the container (bind-mounted from the host).
+## Proving key setup
 
 ```bash
-# Set PROVING_KEY_PATH to override (default: ~/.zisk/provingKey)
-export PROVING_KEY_PATH=/path/to/your/provingKey
-
-# Or use the Makefile to download and install it:
-make setup         # Downloads the proving key tarball (~36 GB)
-make setup-trees   # Builds constant tree files (needed once, ~5 min with GPU)
+make setup         # Download proving key (~36 GB)
+make setup-trees   # Build constant tree files (once, ~5 min with GPU)
 ```
 
-## Configuration
+Or set `PROVING_KEY_PATH` in `.env` to point to an existing key directory.
 
-The service is configured via environment variables:
+## Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LISTEN_ADDR` | `0.0.0.0:8080` | HTTP listen address |
-| `PROVING_KEY_PATH` | `/proving-key` | Path to ZisK proving key directory |
-| `CIRCUIT_ELF_PATH` | `/app/circuit.elf` | Path to pre-built circuit ELF |
+| `PROVING_KEY_PATH` | `/proving-key` | ZisK proving key directory |
+| `CIRCUIT_ELF_PATH` | `/app/circuit.elf` | Pre-built circuit ELF |
 | `CARGO_ZISK_BIN` | `cargo-zisk` | Path to cargo-zisk binary |
-| `PROOF_OUTPUT_DIR` | `/tmp/proofs` | Directory for proof output files |
-| `MAX_QUEUE_SIZE` | `100` | Maximum number of queued jobs |
-| `RUST_LOG` | `davinci_zkvm=info` | Log level filter |
+| `PROOF_OUTPUT_DIR` | `/tmp/proofs` | Proof output directory |
+| `MAX_QUEUE_SIZE` | `100` | Maximum queued jobs |
 
 ## Development
 
-### Building from source
-
 ```bash
-# Build the service binary
-make build
-
-# Build the ZisK circuit ELF (requires +zisk toolchain)
-make build-circuit
-
-# Generate binary input from test proofs
-make gen-input
-
-# Run the circuit in the ZisK emulator (fast, no GPU needed)
-make run-emu
-
-# Run full proof generation (requires proving key + GPU recommended)
-make prove
+make build           # Build the HTTP service binary
+make build-circuit   # Rebuild circuit ELF (requires +zisk toolchain)
+make test            # Run emulator-based cheat tests (no service needed)
+make test-integration  # Run full integration tests (requires running service)
 ```
 
-### GPU support (CUDA)
-
-For RTX 5000 series (Blackwell, sm_120), CUDA 12.8 is required:
+### GPU build (CUDA 12.8)
 
 ```bash
-# Rebuild cargo-zisk with GPU support
 make build-zisk-gpu ZISK_SRC=~/path/to/zisk
-
-# Then run setup for GPU constant trees
 make setup-trees
 ```
 
 ### Docker
 
 ```bash
-make docker-build        # Build CUDA GPU image (default)
-make docker-build-cpu    # Build CPU-only image (API only, no proving)
+make docker-build-cuda   # CUDA GPU image
+make docker-build        # CPU-only image
 ```
 
-### Integration tests
+## Circuit specification
 
-Tests use Go and communicate with the service via HTTP. They require the service to be running.
+See [CIRCUIT.md](CIRCUIT.md) for a detailed formal specification of every constraint
+checked by the circuit, including input/output encoding, fail-mask bits, and
+cross-block binding rules.
 
-```bash
-cd integration-tests
+## Tests
 
-# Run lightweight tests (no proving)
-make test-unit
+| Test suite | Command | Requirements |
+|------------|---------|--------------|
+| **Cheat tests** (7 tests) | `make test` | `ziskemu` in PATH |
+| **CSP integration** | `cd go-sdk/tests && make test` | Running service |
+| **Full E2E** (8 transitions) | `cd go-sdk/tests && make test` | Running service |
+| **Lightweight** | `make test-unit` | Running service |
 
-# Full test cycle: build Docker → start → test → stop
-make test-full
-
-# Or test against an already-running instance
-DAVINCI_API_URL=http://localhost:8080 make test
-```
-
-**Environment variables for tests:**
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DAVINCI_API_URL` | `http://localhost:8080` | Service URL |
-| `DAVINCI_SKIP_PROVING` | `""` | Set to `1` to skip the full proving test |
-| `DAVINCI_PROOF_TIMEOUT` | `20m` | Timeout for waiting for a proof |
-| `TEST_DATA_DIR` | `../data/simple_mul_bn254` | Path to test data directory |
-
-## Architecture
-
-```
-davinci-zkvm/
-├── circuit/          # ZisK RISC-V guest program (128 Groth16 batch verifier)
-│   ├── elf/          # Pre-built circuit ELF (checked in, 266 KB)
-│   └── src/          # Guest source code (requires +zisk toolchain to rebuild)
-├── input-gen/        # Library: snarkjs JSON → ZisK binary input conversion
-├── service/          # HTTP API service (axum + tokio)
-│   └── src/
-│       ├── api/      # HTTP handlers (POST /prove, GET /jobs/*)
-│       ├── prover/   # Background job queue and worker
-│       ├── config.rs # Environment variable configuration
-│       └── types.rs  # Shared types
-├── data/             # Test fixtures (128 Groth16 proofs)
-└── integration-tests/ # Go integration tests
-```
-
-The service maintains a single sequential job queue. When a proof job reaches the worker, it:
-1. Writes the binary input to a per-job directory
-2. Invokes `cargo-zisk prove` as a subprocess
-3. Updates job status in memory on completion
-
-## Proving Performance
-
-| Mode | Time |
-|------|------|
-| GPU (NVIDIA RTX 5070 Ti, sm_120) | ~30–35 seconds |
-| CPU | Not supported (see note above) |
-
-## License
-
-MIT OR Apache-2.0
+Cheat tests exercise the circuit in the ZisK emulator with deliberate protocol
+violations (wrong census root, wrong state root, mismatched vote IDs, wrong
+re-encryption key, wrong KZG data) and verify that the fail-mask correctly
+identifies each violation.

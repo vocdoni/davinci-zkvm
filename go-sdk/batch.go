@@ -9,8 +9,7 @@ import (
 )
 
 // VoterBallot groups all proving data for a single voter in a batch.
-// This is the natural unit of data that the davinci-node sequencer holds
-// per ballot — it ties together the Circom proof, ECDSA signature, census
+// It ties together the Groth16 ballot proof, ECDSA signature, census
 // membership proof, and re-encryption data that belong to the same vote.
 //
 // Voters must be added to the ProveBatch in the same order as their
@@ -26,7 +25,7 @@ type VoterBallot struct {
 	ProofJSON json.RawMessage
 
 	// PublicInputs are the ballot proof's public signals.
-	// For the standard Circom BallotCircuit: [address, voteID, inputsHash].
+	// Expected order: [address, voteID, inputsHash].
 	PublicInputs *PublicInput
 
 	// Signature is the voter's ECDSA secp256k1 signature.
@@ -58,8 +57,7 @@ type VoterReencryption struct {
 }
 
 // ProveBatch is a complete batch of voter ballots with all auxiliary data
-// needed to produce a single DAVINCI ZisK proof. It is the primary
-// integration type for callers replacing the Gnark proving pipeline.
+// needed to produce a single DAVINCI ZisK proof.
 //
 // Usage from davinci-node's sequencer:
 //
@@ -72,8 +70,8 @@ type VoterReencryption struct {
 //	}
 //	result, err := client.Prove(ctx, batch)
 //	if err != nil { ... }
-//	// result.Proof  — raw ZisK proof bytes
-//	// result.Outputs — parsed PublicOutputs (roots, counts, etc.)
+//	// result.Proof: raw ZisK proof bytes
+//	// result.Outputs: parsed PublicOutputs (roots, counts, etc.)
 type ProveBatch struct {
 	// VerificationKey is the Groth16 BN254 verification key shared by all
 	// ballot proofs. Mutually exclusive with VerificationKeyJSON.
@@ -178,7 +176,7 @@ func (b *ProveBatch) toRequest() (*ProveRequest, error) {
 		}
 		sigs[i] = raw
 
-		// Census (Merkle or CSP — mutually exclusive)
+		// Census (Merkle or CSP: mutually exclusive)
 		if v.Csp != nil {
 			hasCsp = true
 			cspProofs = append(cspProofs, *v.Csp)
@@ -207,12 +205,12 @@ func (b *ProveBatch) toRequest() (*ProveRequest, error) {
 		KZG:          b.KZG,
 	}
 
-	// Census proofs (Merkle) — only when not using CSP
+	// Census proofs (Merkle): only when not using CSP
 	if !hasCsp {
 		req.CensusProofs = censusProofs
 	}
 
-	// CSP data — only when at least one voter uses CSP
+	// CSP data: only when at least one voter uses CSP
 	if hasCsp {
 		if b.CspPubKey == nil {
 			return nil, fmt.Errorf("CspPubKey is required when voters have CSP proofs")
@@ -302,8 +300,7 @@ func (c *Client) Prove(ctx context.Context, batch *ProveBatch) (*ProveResult, er
 }
 
 // NewPublicInput creates a PublicInput from variadic big.Int values.
-// For the standard Circom BallotCircuit the order is:
-// [address, voteID, ballotInputsHash].
+// Expected order: [address, voteID, ballotInputsHash].
 func NewPublicInput(values ...*big.Int) *PublicInput {
 	return &PublicInput{Values: values}
 }

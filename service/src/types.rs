@@ -11,19 +11,19 @@ use uuid::Uuid;
 /// `siblings` must all be the same length across all entries in a request.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SmtEntryJson {
-    /// 32-byte big-endian hex — old tree root
+    /// 32-byte big-endian hex: old tree root
     pub old_root: String,
-    /// 32-byte big-endian hex — new tree root after transition
+    /// 32-byte big-endian hex: new tree root after transition
     pub new_root: String,
-    /// 32-byte big-endian hex — key of the old leaf (zero if is_old0=1)
+    /// 32-byte big-endian hex: key of the old leaf (zero if is_old0=1)
     pub old_key: String,
-    /// 32-byte big-endian hex — value of the old leaf (zero if is_old0=1)
+    /// 32-byte big-endian hex: value of the old leaf (zero if is_old0=1)
     pub old_value: String,
     /// 1 when old leaf slot was empty (pure insert), 0 otherwise
     pub is_old0: u8,
-    /// 32-byte big-endian hex — new key being inserted/updated
+    /// 32-byte big-endian hex: new key being inserted/updated
     pub new_key: String,
-    /// 32-byte big-endian hex — new value
+    /// 32-byte big-endian hex: new value
     pub new_value: String,
     /// 1 for insert (fnc0=1, fnc1=0) or delete (fnc0=1, fnc1=1)
     pub fnc0: u8,
@@ -57,9 +57,9 @@ pub struct StateTransitionJson {
 /// One lean-IMT Poseidon census membership proof in JSON format.
 #[derive(Debug, Deserialize, Clone)]
 pub struct CensusProofJson {
-    /// 32-byte big-endian hex — census tree root
+    /// 32-byte big-endian hex: census tree root
     pub root: String,
-    /// 32-byte big-endian hex — leaf = PackAddressWeight(address, weight)
+    /// 32-byte big-endian hex: leaf = PackAddressWeight(address, weight)
     pub leaf: String,
     /// Packed path bits (bit i = (index >> i) & 1)
     pub index: u64,
@@ -105,15 +105,15 @@ pub struct ReencryptionDataJson {
 /// All hex strings use the "0x"-prefixed big-endian convention.
 #[derive(Debug, Deserialize, Clone)]
 pub struct KzgEvalJson {
-    /// 32-byte big-endian hex — BN254 Fr process identifier.
+    /// 32-byte big-endian hex: BN254 Fr process identifier.
     pub process_id: String,
-    /// 32-byte big-endian hex — Arbo state root before the batch.
+    /// 32-byte big-endian hex: Arbo state root before the batch.
     pub root_hash_before: String,
-    /// 48-byte big-endian hex — compressed BLS12-381 G1 KZG commitment.
+    /// 48-byte big-endian hex: compressed BLS12-381 G1 KZG commitment.
     pub commitment: String,
-    /// 32-byte big-endian hex — claimed evaluation Y = P(Z).
+    /// 32-byte big-endian hex: claimed evaluation Y = P(Z).
     pub y_claimed: String,
-    /// 131072-byte big-endian hex — full EIP-4844 blob (4096 × 32-byte cells).
+    /// 131072-byte big-endian hex: full EIP-4844 blob (4096 × 32-byte cells).
     pub blob: String,
 }
 
@@ -152,7 +152,7 @@ pub struct ProveRequest {
     pub proofs: Vec<SnarkJsProof>,
     /// public inputs for each proof (same length as proofs)
     pub public_inputs: Vec<Vec<String>>,
-    /// ECDSA signatures — one per proof, in same order. Mandatory.
+    /// ECDSA signatures: one per proof, in same order. Mandatory.
     pub sigs: Vec<EcdsaSig>,
     /// Full state-transition data for the DAVINCI protocol.
     #[serde(default)]

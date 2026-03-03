@@ -12,7 +12,7 @@ use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-/// GET /jobs/:id — return job status
+/// GET /jobs/:id: return job status
 pub async fn get_job_status(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -23,7 +23,7 @@ pub async fn get_job_status(
     }
 }
 
-/// GET /jobs/:id/proof — download the final ZisK proof binary
+/// GET /jobs/:id/proof: download the final ZisK proof binary
 pub async fn get_job_proof(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,

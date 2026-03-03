@@ -273,7 +273,7 @@ func TestProveContextCancellation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from cancelled context or connection refused")
 	}
-	// Either "context canceled" or "connection refused" — both are acceptable
+	// Either "context canceled" or "connection refused": both are acceptable
 	t.Logf("Prove error (expected): %v", err)
 }
 
