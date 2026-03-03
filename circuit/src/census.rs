@@ -12,9 +12,7 @@ use crate::poseidon::poseidon2;
 use crate::types::{FrRaw, FAIL_CENSUS};
 
 /// Verify a lean-IMT Poseidon membership proof.
-///
 /// Compatible with `leanimt.VerifyProofWith` from lean-imt-go with `PoseidonHasher`.
-///
 /// - `root`:     expected tree root
 /// - `leaf`:     `PackAddressWeight(address, weight)` as BN254 Fr LE
 /// - `index`:    packed path bits (bit i = `(index >> i) & 1`)
@@ -37,13 +35,11 @@ pub fn verify_census_proof(root: &FrRaw, leaf: &FrRaw, index: u64, siblings: &[F
 }
 
 /// Verify census proofs for all voters in the parsed input.
-///
 /// Returns `true` when all proofs are valid (or when no census proofs are present).
 /// Sets `FAIL_CENSUS` in `fail_mask` on failure.
-///
 /// Security invariants enforced:
-/// 1. All proofs use the **same census root** — prevents mixing proofs from different snapshots.
-/// 2. No duplicate leaves — prevents the same voter from voting twice in one batch.
+/// 1. All proofs use the **same census root** => prevents mixing proofs from different snapshots.
+/// 2. No duplicate leaves => prevents the same voter from voting twice in one batch.
 /// 3. Each proof's Merkle path is valid against the declared root.
 pub fn verify_batch(parsed: &crate::io::ParsedInput, fail_mask: &mut u32) -> bool {
     if parsed.census_proofs.is_empty() {
@@ -51,7 +47,7 @@ pub fn verify_batch(parsed: &crate::io::ParsedInput, fail_mask: &mut u32) -> boo
         return false;
     }
 
-    // ── Invariant 1: all proofs must reference the same census root ───────────
+    // Invariant 1: all proofs must reference the same census root
     let expected_root = &parsed.census_proofs[0].root;
     for cp in parsed.census_proofs.iter().skip(1) {
         if &cp.root != expected_root {
@@ -60,7 +56,7 @@ pub fn verify_batch(parsed: &crate::io::ParsedInput, fail_mask: &mut u32) -> boo
         }
     }
 
-    // ── Invariant 2: no duplicate leaves (same voter counted twice) ───────────
+    // Invariant 2: no duplicate leaves (same voter counted twice)
     let n = parsed.census_proofs.len();
     for i in 0..n {
         for j in (i + 1)..n {
@@ -71,7 +67,7 @@ pub fn verify_batch(parsed: &crate::io::ParsedInput, fail_mask: &mut u32) -> boo
         }
     }
 
-    // ── Invariant 3: each proof is valid ─────────────────────────────────────
+    // Invariant 3: each proof is valid
     for cp in &parsed.census_proofs {
         if !verify_census_proof(&cp.root, &cp.leaf, cp.index, &cp.siblings) {
             *fail_mask |= FAIL_CENSUS;

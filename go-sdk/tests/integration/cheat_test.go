@@ -1,15 +1,12 @@
 // cheat_test.go tests that the davinci-zkvm circuit correctly rejects tampered
 // protocol inputs by verifying specific fail_mask bits are set.
-//
 // These tests use ziskemu directly and do NOT require the davinci-zkvm API
 // service. They exercise circuit constraint violations to verify the circuit
 // correctly rejects malformed inputs.
-//
 // Each test:
 //  1. Generates a self-contained valid circuit input (2 ballot proofs on-the-fly)
 //  2. Verifies the valid input is accepted (overall_ok = 1)
 //  3. Tampers one field and verifies the corresponding fail_mask bit is set
-//
 // Prerequisites:
 //   - ziskemu in PATH
 //   - gen-input binary in PATH or at target/release/gen-input
@@ -32,7 +29,7 @@ import (
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 )
 
-// Fail-mask bit constants — must match circuit/src/types.rs.
+// Fail-mask bit constants => must match circuit/src/types.rs.
 const (
 	failCurve       = uint32(1 << 1)  // proof point not on curve
 	failPairing     = uint32(1 << 2)  // batch pairing check failed
@@ -317,9 +314,7 @@ func assertCircuitFails(t *testing.T, input []byte, wantBits uint32, label strin
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Cheat Tests
-// ─────────────────────────────────────────────────────────────────────────────
 
 // TestCheatSanity verifies that the self-generated input is accepted by the circuit.
 // This is a prerequisite for all other cheat tests.

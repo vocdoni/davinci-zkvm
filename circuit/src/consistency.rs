@@ -1,11 +1,9 @@
 /// DAVINCI protocol consistency checks:
-///
 /// 1. **VoteID namespace**: each `vote_id_chain[i].new_key[0] ∈ [VoteIDMin, VoteIDMax]`
 /// 2. **VoteID–proof binding**: `vote_id_chain[i].new_key[0] == proofs[i].public_inputs[1][0]`
 /// 3. **Ballot namespace**: each `ballot_chain[i].new_key[0] ∈ [BallotMin, BallotMax]`
 /// 4. **Ballot–address binding**: `(ballot_chain[i].new_key[0] & 0xFFFF) ==
 ///    (proofs[i].public_inputs[0][0] & 0xFFFF)` (lower 16 bits of address)
-///
 /// These checks are only applied when a STATETX block is present.
 /// When no state block is present, returns `true` immediately (absence is not a failure).
 
@@ -16,7 +14,7 @@ const VOTE_ID_MIN: u64 = 0x8000_0000_0000_0000;
 const BALLOT_MIN: u64 = 0x0000_0000_0000_0010; // ConfigMax + 1
 const BALLOT_MAX: u64 = 0x7FFF_FFFF_FFFF_FFFF; // VoteIDMin - 1
 
-// Public input indices (Circom BallotCircuit).
+// Public input indices for the BN254 Groth16 ballot proof.
 const PUB_ADDRESS: usize = 0;
 const PUB_VOTE_ID: usize = 1;
 
@@ -38,7 +36,7 @@ pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
 
     let mut ok = true;
 
-    // ── VoteID chain consistency ──────────────────────────────────────────────
+    // VoteID chain consistency
     for i in 0..n_voters {
         if i >= state.vote_id_chain.len() {
             // More voters declared than voteID SMT entries.
@@ -71,9 +69,9 @@ pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
         }
     }
 
-    // ── Ballot chain consistency ─────────────────────────────────────────────
+    // Ballot chain consistency
     // Only check when ballot chain is present (n_voters may exceed ballot_chain.len()
-    // in partial batches that only update voteID — not typical but allowed).
+    // in partial batches that only update voteID => not typical but allowed).
     if !state.ballot_chain.is_empty() {
         for i in 0..n_voters {
             if i >= state.ballot_chain.len() {

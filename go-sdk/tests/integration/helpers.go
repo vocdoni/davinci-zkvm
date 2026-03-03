@@ -1,12 +1,9 @@
 // Package integration contains two kinds of tests:
-//
 // (1) API service tests (service_test.go, e2e_test.go, smt_service_test.go,
 // integration_test.go) that submit jobs to a running davinci-zkvm service.
 // These require: docker compose up -d --build (starts the davinci-zkvm service).
-//
 // (2) Circuit constraint violation tests (cheat_test.go) that use ziskemu
 // directly and do NOT require the API service. These require: ziskemu in PATH.
-//
 // The integration_test.go suite generates real BN254 Groth16 ballot proofs
 // via go-rapidsnark, chains multiple state-transitions, verifies the accumulated
 // vote tally by ElGamal decryption, and checks that deliberate protocol
@@ -30,7 +27,7 @@ import (
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 )
 
-// ─── API client helpers ────────────────────────────────────────────────────
+// API client helpers
 
 // apiURL returns the base URL of the davinci-zkvm service.
 // Override with DAVINCI_API_URL environment variable.
@@ -60,7 +57,7 @@ func newClient() *davinci.Client {
 // arboHexToBEHex converts an arbo LE hex string (as produced by hex.EncodeToString
 // on arbo.Root() bytes) to standard big-endian hex. This is needed because the
 // STATETX block encodes fields as arbo LE hex, while the KZG block requires
-// big-endian hex — both must decode to the same FrRaw limbs in the circuit.
+// big-endian hex => both must decode to the same FrRaw limbs in the circuit.
 func arboHexToBEHex(leHex string) string {
 	trimmed := strings.TrimPrefix(leHex, "0x")
 	leBytes, _ := hex.DecodeString(trimmed)
@@ -84,7 +81,6 @@ func pad32(b []byte) []byte {
 // buildArboInsertEntry creates an SMT insert proof using arbo SHA-256.
 // It records the OldRoot before insertion and NewRoot after, then returns
 // a fully-populated SmtEntry ready for the circuit.
-//
 // Caller must NOT insert newKeyBI into the tree before calling this function.
 // The function inserts it and updates the tree.
 func buildArboInsertEntry(tree *arbo.Tree, newKeyBI, newValueBI *big.Int, levels int) (davinci.SmtEntry, error) {
@@ -92,7 +88,7 @@ func buildArboInsertEntry(tree *arbo.Tree, newKeyBI, newValueBI *big.Int, levels
 	newKeyBytes := arbo.BigIntToBytes(bLen, newKeyBI)
 	newValueBytes := arbo.BigIntToBytes(bLen, newValueBI)
 
-	// GenProof BEFORE insertion — detect displaced leaf.
+	// GenProof BEFORE insertion => detect displaced leaf.
 	oldLeafKey, oldLeafValue, _, exists, err := tree.GenProof(newKeyBytes)
 	if err != nil {
 		return davinci.SmtEntry{}, fmt.Errorf("GenProof before: %w", err)
@@ -124,7 +120,7 @@ func buildArboInsertEntry(tree *arbo.Tree, newKeyBI, newValueBI *big.Int, levels
 		return davinci.SmtEntry{}, fmt.Errorf("tree.Root (new): %w", err)
 	}
 
-	// GenProof AFTER insertion — get the updated siblings.
+	// GenProof AFTER insertion => get the updated siblings.
 	_, _, packedSiblingsAfter, existsAfter, err := tree.GenProof(newKeyBytes)
 	if err != nil {
 		return davinci.SmtEntry{}, fmt.Errorf("GenProof after: %w", err)
@@ -284,14 +280,14 @@ func buildArboReadProofs(tree *arbo.Tree, keys []uint64, bLen, levels int) ([]da
 	return entries, nil
 }
 
-// ─── Census (lean-IMT Poseidon) helpers ───────────────────────────────────
+// Census (lean-IMT Poseidon) helpers
 
 // ballotLeafHash computes a deterministic 32-byte SHA-256 leaf value for an
 // ElGamal ballot stored in the arbo state tree (keys 0x04 / 0x05).
 // Each of the 32 Twisted Edwards coordinates is encoded as a fixed-size 32-byte
-// big-endian word so the hash is unambiguous.  The internal bjj_gnark library
-// stores points in Reduced Twisted Edwards (RTE) form; we must convert to
-// standard TE form before hashing so the digest matches the circuit.
+// big-endian word so the hash is unambiguous. Points are stored internally in
+// Reduced Twisted Edwards (RTE) form and must be converted to TE before hashing
+// to match the circuit's expected digest.
 func ballotLeafHash(b *elgamal.Ballot) *big.Int {
 	h := sha256.New()
 	buf := make([]byte, 32)
@@ -331,8 +327,7 @@ func poseidonHasher(a, b *big.Int) *big.Int {
 // bigIntEq compares two *big.Int values.
 func bigIntEq(a, b *big.Int) bool { return a.Cmp(b) == 0 }
 
-// ─── Fr-wise ballot accumulator ──────────────────────────────────────────
-//
+// Fr-wise ballot accumulator
 // The circuit accumulates ResultsAdd / ResultsSub using coordinate-wise
 // Fr addition (not EC point addition).  This type mirrors that behaviour
 // so the Go-side leaf hashes match what the circuit computes.
@@ -416,9 +411,9 @@ func bigIntToFr32(v *big.Int) string {
 	return "0x" + hex.EncodeToString(padded)
 }
 
-// ─── BabyJubJub point helper ─────────────────────────────────────────────
+// BabyJubJub point helper
 
-// bjjPointToFr32Hex converts a bjjgnark point from RTE (internal) coordinates
+// bjjPointToFr32Hex converts a BabyJubJub point from RTE (Reduced Twisted Edwards)
 // to TE (Twisted Edwards) coordinates and returns them as 0x-prefixed 32-byte
 // big-endian hex strings. The circuit expects TE coordinates.
 func bjjPointToFr32Hex(p interface{ Point() (*big.Int, *big.Int) }) (xHex, yHex string) {
@@ -427,12 +422,10 @@ func bjjPointToFr32Hex(p interface{ Point() (*big.Int, *big.Int) }) (xHex, yHex 
 	return bigIntToFr32(tx), bigIntToFr32(ty)
 }
 
-// ─── KZG helpers ─────────────────────────────────────────────────────────
+// KZG helpers
 
 // deriveKZGZ computes the evaluation point Z for KZG verification:
-//
 //	Z = SHA-256(processID_be32 ‖ rootHashBefore_be32 ‖ commitment_48)
-//
 // This matches the derivation in circuit/src/kzg.rs.
 func deriveKZGZ(processIDHex, rootBeforeHex string, commitment [48]byte) *big.Int {
 	processIDBytes, _ := hex.DecodeString(strings.TrimPrefix(processIDHex, "0x"))
@@ -447,7 +440,7 @@ func deriveKZGZ(processIDHex, rootBeforeHex string, commitment [48]byte) *big.In
 	return new(big.Int).SetBytes(h[:])
 }
 
-// ─── ziskemu emulator helper ──────────────────────────────────────────────
+// ziskemu emulator helper
 
 // runZiskEmu writes inputBytes to a temp file and executes ziskemu against the
 // circuit ELF. Returns the parsed uint32 output registers or an error.
@@ -486,4 +479,4 @@ func runZiskEmu(inputBytes []byte) ([]uint32, error) {
 	return outputs, nil
 }
 
-// ─── BabyJubJub point helpers ─────────────────────────────────────────────
+// BabyJubJub point helpers

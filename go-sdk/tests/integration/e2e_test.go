@@ -2,11 +2,9 @@ package integration
 
 // TestFullE2E is the comprehensive end-to-end integration test for the DAVINCI
 // zkVM circuit using Merkle-proof census (censusOrigin=1).
-//
 // It exercises all six DAVINCI protocol phases in a realistic multi-transition
 // scenario with interleaved fresh votes, first-time overwrites, and double
 // overwrites (same voter votes three times).
-//
 // Phases verified per transition:
 //   1. Groth16 batch proof verification (ballot proofs + VK)
 //   2. ECDSA signature verification (one per ballot)
@@ -14,20 +12,17 @@ package integration
 //   4. CENSUS lean-IMT Poseidon membership proofs
 //   5. REENCBLK BabyJubJub ElGamal re-encryption verification
 //   6. KZGBLK EIP-4844 blob barycentric evaluation
-//
 // Scenario (8 transitions, 14 fresh voters):
 //   Batch 1:  2 fresh voters   (idx 0-1)
 //   Batch 2:  4 fresh voters   (idx 2-5)
-//   Batch 3:  2 overwrites     (idx 0-1 vote again — 1st overwrite)
+// Batch 3:  2 overwrites     (idx 0-1 vote again => 1st overwrite)
 //   Batch 4:  2 fresh voters   (idx 6-7)
 //   Batch 5:  4 fresh voters   (idx 8-11)
-//   Batch 6:  4 overwrites     (idx 2-5 vote again — 1st overwrite)
-//   Batch 7:  2 overwrites     (idx 0-1 vote a 3rd time — 2nd overwrite)
+// Batch 6:  4 overwrites     (idx 2-5 vote again => 1st overwrite)
+// Batch 7:  2 overwrites     (idx 0-1 vote a 3rd time => 2nd overwrite)
 //   Batch 8:  2 fresh voters   (idx 12-13)
-//
 // After all transitions the test decrypts the ElGamal-accumulated tally and
 // verifies that each vote field matches the analytically expected total.
-//
 // Prerequisites:
 //   - docker compose up -d --build (starts davinci-zkvm service)
 //   - DAVINCI_API_URL (default: http://localhost:8080)
@@ -39,7 +34,7 @@ import (
 )
 
 func TestFullE2E(t *testing.T) {
-	// ── Batch layout ────────────────────────────────────────────────────────
+	// Batch layout
 	// Size: voters in this batch (must be power of two ≥ 2).
 	// VoterStart: -1 → fresh voters; ≥ 0 → overwrite voters at that index.
 	// SeedOffset: shifts the deterministic ballot‐field seed so overwrite
@@ -73,7 +68,7 @@ func TestFullE2E(t *testing.T) {
 	t.Logf("=== TestFullE2E: %d transitions, %d fresh voters, %d overwrites ===",
 		nTransitions, nFresh, nOverwrites)
 
-	// ── 1. Create election ──────────────────────────────────────────────────
+	// 1. Create election
 	election, err := NewElection(nFresh)
 	if err != nil {
 		t.Fatalf("NewElection(%d): %v", nFresh, err)
@@ -82,7 +77,7 @@ func TestFullE2E(t *testing.T) {
 	t.Logf("  ProcessID:    %s", election.ProcessIDHex())
 	t.Logf("  Initial root: %s", election.OldRoot)
 
-	// ── 2. Service check ────────────────────────────────────────────────────
+	// 2. Service check
 	client := newClient()
 	if err := checkServiceURL(apiURL + "/jobs"); err != nil {
 		t.Skipf("davinci-zkvm service not available at %s: %v "+
@@ -90,7 +85,7 @@ func TestFullE2E(t *testing.T) {
 	}
 	t.Logf("Service reachable at %s", apiURL)
 
-	// ── 3. Run transitions ──────────────────────────────────────────────────
+	// 3. Run transitions
 	tally := NewTallyAccumulator()
 	voterOffset := 0
 	prevRoot := election.OldRoot
@@ -111,7 +106,7 @@ func TestFullE2E(t *testing.T) {
 		if isOverwrite {
 			kind = "OVERWRITE"
 		}
-		t.Logf("─── Transition %d/%d [%s]: %d voters, seed=%d ───",
+		t.Logf("Transition %d/%d [%s]: %d voters, seed=%d",
 			txIdx+1, nTransitions, kind, spec.Size, seedBase)
 
 		start := time.Now()
@@ -196,7 +191,7 @@ func TestFullE2E(t *testing.T) {
 	t.Logf("=== All %d transitions done in %.1fs; decrypting tally (%d net ballots) ===",
 		nTransitions, time.Since(totalWall).Seconds(), tally.count)
 
-	// ── 4. Verify tally ─────────────────────────────────────────────────────
+	// 4. Verify tally
 	fieldTotals, err := tally.DecryptTally(election.EncPrivKey)
 	if err != nil {
 		t.Fatalf("DecryptTally: %v", err)

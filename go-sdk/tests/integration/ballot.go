@@ -185,9 +185,8 @@ func (b *BatchProveComponents) ToProveRequest() *davinci.ProveRequest {
 }
 
 // extractBallotRaw copies the 8 ciphertext big.Int values out of a BallotProofResult.
-// BallotProofResult.Ballot has TE (Twisted Edwards) coordinates because
-// GenerateBallotProofInputs stores ballot.FromRTEtoTE(). We convert back to RTE
-// (Reduced Twisted Edwards) so the coordinates are compatible with bjj_gnark.SetPoint.
+// BallotProofResult.Ballot has TE (Twisted Edwards) coordinates. We convert back to RTE
+// (Reduced Twisted Edwards) before calling SetPoint, which expects RTE form.
 func extractBallotRaw(res *ballotprooftest.BallotProofResult) *ballotRaw {
 	// Convert TE → RTE so SetPoint receives the expected coordinate form.
 	rteBallot := res.Ballot.FromTEtoRTE()

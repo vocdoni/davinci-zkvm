@@ -25,7 +25,7 @@ use crate::bn254_fr::{self, BnFr};
 use crate::poseidon::poseidon1;
 use crate::types::{FrRaw, BjjCiphertext, ReencEntry, FAIL_REENC};
 
-// ─── Curve constants ────────────────────────────────────────────────────────
+// Curve constants
 
 /// a = 168700 as BN254 Fr element.
 const CURVE_A: BnFr = [168700, 0, 0, 0];
@@ -48,7 +48,7 @@ const B8Y_LE: FrRaw = [
     0x25797203f7a0b249,
 ];
 
-// ─── Projective twisted Edwards point ─────────────────────────────────────
+// Projective twisted Edwards point
 
 /// BabyJubJub point in projective coordinates (X:Y:Z).
 /// Affine: (X/Z, Y/Z).  Identity: (0:1:1).
@@ -102,7 +102,7 @@ impl BJJProj {
     }
 }
 
-// ─── Scalar multiplication ─────────────────────────────────────────────────
+// Scalar multiplication
 
 /// Scalar multiply: `scalar * point` using double-and-add (LSB-first).
 fn scalar_mult(point: &BJJProj, scalar: &FrRaw) -> BJJProj {
@@ -121,26 +121,24 @@ fn scalar_mult(point: &BJJProj, scalar: &FrRaw) -> BJJProj {
     result
 }
 
-// ─── Curve membership ─────────────────────────────────────────────────────────
+// Curve membership
 
 /// Check that `(x, y)` satisfies the BabyJubJub twisted Edwards equation:
-///   `a·x² + y² = 1 + d·x²·y²`  (with a = 168700, d = 168696).
+///   `a*x² + y² = 1 + d*x²*y²`  (with a = 168700, d = 168696).
 fn is_on_bjj_curve(x: &BnFr, y: &BnFr) -> bool {
     let x2 = bn254_fr::sqr(x);
     let y2 = bn254_fr::sqr(y);
-    let lhs = bn254_fr::add(&bn254_fr::mul(&CURVE_A, &x2), &y2);  // a·x² + y²
-    let rhs = bn254_fr::add(&bn254_fr::ONE, &bn254_fr::mul(&CURVE_D, &bn254_fr::mul(&x2, &y2))); // 1 + d·x²·y²
+    let lhs = bn254_fr::add(&bn254_fr::mul(&CURVE_A, &x2), &y2);  // a*x² + y²
+    let rhs = bn254_fr::add(&bn254_fr::ONE, &bn254_fr::mul(&CURVE_D, &bn254_fr::mul(&x2, &y2))); // 1 + d*x²*y²
     lhs == rhs
 }
 
-// ─── Public API ─────────────────────────────────────────────────────────────
+// Public API
 
 /// Verify that `reencrypted[i] = original[i] + encZero(k', pubKey)` for all i.
-///
 /// `k` is the raw re-encryption seed; `k' = poseidon1(k)` is derived inside.
 /// `pub_key` is the ElGamal encryption public key point.
 /// All 8 fields use the same delta since `EncryptedZero` uses the same k' for all fields.
-///
 /// The public key is validated to be on the BabyJubJub curve before use, preventing
 /// degenerate inputs from causing silent incorrect results.
 pub fn verify_reencryption(

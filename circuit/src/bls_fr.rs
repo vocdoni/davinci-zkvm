@@ -6,7 +6,7 @@
 //! field multiplications (omega table generation + barycentric sum + batch inverse).
 //! Using `ark-bls12-381::Fr` maps each multiplication to ~50 pure RISC-V instructions
 //! in the Fibonacci SM table.  The ZisK `arith256_mod` precompile computes
-//! `d = (a·b + c) mod p` in a single, dedicated ArithMod row — replacing ~50
+// ! `d = (a*b + c) mod p` in a single, dedicated ArithMod row => replacing ~50
 //! Fibonacci SM rows per operation with 1 precompile row.
 //!
 //! # Representation
@@ -25,7 +25,6 @@ use ziskos::syscalls::{SyscallArith256ModParams, syscall_arith256_mod};
 
 /// BLS12-381 Fr modulus:
 ///   p = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001
-///
 /// Stored as [u64; 4] little-endian (limb[0] is least significant).
 pub const BLS_FR_MOD: [u64; 4] = [
     0xffffffff00000001,
@@ -34,7 +33,7 @@ pub const BLS_FR_MOD: [u64; 4] = [
     0x73eda753299d7d48,
 ];
 
-/// p − 2: exponent for Fermat inversion  `a^(p−2) mod p`.
+/// p - 2: exponent for Fermat inversion  `a^(p-2) mod p`.
 const PM2: [u64; 4] = [
     0xfffffffeffffffff,
     0x53bda402fffe5bfe,
@@ -50,10 +49,9 @@ pub const ZERO: BlsFrRaw = [0, 0, 0, 0];
 /// Multiplicative identity.
 pub const ONE: BlsFrRaw = [1, 0, 0, 0];
 
-// ─── Serialization ───────────────────────────────────────────────────────────
+// Serialization
 
 /// Parse 32 big-endian bytes into a `BlsFrRaw` **without** reducing modulo p.
-///
 /// The caller must guarantee the value is already in `[0, p)`.  Suitable for
 /// EIP-4844 blob cells, which are required by the spec to be valid Fr elements.
 #[inline]
@@ -67,7 +65,6 @@ pub fn from_be32_raw(b: &[u8; 32]) -> BlsFrRaw {
 }
 
 /// Parse 32 big-endian bytes and reduce modulo p via `arith256_mod`.
-///
 /// Use for SHA-256 derived inputs (e.g. evaluation point Z) that may be ≥ p.
 #[inline]
 pub fn from_be32_mod(b: &[u8; 32]) -> BlsFrRaw {
@@ -86,10 +83,9 @@ pub fn to_be32(a: &BlsFrRaw) -> [u8; 32] {
     out
 }
 
-// ─── Core operation ──────────────────────────────────────────────────────────
+// Core operation
 
-/// Compute `(a · b + c) mod p` using the ZisK `arith256_mod` precompile.
-///
+/// Compute `(a * b + c) mod p` using the ZisK `arith256_mod` precompile.
 /// This is the single primitive all other field operations are built upon.
 /// One call ≈ 1 ArithMod prover row (vs ~50 Fibonacci SM rows for a software
 /// Montgomery multiplication).
@@ -107,9 +103,9 @@ pub fn muladd(a: &BlsFrRaw, b: &BlsFrRaw, c: &BlsFrRaw) -> BlsFrRaw {
     d
 }
 
-// ─── Derived operations ───────────────────────────────────────────────────────
+// Derived operations
 
-/// Compute `a · b mod p`.
+/// Compute `a * b mod p`.
 #[inline(always)]
 pub fn mul(a: &BlsFrRaw, b: &BlsFrRaw) -> BlsFrRaw {
     muladd(a, b, &ZERO)
@@ -121,36 +117,34 @@ pub fn sqr(a: &BlsFrRaw) -> BlsFrRaw {
     mul(a, a)
 }
 
-/// Compute `(a + b) mod p` as `(a · 1 + b) mod p`.
+/// Compute `(a + b) mod p` as `(a * 1 + b) mod p`.
 #[inline(always)]
 pub fn add(a: &BlsFrRaw, b: &BlsFrRaw) -> BlsFrRaw {
     muladd(a, &ONE, b)
 }
 
-/// Compute `(a − b) mod p = (a + (p − b)) mod p`.
+/// Compute `(a - b) mod p = (a + (p - b)) mod p`.
 #[inline]
 pub fn sub(a: &BlsFrRaw, b: &BlsFrRaw) -> BlsFrRaw {
     if b == &ZERO {
         return *a;
     }
-    // neg(b) = p − b (pure 256-bit subtraction, no precompile needed since p > b)
+    // neg(b) = p - b (pure 256-bit subtraction, no precompile needed since p > b)
     muladd(a, &ONE, &neg(b))
 }
 
-/// Compute `−a mod p = p − a`.
-///
+/// Compute `-a mod p = p - a`.
 /// Returns `ZERO` when `a` is `ZERO`.
 #[inline]
 pub fn neg(a: &BlsFrRaw) -> BlsFrRaw {
     if a == &ZERO {
         return ZERO;
     }
-    // p − a: since 0 < a < p, no underflow.
+    // p - a: since 0 < a < p, no underflow.
     sub_256(&BLS_FR_MOD, a)
 }
 
-/// Compute `a^(−1) mod p` using Fermat's little theorem: `a^(p−2) mod p`.
-///
+/// Compute `a^(-1) mod p` using Fermat's little theorem: `a^(p-2) mod p`.
 /// Returns `ZERO` when `a` is `ZERO` (caller should avoid inverting zero).
 /// Cost: ~383 `arith256_mod` calls (255 squarings + ~128 multiplications).
 #[inline]
@@ -162,7 +156,6 @@ pub fn inv(a: &BlsFrRaw) -> BlsFrRaw {
 }
 
 /// Modular exponentiation `a^exp mod p`, square-and-multiply (LSB-first).
-///
 /// Uses ~256 squarings and up to ~128 extra multiplications.
 pub fn pow(a: &BlsFrRaw, exp: &[u64; 4]) -> BlsFrRaw {
     let mut result = ONE;
@@ -180,10 +173,9 @@ pub fn pow(a: &BlsFrRaw, exp: &[u64; 4]) -> BlsFrRaw {
     result
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
+// Internal helpers
 
-/// 256-bit subtraction `a − b` without modular reduction.
-///
+/// 256-bit subtraction `a - b` without modular reduction.
 /// Precondition: `a ≥ b` (no underflow).
 fn sub_256(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
     let (r0, borrow0) = a[0].overflowing_sub(b[0]);

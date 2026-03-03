@@ -36,7 +36,7 @@ pub fn sha256_once(data: &[u8]) -> [u8; 32] {
 
 /// Compute Keccak-256 of `data` using the ZisK `keccak_f` hardware precompile.
 ///
-/// Accepts inputs up to 135 bytes — fits in one Keccak block (rate = 136 bytes).
+/// Accepts inputs up to 135 bytes: fits in one Keccak block (rate = 136 bytes).
 /// This covers both use cases in this circuit:
 /// - 60 bytes: Ethereum signed-message envelope (for ECDSA `z` scalar)
 /// - 64 bytes: uncompressed secp256k1 public key (for Ethereum address derivation)

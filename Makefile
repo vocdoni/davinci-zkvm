@@ -1,19 +1,13 @@
 SHELL := /bin/bash
 
-# --- Paths ---
+# Paths
 ZISK_BIN        := $(HOME)/.zisk/bin
 CARGO_ZISK      := $(ZISK_BIN)/cargo-zisk
 ZISKEMU         := $(ZISK_BIN)/ziskemu
 
-SERVICE_BIN     := target/release/davinci-zkvm
 CIRCUIT_DIR     := circuit
 CIRCUIT_TARGET  := riscv64ima-zisk-zkvm-elf
 CIRCUIT_ELF     := $(CIRCUIT_DIR)/target/$(CIRCUIT_TARGET)/release/davinci-zkvm-circuit
-
-DATA_DIR        := go-sdk/data/ballot_proof_bn254
-PROOFS_DIR      := $(DATA_DIR)
-INPUT_BIN       := $(DATA_DIR)/aggregated_bn254/zisk_full_verify_input.bin
-NPROOFS         ?= 128
 
 PROOF_DIR       ?= proof_output
 PROVING_KEY     ?= $(HOME)/.zisk/provingKey
@@ -27,16 +21,15 @@ DOCKER_TAG      ?= latest
 ZISK_SRC        ?= $(HOME)/davinci-zisk/zisk
 CUDA_12_8       := /usr/local/cuda-12.8/bin
 
-.PHONY: all build build-service build-circuit gen-input run-emu \
+.PHONY: all build build-service build-circuit \
         setup setup-trees build-zisk-gpu \
-        prove \
         docker-build docker-build-cuda \
-        test-integration \
+        test test-unit test-integration \
         clean help
 
 all: build  ## Default: build service
 
-# ── Build ──────────────────────────────────────────────────────────────────────
+# Build
 
 build: build-service  ## Build the service binary
 
@@ -48,25 +41,7 @@ build-circuit:  ## Rebuild the ZisK RISC-V circuit ELF (requires +zisk toolchain
 	cp $(CIRCUIT_ELF) $(CIRCUIT_DIR)/elf/circuit.elf
 	@echo "=== Circuit ELF updated at circuit/elf/circuit.elf ==="
 
-# ── Input generation / emulator ────────────────────────────────────────────────
-
-gen-input:  ## Generate the ZisK binary input from test proofs (runs input-gen CLI)
-	@echo "=== Generating input binary from $(PROOFS_DIR) ($(NPROOFS) proofs) ==="
-	@cargo run --release -p davinci-zkvm-input-gen --bin gen-input -- \
-		--proofs-dir $(PROOFS_DIR) \
-		--output $(INPUT_BIN) \
-		--nproofs $(NPROOFS)
-
-run-emu: gen-input  ## Generate input and run the circuit in the ZisK emulator
-	$(ZISKEMU) -e $(CIRCUIT_DIR)/elf/circuit.elf -i $(INPUT_BIN)
-
-run-steps: gen-input  ## Run emulator with step/instance count summary
-	$(CARGO_ZISK) execute \
-		--elf $(CIRCUIT_DIR)/elf/circuit.elf \
-		--input $(INPUT_BIN) \
-		--emulator
-
-# ── ZisK setup ─────────────────────────────────────────────────────────────────
+# ZisK setup
 
 setup:  ## Download + install the ZisK proving key (version derived from cargo-zisk)
 	@ZISK_VER=$$($(CARGO_ZISK) --version | awk '{print $$2}'); \
@@ -91,7 +66,7 @@ setup-trees:  ## Build constant tree files required for full proving
 	$(CARGO_ZISK) check-setup --proving-key $(PROVING_KEY) -a
 	@echo "=== Constant trees built ==="
 
-# ── ZisK GPU binary build ───────────────────────────────────────────────────────
+# ZisK GPU binary build
 
 build-zisk-gpu:  ## Rebuild cargo-zisk with CUDA 12.8 GPU support (RTX 5000 / Blackwell sm_120)
 	@echo "=== Building ZisK with GPU support (CUDA 12.8) ==="
@@ -110,74 +85,7 @@ build-zisk-gpu:  ## Rebuild cargo-zisk with CUDA 12.8 GPU support (RTX 5000 / Bl
 	cp $(ZISK_SRC)/target/release/libzisk_witness.so $(HOME)/.zisk/bin/libzisk_witness.so 2>/dev/null || true; \
 	echo "=== Done: $$($(HOME)/.zisk/bin/cargo-zisk --version) ==="
 
-# ── Proving ────────────────────────────────────────────────────────────────────
-
-FULL_INPUT_BIN  := $(DATA_DIR)/aggregated_bn254/zisk_full_input.bin
-
-gen-full-input: gen-input  ## Generate the full combined ZisK input (all 8 protocol blocks including KZG).
-	@echo "=== Generating full combined input with all protocol blocks ==="
-	@cd go-sdk && \
-	FULL_INPUT_OUT="$(abspath $(FULL_INPUT_BIN))" \
-	go test ./tests/ -run TestFullE2E -v -timeout 120s
-	@echo "=== Full input: $(FULL_INPUT_BIN) ==="
-
-prove: gen-input  ## Run full ZisK proof on base Groth16 input (set PROOF_DIR= and PROVING_KEY= as needed). Reports elapsed time.
-	@if [ ! -d "$(PROVING_KEY)" ]; then \
-		echo "ERROR: Proving key not found at $(PROVING_KEY)"; \
-		echo "Run 'make setup' then 'make setup-trees' to install it."; \
-		exit 1; \
-	fi
-	@if [ ! -f "$(PROVING_KEY)/zisk/Zisk/airs/ArithEq/compressor/compressor.consttree" ] && \
-	    [ ! -f "$(PROVING_KEY)/zisk/Zisk/airs/ArithEq/compressor/compressor.consttree_gpu" ]; then \
-		echo "ERROR: Constant tree files are missing. Run 'make setup-trees'."; \
-		exit 1; \
-	fi
-	@mkdir -p $(PROOF_DIR)
-	@echo "=== ZisK prove started at $$(date) ==="
-	@start=$$(date +%s); \
-	$(CARGO_ZISK) prove \
-		--elf $(CIRCUIT_DIR)/elf/circuit.elf \
-		--input $(INPUT_BIN) \
-		--proving-key $(PROVING_KEY) \
-		--output-dir $(PROOF_DIR) \
-		--emulator \
-		--aggregation \
-		--final-snark \
-		--verify-proofs; \
-	end=$$(date +%s); \
-	echo ""; \
-	echo "=== ZisK prove finished at $$(date) ==="; \
-	echo "=== Total proving time: $$((end - start)) seconds ==="
-
-prove-full: gen-full-input  ## Run full ZisK proof on complete protocol input (all 8 blocks, including KZG). Reports elapsed time.
-	@if [ ! -d "$(PROVING_KEY)" ]; then \
-		echo "ERROR: Proving key not found at $(PROVING_KEY)"; \
-		echo "Run 'make setup' then 'make setup-trees' to install it."; \
-		exit 1; \
-	fi
-	@if [ ! -f "$(PROVING_KEY)/zisk/Zisk/airs/ArithEq/compressor/compressor.consttree" ] && \
-	    [ ! -f "$(PROVING_KEY)/zisk/Zisk/airs/ArithEq/compressor/compressor.consttree_gpu" ]; then \
-		echo "ERROR: Constant tree files are missing. Run 'make setup-trees'."; \
-		exit 1; \
-	fi
-	@mkdir -p $(PROOF_DIR)
-	@echo "=== ZisK full prove started at $$(date) (input: $(FULL_INPUT_BIN)) ==="
-	@start=$$(date +%s); \
-	$(CARGO_ZISK) prove \
-		--elf $(CIRCUIT_DIR)/elf/circuit.elf \
-		--input $(FULL_INPUT_BIN) \
-		--proving-key $(PROVING_KEY) \
-		--output-dir $(PROOF_DIR) \
-		--emulator \
-		--aggregation \
-		--final-snark \
-		--verify-proofs; \
-	end=$$(date +%s); \
-	echo ""; \
-	echo "=== ZisK full prove finished at $$(date) ==="; \
-	echo "=== Total proving time: $$((end - start)) seconds ==="
-
-# ── Docker ─────────────────────────────────────────────────────────────────────
+# Docker
 
 docker-build:  ## Build CPU Docker image
 	docker build -t $(DOCKER_IMAGE):$(DOCKER_TAG) -f Dockerfile .
@@ -185,19 +93,24 @@ docker-build:  ## Build CPU Docker image
 docker-build-cuda:  ## Build CUDA GPU Docker image
 	docker build -t $(DOCKER_IMAGE)-cuda:$(DOCKER_TAG) -f Dockerfile.cuda .
 
-# ── Integration tests ──────────────────────────────────────────────────────────
+# Tests
 
-test-integration: docker-build  ## Build Docker image and run Go integration tests
-	@$(MAKE) -C go-sdk/tests test
+test:  ## Run emulator-based cheat tests (no service required, needs ziskemu in PATH)
+	cd go-sdk && go test -v -timeout 5m ./tests/integration/ -run "TestCheat"
 
-# ── Clean ──────────────────────────────────────────────────────────────────────
+test-unit:  ## Run lightweight service tests (health, validation, no proving)
+	cd go-sdk/tests && DAVINCI_SKIP_PROVING=1 make test-unit
 
-clean:  ## Remove all build artifacts, generated input, and proof output
+test-integration:  ## Run full integration tests against running service (requires GPU)
+	cd go-sdk/tests && make test
+
+# Clean
+
+clean:  ## Remove all build artifacts and proof output
 	cargo clean
-	rm -f $(INPUT_BIN)
 	rm -rf $(PROOF_DIR)
 
-# ── Help ───────────────────────────────────────────────────────────────────────
+# Help
 
 help:  ## Show this help
 	@echo "davinci-zkvm Makefile targets:"

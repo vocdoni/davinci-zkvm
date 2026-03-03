@@ -59,20 +59,16 @@ fn ballot_leaf_hash(b: &BallotData) -> FrRaw {
 }
 
 /// Verify the result accumulator and ballot leaf hashes.
-///
 /// Checks:
 /// 1. **Ballot leaf hashes**: For each voter ballot in `voter_ballots`, verify that
 ///    `SHA256(serialize(ballot)) == ballot_chain[i].new_value`. This binds the
 ///    re-encrypted ballot data to the SMT leaf, preventing the prover from inserting
 ///    arbitrary leaf values.
-///
 /// 2. **ResultsAdd accumulation**: `NewResultsAdd = OldResultsAdd + Σ(voter_ballots)`.
 ///    The sum uses element-wise BN254 Fr addition (homomorphic under ElGamal).
 ///    The new value is verified against `results_add.new_value` in the SMT.
-///
 /// 3. **ResultsSub accumulation**: `NewResultsSub = OldResultsSub + Σ(overwritten_ballots)`.
 ///    Only overwritten (UPDATE) votes contribute to ResultsSub.
-///
 /// Returns `true` if all checks pass. Sets `FAIL_LEAF_HASH` or `FAIL_RESULT_ACCUM`
 /// in `fail_mask` on failure.
 pub fn verify_results(state: &StateBlock, fail_mask: &mut u32) -> bool {
@@ -88,7 +84,7 @@ pub fn verify_results(state: &StateBlock, fail_mask: &mut u32) -> bool {
 
     let mut ok = true;
 
-    // ── Ballot leaf hash verification ───────────────────────────────────────
+    // Ballot leaf hash verification
     // Each voter_ballots[i] must match ballot_chain[i].new_value via SHA-256.
     if state.voter_ballots.len() != state.ballot_chain.len() {
         *fail_mask |= FAIL_LEAF_HASH;
@@ -103,7 +99,7 @@ pub fn verify_results(state: &StateBlock, fail_mask: &mut u32) -> bool {
         }
     }
 
-    // ── Overwritten ballot leaf hash verification ───────────────────────────
+    // Overwritten ballot leaf hash verification
     // For UPDATE entries, the old_value must match the hash of the overwritten ballot.
     let update_indices: Vec<usize> = state.ballot_chain.iter()
         .enumerate()
@@ -124,7 +120,7 @@ pub fn verify_results(state: &StateBlock, fail_mask: &mut u32) -> bool {
         }
     }
 
-    // ── ResultsAdd accumulation ─────────────────────────────────────────────
+    // ResultsAdd accumulation
     // NewResultsAdd = OldResultsAdd + Σ(all voter ballots)
     if let Some(ref r_add) = state.results_add {
         let mut sum = state.old_results_add;
@@ -148,7 +144,7 @@ pub fn verify_results(state: &StateBlock, fail_mask: &mut u32) -> bool {
         ok = false;
     }
 
-    // ── ResultsSub accumulation ─────────────────────────────────────────────
+    // ResultsSub accumulation
     // NewResultsSub = OldResultsSub + Σ(overwritten ballots)
     if let Some(ref r_sub) = state.results_sub {
         let mut sum = state.old_results_sub;

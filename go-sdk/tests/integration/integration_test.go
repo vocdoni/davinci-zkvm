@@ -1,11 +1,9 @@
 // integration_test.go is the main integration test for chained DAVINCI protocol
 // state-transitions.
-//
 // It creates a real election, generates BN254 Groth16 ballot proofs dynamically,
 // submits multiple chained state-transitions to the running davinci-zkvm service,
 // accumulates the ElGamal ciphertexts homomorphically, and verifies the final
 // vote tally by decrypting with the election private key.
-//
 // Prerequisites:
 //   - docker compose up -d --build (starts davinci-zkvm service)
 //   - DAVINCI_API_URL (default: http://localhost:8080)
@@ -84,7 +82,6 @@ func batchesFromEnv() []batchSpec {
 }
 
 // TestChainedStateTransitions is the main multi-transition integration test.
-//
 // It runs ~20 chained DAVINCI state-transitions against the running
 // davinci-zkvm service. Each transition uses a fresh batch of ballot proofs,
 // and the old-root from one transition is the new-root for the next.
@@ -98,7 +95,7 @@ func TestChainedStateTransitions(t *testing.T) {
 	t.Logf("=== TestChainedStateTransitions: %d transitions, %d fresh voters ===",
 		nTransitions, nFresh)
 
-	// ── 1. Create election ──────────────────────────────────────────────────
+	// 1. Create election
 	t.Logf("Creating election with %d voters...", nFresh)
 	election, err := NewElection(nFresh)
 	if err != nil {
@@ -113,10 +110,10 @@ func TestChainedStateTransitions(t *testing.T) {
 		t.Skipf("davinci-zkvm service not available at %s: %v (start with 'docker compose up -d --build')", apiURL, err)
 	}
 
-	// ── 2. Tally accumulator ─────────────────────────────────────────────────
+	// 2. Tally accumulator
 	tally := NewTallyAccumulator()
 
-	// ── 3. Run transitions ──────────────────────────────────────────────────
+	// 3. Run transitions
 	voterOffset := 0
 	for txIdx, spec := range batches {
 		batchSize := spec.Size
@@ -216,7 +213,7 @@ func TestChainedStateTransitions(t *testing.T) {
 		t.Logf("  New state root: %s", election.OldRoot)
 	}
 
-	// ── 4. Verify tally ─────────────────────────────────────────────────────
+	// 4. Verify tally
 	t.Logf("=== All %d transitions done; decrypting tally (%d net ballots) ===",
 		nTransitions, tally.count)
 
@@ -255,7 +252,6 @@ func TestChainedStateTransitions(t *testing.T) {
 //   - overwrite specs (VoterStart≥0) replace earlier votes for those voter indices
 //   - each ballot has 6 non-zero fields; values are unique within a ballot
 //   - field f, voter seed s: first (s+f*1000+attempt)%16 not already used in that ballot
-//
 // Only the LAST ballot cast by each voter is counted.
 func expectedTally(batches []batchSpec) [8]int64 {
 	// lastFields maps voter index → their most recently cast ballot fields.

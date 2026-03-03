@@ -6,7 +6,7 @@
 //! check reduces to a single multi-pairing equation:
 //!
 //! ```text
-//! e(−α·r_sum, β) · e(−Σ r_i·g_ic_i, γ) · e(−Σ r_i·C_i, δ) · Π e(r_i·A_i, B_i) = GT_ONE
+//! e(-a*r_sum, b) * e(-sum(r_i*g_ic_i), g) * e(-sum(r_i*C_i), d) * prod(e(r_i*A_i, B_i)) = GT_ONE
 //! ```
 //!
 //! where `r_i = r_shift^i` and `r_shift` is a Fiat-Shamir challenge derived from
@@ -34,7 +34,7 @@ fn challenge_fr(digest: &[u8; 32]) -> Option<FrRaw> {
         buf0[40] = 0;
         let d0 = sha256_once(&buf0);
 
-        // BN254 Fr has 254-bit modulus — only 32 bytes needed for Fiat-Shamir.
+        // BN254 Fr has 254-bit modulus: only 32 bytes needed for Fiat-Shamir.
         // (The host also computes d1 for historical arkworks compatibility, but
         // Fr::from_random_bytes only consumes the first 32 bytes.)
         if let Some(v) = bn254_fr::from_random_bytes_32(&d0) {
@@ -47,8 +47,8 @@ fn challenge_fr(digest: &[u8; 32]) -> Option<FrRaw> {
 /// Verify a Groth16 batch.  Returns `true` if the batch passes.
 ///
 /// # Fail-mask bits
-/// - `FAIL_CURVE` (bit 1) — a curve/subgroup check failed on a VK or proof point
-/// - `FAIL_PAIRING` (bit 2) — the batch pairing equation did not hold
+/// - `FAIL_CURVE` (bit 1): a curve/subgroup check failed on a VK or proof point
+/// - `FAIL_PAIRING` (bit 2): the batch pairing equation did not hold
 pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     // Skip expensive work if we already know the input is malformed.
     if *fail_mask & FAIL_PARSE != 0 {
@@ -64,7 +64,7 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     for p in &parsed.vk_gamma_abc { points_ok &= g1_is_valid(p); }
     for i in 0..parsed.nproofs {
         points_ok &= g1_is_valid(&parsed.proofs[i].a);
-        // proof.b: on-curve only — subgroup check is sound via Fiat-Shamir randomisation
+        // proof.b: on-curve only: subgroup check is sound via Fiat-Shamir randomisation
         points_ok &= is_on_curve_twist_bn254(&parsed.proofs[i].b);
         points_ok &= g1_is_valid(&parsed.proofs[i].c);
         // scaled_a hints: on-curve check is sufficient (validated by pairing equation)
@@ -106,7 +106,7 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
 
     // --- Batch pairing equation ---
     //
-    // e(neg_alpha_rsum, β) · e(neg_g_ic, γ) · e(neg_acc_c, δ) · Π e(scaled_a[i], B_i) = GT_ONE
+    // e(neg_alpha_rsum, β) * e(neg_g_ic, γ) * e(neg_acc_c, δ) * Π e(scaled_a[i], B_i) = GT_ONE
     //
     // Host hints (neg_alpha_rsum, neg_g_ic, neg_acc_c, scaled_a[i]) are implicitly
     // validated by the equation itself under the BDDH + random-oracle assumption.

@@ -3,9 +3,9 @@
 //! Usage: gen-input --proofs-dir <dir> --output <out.bin> [--nproofs <N>]
 //!
 //! Expected directory structure:
-//!   <proofs-dir>/verification_key.json  — snarkjs verification key
-//!   <proofs-dir>/proof_1.json           — Groth16 proof (1-indexed)
-//!   <proofs-dir>/public_1.json          — public inputs
+//!   <proofs-dir>/verification_key.json: snarkjs verification key
+//!   <proofs-dir>/proof_1.json: Groth16 proof (1-indexed)
+//!   <proofs-dir>/public_1.json: public inputs
 //!   ...
 
 use anyhow::Result;

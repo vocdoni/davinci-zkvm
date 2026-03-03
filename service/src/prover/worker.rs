@@ -160,7 +160,7 @@ async fn run_prove(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
     // required `final/` artifacts (final.so, final.zkey, final.dat).  Passing
     // --final-snark with the current proving key causes proofman to silently
     // discard the error (the result of generate_fflonk_snark_proof is `let _`),
-    // so the flag has no effect — it only wastes initialisation time.
+    // so the flag has no effect: it only wastes initialisation time.
     //
     // When Polygon releases the final-snark proving key artifacts, re-add:
     //   .arg("--final-snark")

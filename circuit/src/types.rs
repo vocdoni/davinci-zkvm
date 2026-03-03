@@ -35,7 +35,7 @@ pub type GT = [u64; 48];
 /// BN254 scalar field element in raw (non-Montgomery) 256-bit little-endian limbs.
 pub type FrRaw = [u64; 4];
 
-/// Magic bytes `"GROTH16B"` in little-endian ASCII — identifies the binary input format.
+/// Magic bytes `"GROTH16B"` in little-endian ASCII => identifies the binary input format.
 pub const MAGIC: u64 = 0x423631484f545247u64;
 
 /// BN254 scalar field modulus r as [u64; 4] little-endian.
@@ -52,7 +52,7 @@ pub const ZERO_FR: FrRaw = [0, 0, 0, 0];
 #[allow(dead_code)]
 pub const ONE_FR: FrRaw = [1, 0, 0, 0];
 
-// ─── Fail-mask bit constants ────────────────────────────────────────────────
+// Fail-mask bit constants
 // See the module-level table for a complete description of each bit.
 pub const FAIL_PARSE:       u32 = 1 << 31;
 pub const FAIL_CURVE:       u32 = 1 << 1;
@@ -66,15 +66,15 @@ pub const FAIL_CONSISTENCY: u32 = 1 << 14;
 pub const FAIL_BALLOT_NS:   u32 = 1 << 15;
 pub const FAIL_CENSUS:      u32 = 1 << 16;
 pub const FAIL_REENC:       u32 = 1 << 17;
-/// Bit 18 — KZG barycentric evaluation mismatch.
+/// Bit 18 => KZG barycentric evaluation mismatch.
 pub const FAIL_KZG:         u32 = 1 << 18;
-/// Bit 19 — A mandatory protocol block is missing from the input.
+/// Bit 19 => A mandatory protocol block is missing from the input.
 pub const FAIL_MISSING_BLOCK: u32 = 1 << 19;
-/// Bit 20 — Result accumulator: homomorphic ballot sum does not match ResultsAdd/Sub.
+/// Bit 20 => Result accumulator: homomorphic ballot sum does not match ResultsAdd/Sub.
 pub const FAIL_RESULT_ACCUM: u32 = 1 << 20;
-/// Bit 21 — Ballot leaf hash: SHA-256(serialized_ballot) ≠ SMT new_value.
+/// Bit 21 => Ballot leaf hash: SHA-256(serialized_ballot) ≠ SMT new_value.
 pub const FAIL_LEAF_HASH: u32 = 1 << 21;
-/// Bit 22 — Cross-block binding: processID, rootHashBefore, or encryption key mismatch
+/// Bit 22 => Cross-block binding: processID, rootHashBefore, or encryption key mismatch
 /// between independently-parsed blocks (KZG ↔ state, re-encryption ↔ process config).
 pub const FAIL_BINDING: u32 = 1 << 22;
 
@@ -98,7 +98,6 @@ pub struct EcdsaEntry {
 }
 
 /// One Arbo-compatible SMT state-transition proof.
-///
 /// All `FrRaw` fields use LE word order (same convention as the rest of the circuit).
 /// The SMT verifier converts them to big-endian bytes for hashing, matching Arbo's
 /// `HashFunctionSha256` byte layout.
@@ -120,29 +119,28 @@ pub struct SmtTransition {
     pub siblings: Vec<FrRaw>,
 }
 
-/// Magic bytes `"STATETX!"` — identifies the full state-transition block.
+/// Magic bytes `"STATETX!"` => identifies the full state-transition block.
 pub const STATE_MAGIC: u64 = u64::from_le_bytes(*b"STATETX!");
 
-/// Magic bytes `"CENSUS!!"` — identifies the optional census proof block.
+/// Magic bytes `"CENSUS!!"` => identifies the optional census proof block.
 pub const CENSUS_MAGIC: u64 = u64::from_le_bytes(*b"CENSUS!!");
 
-/// Magic bytes `"REENCBLK"` — identifies the optional re-encryption verification block.
+/// Magic bytes `"REENCBLK"` => identifies the optional re-encryption verification block.
 pub const REENC_MAGIC: u64 = u64::from_le_bytes(*b"REENCBLK");
 
-/// Magic bytes `"KZGBLK!!"` — identifies the optional KZG barycentric evaluation block.
+/// Magic bytes `"KZGBLK!!"` => identifies the optional KZG barycentric evaluation block.
 pub const KZG_MAGIC: u64 = u64::from_le_bytes(*b"KZGBLK!!");
 
-/// Magic bytes `"CSPBLK!!"` — identifies the CSP ECDSA census block.
+/// Magic bytes `"CSPBLK!!"` => identifies the CSP ECDSA census block.
 pub const CSP_MAGIC: u64 = u64::from_le_bytes(*b"CSPBLK!!");
 
 /// Census origin value for CSP ECDSA mode (process config key 0x06 == 4).
 pub const CENSUS_ORIGIN_CSP: u64 = 4;
 
-/// Bit 23 — CSP ECDSA signature or address verification failed.
+/// Bit 23 => CSP ECDSA signature or address verification failed.
 pub const FAIL_CSP: u32 = 1 << 23;
 
 /// KZG EIP-4844 blob barycentric evaluation block.
-///
 /// Contains all data needed to verify Y = P(Z) where P is the polynomial interpolating
 /// the blob, and Z is derived from the process context via SHA-256.
 pub struct KZGBlock {
@@ -248,7 +246,7 @@ pub struct StateBlock {
     /// Shared n_levels for vote_id_chain and ballot_chain.
     pub n_levels: usize,
 
-    // ── Result accumulator ballot data ────────────────────────────────────────
+    // Result accumulator ballot data
     /// Previous ResultsAdd leaf value (32 Fr elements). ZERO_FR ballot when absent.
     pub old_results_add: BallotData,
     /// Previous ResultsSub leaf value (32 Fr elements). ZERO_FR ballot when absent.

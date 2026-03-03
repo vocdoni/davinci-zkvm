@@ -21,7 +21,7 @@ use crate::bn254::{g1_identity, g2_identity};
 use crate::types::*;
 
 /// Read `N` little-endian `u64` words from `input` at `*offset`, advancing `*offset`.
-/// Returns `None` — without moving `*offset` — if insufficient bytes remain.
+/// Returns `None` => without moving `*offset` => if insufficient bytes remain.
 pub fn read_words_le<const N: usize>(input: &[u8], offset: &mut usize) -> Option<[u64; N]> {
     let bytes = N * 8;
     if *offset + bytes > input.len() {
@@ -69,13 +69,11 @@ pub struct ParsedInput {
 }
 
 /// Parse the binary input blob, setting bits in `fail_mask` on any error.
-///
-/// This function is **infallible** — it always returns a `ParsedInput`, using
+/// This function is **infallible** => it always returns a `ParsedInput`, using
 /// identity/zero fallbacks for unreadable fields.  Callers must check `fail_mask`
 /// (particularly bit 31 = parse error) before trusting the returned data.
-///
 /// # Fail-mask bits
-/// - Bit 31 — format/parse error (magic mismatch, truncated data, counter mismatch)
+/// - Bit 31 => format/parse error (magic mismatch, truncated data, counter mismatch)
 pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
     // Convenience macros to read fields and record failures without early-return.
     macro_rules! read1 {
@@ -403,7 +401,7 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
         }
     }
 
-    // ── Result accumulator ballot data ──────────────────────────────────────
+    // Result accumulator ballot data
     // has_ballot_data: 0 = absent (zeros), 1 = present
     let has_ballot_data = read1!(0) != 0;
     let zero_ballot: [FrRaw; 32] = [ZERO_FR; 32];

@@ -14,8 +14,8 @@
 //! # Verification per voter
 //!
 //! 1. Reconstruct `z` from (processID, voter_address, weight, index)
-//! 2. `secp256k1_ecdsa_verify(csp_pk, z, r, s)` — CSP signed this voter
-//! 3. `eth_address_from_pk(csp_pk) == censusRoot` — CSP is the authorized authority
+// ! 2. `secp256k1_ecdsa_verify(csp_pk, z, r, s)` => CSP signed this voter
+// ! 3. `eth_address_from_pk(csp_pk) == censusRoot` => CSP is the authorized authority
 //!
 //! # Security invariants
 //!
@@ -30,7 +30,6 @@ use ziskos::syscalls::SyscallPoint256;
 use ziskos::zisklib::secp256k1_ecdsa_verify;
 
 /// Compute the Ethereum signed-message hash for a CSP attestation.
-///
 /// `z = keccak256("\x19Ethereum Signed Message:\n92" || processID_BE32 || address_BE20 || weight_BE32 || index_BE8)`
 fn csp_message_hash(process_id: &FrRaw, voter_address: &FrRaw, weight: &FrRaw, index: u64) -> [u64; 4] {
     // Prefix: "\x19Ethereum Signed Message:\n92" = 28 bytes
@@ -105,12 +104,10 @@ fn address_to_fr(addr: &[u8; 20]) -> FrRaw {
 }
 
 /// Verify CSP ECDSA proofs for all voters.
-///
 /// Returns `(ok, census_root_fr)` where `census_root_fr` is the CSP's Ethereum address
 /// as an FrRaw (used as the census root output).
-///
 /// # Fail-mask bits
-/// - `FAIL_CSP` (bit 23) — CSP signature verification or address check failed
+/// - `FAIL_CSP` (bit 23) => CSP signature verification or address check failed
 pub fn verify_csp(
     csp: &CspBlock,
     process_id: &FrRaw,
@@ -127,7 +124,7 @@ pub fn verify_csp(
 
     let pk = SyscallPoint256 { x: csp.csp_pub_key_x, y: csp.csp_pub_key_y };
 
-    // ── Invariant 1: no duplicate (voter_address, index) pairs ──────────────
+    // Invariant 1: no duplicate (voter_address, index) pairs
     let n = csp.entries.len();
     for i in 0..n {
         for j in (i + 1)..n {
@@ -140,7 +137,7 @@ pub fn verify_csp(
         }
     }
 
-    // ── Invariant 2: each CSP signature is valid ────────────────────────────
+    // Invariant 2: each CSP signature is valid
     for entry in &csp.entries {
         let z = csp_message_hash(process_id, &entry.voter_address, &entry.weight, entry.index);
         if !secp256k1_ecdsa_verify(&pk, &z, &entry.r, &entry.s) {

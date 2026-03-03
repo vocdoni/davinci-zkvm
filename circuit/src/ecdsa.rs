@@ -74,7 +74,7 @@ fn address_matches(addr_bytes: &[u8; 20], pubs_addr: &FrRaw) -> bool {
 /// Returns `ecdsa_ok = false` when any signature or address binding check fails.
 ///
 /// # Fail-mask bits
-/// - `FAIL_ECDSA` (bit 3) — signature or address-binding check failed, or block absent
+/// - `FAIL_ECDSA` (bit 3): signature or address-binding check failed, or block absent
 pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     if parsed.ecdsa.is_empty() {
         // ECDSA block is mandatory; treat absence as failure.
