@@ -102,6 +102,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    curl \
     openmpi-bin \
     openmpi-common \
     && rm -rf /var/lib/apt/lists/*
@@ -139,6 +140,8 @@ ENV PROOF_OUTPUT_DIR=/proofs
 ENV LD_LIBRARY_PATH=/usr/local/lib/zisk-deps:/usr/local/lib
 ENV OMPI_ALLOW_RUN_AS_ROOT=1
 ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
+ENV OMPI_MCA_btl=vader,self
+ENV OMPI_MCA_pml=ob1
 ENV OMPI_MCA_opal_cuda_support=0
 ENV OMPI_MCA_btl_smcuda_use_cuda_ipc=0
 

@@ -28,6 +28,9 @@ services:
     environment:
       - PROOF_OUTPUT_DIR=/proofs
       - MAX_QUEUE_SIZE=${MAX_QUEUE_SIZE:-100}
+      - ZISK_MPI_PROCS=${ZISK_MPI_PROCS:-1}
+      - ZISK_MPI_THREADS=${ZISK_MPI_THREADS:-0}
+      - ZISK_MPI_BIND_TO=${ZISK_MPI_BIND_TO:-none}
     restart: unless-stopped
     deploy:
       resources:
@@ -57,6 +60,9 @@ services:
     environment:
       - PROOF_OUTPUT_DIR=/proofs
       - MAX_QUEUE_SIZE=${MAX_QUEUE_SIZE:-100}
+      - ZISK_MPI_PROCS=${ZISK_MPI_PROCS:-1}
+      - ZISK_MPI_THREADS=${ZISK_MPI_THREADS:-0}
+      - ZISK_MPI_BIND_TO=${ZISK_MPI_BIND_TO:-none}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]

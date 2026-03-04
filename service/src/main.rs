@@ -49,6 +49,10 @@ async fn main() -> anyhow::Result<()> {
     info!("  proving key:   {:?}", config.proving_key_path);
     info!("  circuit ELF:   {:?}", config.circuit_elf_path);
     info!("  cargo-zisk:    {}", config.cargo_zisk_bin);
+    info!(
+        "  zisk mpi:      procs={}, threads={}, bind-to={}",
+        config.zisk_mpi_procs, config.zisk_mpi_threads, config.zisk_mpi_bind_to
+    );
     info!("  proof output:  {:?}", config.proof_output_dir);
     info!("  listen:        {}", config.listen_addr);
 
