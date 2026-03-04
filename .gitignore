@@ -31,6 +31,8 @@ provingKey/
 # .env holds COMPOSE_PROFILES and other local overrides; not committed so each
 # developer can choose their own profile (cuda / cpu) without affecting others.
 .env
+.env.local.nodocker
+.davinci-service.log
 
 # ── Go test binaries ─────────────────────────────────────────────────────────
 go-sdk/tests/*.test

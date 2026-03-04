@@ -67,6 +67,26 @@ docker compose up -d
 COMPOSE_PROFILES=cpu docker compose up -d
 ```
 
+### Run locally (non-Docker)
+
+```bash
+# Full install: clone + build ZisK, build service, download proving key
+make setup
+
+# Run the service (sources .env.local.nodocker automatically)
+make run
+
+# Run integration tests (starts/stops service automatically)
+make test
+```
+
+Override defaults as needed:
+
+```bash
+make setup PROVER_MODE=gpu ZISK_VERSION=v0.15.0 PROVING_KEY_PATH=/data/provingKey
+make run   ZISK_MPI_PROCS=4 ZISK_MPI_THREADS=8
+```
+
 ### Submit a proof via the Go SDK
 
 ```go
@@ -116,9 +136,13 @@ full `ProveRequest` schema, or use the Go SDK's `ProveBatch` which handles seria
 
 ## Proving key setup
 
+The proving key (~36 GB) is downloaded automatically by `make setup`.
+
+For Docker, mount it as a volume:
+
 ```bash
-make setup         # Download proving key (~36 GB)
-make setup-trees   # Build constant tree files (once, ~5 min with GPU)
+# Point PROVING_KEY_PATH to your existing key, or let install.sh download it first
+docker compose up -d
 ```
 
 Or set `PROVING_KEY_PATH` in `.env` to point to an existing key directory.
@@ -133,28 +157,37 @@ Or set `PROVING_KEY_PATH` in `.env` to point to an existing key directory.
 | `CARGO_ZISK_BIN` | `cargo-zisk` | Path to cargo-zisk binary |
 | `PROOF_OUTPUT_DIR` | `/tmp/proofs` | Proof output directory |
 | `MAX_QUEUE_SIZE` | `100` | Maximum queued jobs |
+| `ZISK_MPI_PROCS` | `1` | MPI processes for proving (`>1` runs `mpirun`) |
+| `ZISK_MPI_THREADS` | `0` | Threads per MPI process (sets `OMP_NUM_THREADS` and `RAYON_NUM_THREADS`; `0` = unset) |
+| `ZISK_MPI_BIND_TO` | `none` | `mpirun --bind-to` policy |
 
 ## Development
 
 ```bash
-make build           # Build the HTTP service binary
-make build-circuit   # Rebuild circuit ELF (requires +zisk toolchain)
-make test            # Run emulator-based cheat tests (no service needed)
-make test-integration  # Run full integration tests (requires running service)
-```
+# Build the circuit ELF (requires +zisk toolchain)
+cd circuit && cargo +zisk build --release --target riscv64ima-zisk-zkvm-elf
+cp circuit/target/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-circuit circuit/elf/circuit.elf
 
-### GPU build (CUDA 12.8)
+# Build service binary only
+cargo build --release -p davinci-zkvm-service
 
-```bash
-make build-zisk-gpu ZISK_SRC=~/path/to/zisk
-make setup-trees
+# Run cheat tests (emulator, no service needed)
+cd go-sdk/tests && make test-unit
+
+# Run full integration tests (requires running service)
+cd go-sdk/tests && make test
 ```
 
 ### Docker
 
 ```bash
-make docker-build-cuda   # CUDA GPU image
-make docker-build        # CPU-only image
+# Build images
+docker compose build davinci-zkvm      # CUDA GPU image  (Dockerfile.cuda)
+docker compose build davinci-zkvm-cpu  # CPU-only image  (Dockerfile)
+
+# Run
+docker compose --profile cuda up -d    # Start CUDA GPU service
+docker compose --profile cpu  up -d    # Start CPU-only service
 ```
 
 ## Circuit specification

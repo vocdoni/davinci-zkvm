@@ -166,18 +166,49 @@ async fn run_prove(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
     //   .arg("--final-snark")
     // and update the /proof download endpoint to serve the resulting JSON file
     // instead of vadcop_final_proof.bin.
-    let output = Command::new(&config.cargo_zisk_bin)
-        .arg("prove")
-        .arg("--elf").arg(&config.circuit_elf_path)
-        .arg("--input").arg(&task.input_path)
-        .arg("--proving-key").arg(&config.proving_key_path)
-        .arg("--output-dir").arg(&task.output_dir)
-        .arg("--emulator")
-        .arg("--aggregation")
-        .arg("--verify-proofs")
-        .output()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to spawn cargo-zisk: {}", e))?;
+    let zisk_args: Vec<String> = vec![
+        "prove".to_string(),
+        "--elf".to_string(),
+        config.circuit_elf_path.display().to_string(),
+        "--input".to_string(),
+        task.input_path.display().to_string(),
+        "--proving-key".to_string(),
+        config.proving_key_path.display().to_string(),
+        "--output-dir".to_string(),
+        task.output_dir.display().to_string(),
+        "--emulator".to_string(),
+        "--aggregation".to_string(),
+        "--verify-proofs".to_string(),
+    ];
+
+    let output = if config.zisk_mpi_procs > 1 {
+        // Parallel proving mode as documented by ZisK:
+        // mpirun --bind-to none -np P -x OMP_NUM_THREADS=T -x RAYON_NUM_THREADS=T cargo-zisk ...
+        let mut cmd = Command::new("mpirun");
+        cmd.arg("--bind-to")
+            .arg(&config.zisk_mpi_bind_to)
+            .arg("-np")
+            .arg(config.zisk_mpi_procs.to_string());
+
+        if config.zisk_mpi_threads > 0 {
+            cmd.arg("-x")
+                .arg(format!("OMP_NUM_THREADS={}", config.zisk_mpi_threads))
+                .arg("-x")
+                .arg(format!("RAYON_NUM_THREADS={}", config.zisk_mpi_threads));
+        }
+
+        cmd.arg(&config.cargo_zisk_bin);
+        cmd.args(&zisk_args);
+        cmd.output()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to spawn mpirun: {}", e))?
+    } else {
+        let mut cmd = Command::new(&config.cargo_zisk_bin);
+        cmd.args(&zisk_args);
+        cmd.output()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to spawn cargo-zisk: {}", e))?
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

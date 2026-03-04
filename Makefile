@@ -1,118 +1,110 @@
 SHELL := /bin/bash
 
-# Paths
-ZISK_BIN        := $(HOME)/.zisk/bin
-CARGO_ZISK      := $(ZISK_BIN)/cargo-zisk
-ZISKEMU         := $(ZISK_BIN)/ziskemu
+REPO_ROOT := $(CURDIR)
+ENV_FILE := $(REPO_ROOT)/.env.local.nodocker
+SERVICE_BIN := $(REPO_ROOT)/target/release/davinci-zkvm
 
-CIRCUIT_DIR     := circuit
-CIRCUIT_TARGET  := riscv64ima-zisk-zkvm-elf
-CIRCUIT_ELF     := $(CIRCUIT_DIR)/target/$(CIRCUIT_TARGET)/release/davinci-zkvm-circuit
+LISTEN_HOST ?= 127.0.0.1
+LISTEN_PORT ?= 8080
 
-PROOF_DIR       ?= proof_output
-PROVING_KEY     ?= $(HOME)/.zisk/provingKey
-SETUP_BUCKET    := https://storage.googleapis.com/zisk-setup
+# install.sh passthroughs (kept intentionally small)
+INSTALL_SYSTEM_DEPS ?= auto
+RUN_SETUP ?= 1
+RUN_SETUP_TREES ?= 1
+ADD_TO_SHELL_RC ?= 1
+PROVING_KEY_PATH ?= $(HOME)/.zisk/provingKey
+ZISK_VERSION ?= v0.15.0
+PROVER_MODE ?= auto
+ZISK_MPI_PROCS ?=
+ZISK_MPI_THREADS ?=
+ZISK_MPI_BIND_TO ?=
 
-# Docker
-DOCKER_IMAGE    ?= davinci-zkvm
-DOCKER_TAG      ?= latest
+.PHONY: all setup run test help
 
-# ZisK GPU source path (for build-zisk-gpu target)
-ZISK_SRC        ?= $(HOME)/davinci-zisk/zisk
-CUDA_12_8       := /usr/local/cuda-12.8/bin
+all: setup test ## Full local setup + integration tests
 
-.PHONY: all build build-service build-circuit \
-        setup setup-trees build-zisk-gpu \
-        docker-build docker-build-cuda \
-        test test-unit test-integration \
-        clean help
+setup: ## Install/build everything for non-Docker local runs
+	LISTEN_HOST=$(LISTEN_HOST) \
+	LISTEN_PORT=$(LISTEN_PORT) \
+	INSTALL_SYSTEM_DEPS=$(INSTALL_SYSTEM_DEPS) \
+	RUN_SETUP=$(RUN_SETUP) \
+	RUN_SETUP_TREES=$(RUN_SETUP_TREES) \
+	ADD_TO_SHELL_RC=$(ADD_TO_SHELL_RC) \
+	PROVING_KEY_PATH=$(PROVING_KEY_PATH) \
+	ZISK_VERSION=$(ZISK_VERSION) \
+	PROVER_MODE=$(PROVER_MODE) \
+	./install.sh
 
-all: build  ## Default: build service
-
-# Build
-
-build: build-service  ## Build the service binary
-
-build-service:  ## Build the HTTP service binary (release)
-	cargo build --release -p davinci-zkvm-service
-
-build-circuit:  ## Rebuild the ZisK RISC-V circuit ELF (requires +zisk toolchain)
-	cd $(CIRCUIT_DIR) && cargo +zisk build --release --target $(CIRCUIT_TARGET)
-	cp $(CIRCUIT_ELF) $(CIRCUIT_DIR)/elf/circuit.elf
-	@echo "=== Circuit ELF updated at circuit/elf/circuit.elf ==="
-
-# ZisK setup
-
-setup:  ## Download + install the ZisK proving key (version derived from cargo-zisk)
-	@ZISK_VER=$$($(CARGO_ZISK) --version | awk '{print $$2}'); \
-	IFS='.' read -r major minor patch <<< "$$ZISK_VER"; \
-	SETUP_VER="$${major}.$${minor}.0"; \
-	KEY_FILE="zisk-provingkey-$${SETUP_VER}.tar.gz"; \
-	echo "=== Downloading proving key $${KEY_FILE} ==="; \
-	curl -L "$(SETUP_BUCKET)/$${KEY_FILE}" -o "/tmp/$${KEY_FILE}"; \
-	curl -L "$(SETUP_BUCKET)/$${KEY_FILE}.md5" -o "/tmp/$${KEY_FILE}.md5"; \
-	cd /tmp && md5sum -c "$${KEY_FILE}.md5"; \
-	echo "=== Installing proving key to $(HOME)/.zisk ==="; \
-	rm -rf $(PROVING_KEY) $(HOME)/.zisk/verifyKey $(HOME)/.zisk/cache; \
-	tar --overwrite -xf "/tmp/$${KEY_FILE}" -C "$(HOME)/.zisk"; \
-	rm -f "/tmp/$${KEY_FILE}" "/tmp/$${KEY_FILE}.md5"; \
-	echo "=== Proving key installed. Run 'make setup-trees' next. ==="
-
-setup-trees:  ## Build constant tree files required for full proving
-	@if [ ! -d "$(PROVING_KEY)" ]; then \
-		echo "ERROR: Proving key not found at $(PROVING_KEY). Run 'make setup' first."; exit 1; \
+run: ## Run the HTTP service locally
+	@if [ ! -f "$(ENV_FILE)" ]; then \
+		echo "Missing $(ENV_FILE). Run: make setup"; \
+		exit 1; \
 	fi
-	@echo "=== Building constant trees ==="
-	$(CARGO_ZISK) check-setup --proving-key $(PROVING_KEY) -a
-	@echo "=== Constant trees built ==="
-
-# ZisK GPU binary build
-
-build-zisk-gpu:  ## Rebuild cargo-zisk with CUDA 12.8 GPU support (RTX 5000 / Blackwell sm_120)
-	@echo "=== Building ZisK with GPU support (CUDA 12.8) ==="
-	@if [ ! -d "$(CUDA_12_8)" ]; then \
-		echo "ERROR: CUDA 12.8 not found at $(CUDA_12_8)"; exit 1; \
+	@if [ ! -x "$(SERVICE_BIN)" ]; then \
+		echo "Missing $(SERVICE_BIN). Run: make setup"; \
+		exit 1; \
 	fi
-	@export PATH=$(CUDA_12_8):$$PATH; \
-	PSTARK=$$(ls -d $(HOME)/.cargo/git/checkouts/pil2-proofman-*/*/pil2-stark 2>/dev/null | head -1); \
-	if [ -z "$$PSTARK" ]; then echo "ERROR: pil2-stark not found in cargo cache"; exit 1; fi; \
-	echo "=== Rebuilding libstarksgpu.a with CUDA 12.8 ==="; \
-	cd "$$PSTARK" && make clean && make -j$$(nproc) starks_lib_gpu; \
-	echo "=== Building cargo-zisk ==="; \
-	cd $(ZISK_SRC) && cargo clean && cargo build --release --features gpu; \
-	echo "=== Deploying to ~/.zisk/bin/ ==="; \
-	cp $(ZISK_SRC)/target/release/cargo-zisk $(HOME)/.zisk/bin/cargo-zisk; \
-	cp $(ZISK_SRC)/target/release/libzisk_witness.so $(HOME)/.zisk/bin/libzisk_witness.so 2>/dev/null || true; \
-	echo "=== Done: $$($(HOME)/.zisk/bin/cargo-zisk --version) ==="
+	@bash -lc 'set -euo pipefail; \
+		source "$(ENV_FILE)"; \
+		export LISTEN_ADDR="$(LISTEN_HOST):$(LISTEN_PORT)"; \
+		export DAVINCI_API_URL="http://$(LISTEN_HOST):$(LISTEN_PORT)"; \
+		if [ -n "$(ZISK_MPI_PROCS)" ]; then export ZISK_MPI_PROCS="$(ZISK_MPI_PROCS)"; fi; \
+		if [ -n "$(ZISK_MPI_THREADS)" ]; then export ZISK_MPI_THREADS="$(ZISK_MPI_THREADS)"; fi; \
+		if [ -n "$(ZISK_MPI_BIND_TO)" ]; then export ZISK_MPI_BIND_TO="$(ZISK_MPI_BIND_TO)"; fi; \
+		exec "$(SERVICE_BIN)"'
 
-# Docker
+test: ## Run integration tests locally (starts/stops service automatically)
+	@bash -lc 'set -euo pipefail; \
+		cd "$(REPO_ROOT)"; \
+		if [ ! -f "$(ENV_FILE)" ] || [ ! -x "$(SERVICE_BIN)" ]; then \
+			echo "Setup artifacts missing. Running make setup..."; \
+			LISTEN_HOST=$(LISTEN_HOST) \
+			LISTEN_PORT=$(LISTEN_PORT) \
+			INSTALL_SYSTEM_DEPS=$(INSTALL_SYSTEM_DEPS) \
+			RUN_SETUP=$(RUN_SETUP) \
+			RUN_SETUP_TREES=$(RUN_SETUP_TREES) \
+			ADD_TO_SHELL_RC=$(ADD_TO_SHELL_RC) \
+			PROVING_KEY_PATH=$(PROVING_KEY_PATH) \
+			ZISK_VERSION=$(ZISK_VERSION) \
+			PROVER_MODE=$(PROVER_MODE) \
+			./install.sh; \
+		fi; \
+		source "$(ENV_FILE)"; \
+		export LISTEN_ADDR="$(LISTEN_HOST):$(LISTEN_PORT)"; \
+		export DAVINCI_API_URL="http://$(LISTEN_HOST):$(LISTEN_PORT)"; \
+		if [ -n "$(ZISK_MPI_PROCS)" ]; then export ZISK_MPI_PROCS="$(ZISK_MPI_PROCS)"; fi; \
+		if [ -n "$(ZISK_MPI_THREADS)" ]; then export ZISK_MPI_THREADS="$(ZISK_MPI_THREADS)"; fi; \
+		if [ -n "$(ZISK_MPI_BIND_TO)" ]; then export ZISK_MPI_BIND_TO="$(ZISK_MPI_BIND_TO)"; fi; \
+		LOG_FILE="$(REPO_ROOT)/.davinci-service.log"; \
+		"$(SERVICE_BIN)" >"$$LOG_FILE" 2>&1 & \
+		SVC_PID=$$!; \
+		cleanup(){ \
+			if kill -0 "$$SVC_PID" 2>/dev/null; then \
+				kill "$$SVC_PID" 2>/dev/null || true; \
+				wait "$$SVC_PID" 2>/dev/null || true; \
+			fi; \
+		}; \
+		trap cleanup EXIT; \
+		for i in $$(seq 1 120); do \
+			if curl -sf "$$DAVINCI_API_URL/health" >/dev/null 2>&1; then \
+				echo "Service ready at $$DAVINCI_API_URL"; \
+				break; \
+			fi; \
+			if [ "$$i" -eq 120 ]; then \
+				echo "Service did not become healthy in time. Last logs:"; \
+				tail -n 200 "$$LOG_FILE" || true; \
+				exit 1; \
+			fi; \
+			sleep 1; \
+		done; \
+		cd go-sdk/tests; \
+		if [ "$${DAVINCI_PROVER_MODE:-gpu}" = "gpu" ]; then \
+			DAVINCI_API_URL="$$DAVINCI_API_URL" make test; \
+		else \
+			echo "CPU mode detected: running lightweight tests (no proving)."; \
+			DAVINCI_API_URL="$$DAVINCI_API_URL" make test-unit; \
+		fi'
 
-docker-build:  ## Build CPU Docker image
-	docker build -t $(DOCKER_IMAGE):$(DOCKER_TAG) -f Dockerfile .
-
-docker-build-cuda:  ## Build CUDA GPU Docker image
-	docker build -t $(DOCKER_IMAGE)-cuda:$(DOCKER_TAG) -f Dockerfile.cuda .
-
-# Tests
-
-test:  ## Run emulator-based cheat tests (no service required, needs ziskemu in PATH)
-	cd go-sdk && go test -v -timeout 5m ./tests/integration/ -run "TestCheat"
-
-test-unit:  ## Run lightweight service tests (health, validation, no proving)
-	cd go-sdk/tests && DAVINCI_SKIP_PROVING=1 make test-unit
-
-test-integration:  ## Run full integration tests against running service (requires GPU)
-	cd go-sdk/tests && make test
-
-# Clean
-
-clean:  ## Remove all build artifacts and proof output
-	cargo clean
-	rm -rf $(PROOF_DIR)
-
-# Help
-
-help:  ## Show this help
-	@echo "davinci-zkvm Makefile targets:"
+help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | \
-		awk 'BEGIN{FS=":.*##"}{ printf "  %-20s %s\n", $$1, $$2 }'
+		awk 'BEGIN{FS=":.*##"}{ printf "  %-10s %s\n", $$1, $$2 }'
