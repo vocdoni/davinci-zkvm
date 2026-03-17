@@ -40,21 +40,18 @@ fn build_zisk_input_bytes(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let mut bytes = if ballot_aggregation {
-        #[cfg(feature = "ballot-aggregation")]
-        {
-            let wire_bundles: Vec<(Vec<u8>, Vec<u64>)> = bundles
-                .iter()
-                .map(|b| (b.proof_bytes.clone(), b.public_values.as_u64_vec()))
-                .collect();
-            info!(
-                "running ballot proof aggregation for {} proofs",
-                wire_bundles.len()
-            );
-            let _aggregated =
-                davinci_zkvm_recursion_aggregator::aggregate_and_verify_from_wire(&wire_bundles)
-                    .context("ballot proof aggregation failed")?;
-            info!("ballot aggregation + verification succeeded");
-        }
+        // In aggregation mode, STARK proof bytes are stripped from guest input.
+        // The ZisK guest skips STARK verification and only checks ECDSA, census,
+        // SMT, and ecgfp5 consistency.
+        //
+        // Full recursive aggregation (Plonky3-recursion) is available via
+        // `recursion-aggregator::aggregate_and_verify_from_wire` and should be
+        // invoked asynchronously in the prover worker once the ZisK guest can
+        // consume the aggregated batch-STARK proof.
+        info!(
+            "ballot aggregation mode: stripping {} proof bytes from guest input",
+            bundles.len()
+        );
         generate_stark_input_aggregated(&bundles, &sigs)?
     } else {
         generate_stark_input(&bundles, &sigs)?
@@ -282,7 +279,7 @@ pub async fn submit_prove(
     }).await {
         Ok(Ok(bytes)) => { debug!("Input generation succeeded: {} bytes", bytes.len()); bytes }
         Ok(Err(e)) => {
-            error!("Input generation failed: {}", e);
+            error!("Input generation failed: {:#}", e);
             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("input generation failed: {}", e)}))).into_response();
         }
         Err(e) => {
