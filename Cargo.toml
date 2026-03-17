@@ -1,11 +1,13 @@
 [workspace]
 members = [
     "input-gen",
+    "recursion-aggregator",
     "service",
 ]
 # circuit/ is a ZisK RISC-V guest program — build with: make build-circuit
 # It requires the +zisk toolchain and cannot be compiled with standard cargo.
-exclude = ["circuit"]
+# Plonky3-recursion/ is its own workspace with its own members.
+exclude = ["circuit", "Plonky3-recursion"]
 resolver = "2"
 
 [workspace.package]
