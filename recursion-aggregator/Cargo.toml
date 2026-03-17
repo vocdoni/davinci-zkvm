@@ -37,6 +37,9 @@ anyhow = "1"
 thiserror = "1"
 tracing = "0.1"
 
+# ecgfp5 for test ballot generation
+ecgfp5 = { path = "../../vendor/ecgfp5/rust" }
+
 [dev-dependencies]
 p3-util = { git = "https://github.com/Plonky3/Plonky3", rev = "00188f0763d5eb86c5cc1d1b7c5a56cbab356593" }
 rand = "0.10"

@@ -519,8 +519,17 @@ pub fn aggregate_and_verify_from_wire(
         .iter()
         .enumerate()
         .map(|(i, (proof_bytes, pv_u64s))| {
+            debug!(
+                proof_index = i,
+                proof_bytes_len = proof_bytes.len(),
+                pv_count = pv_u64s.len(),
+                "deserializing proof"
+            );
             let proof: Proof<BallotConfig> = postcard::from_bytes(proof_bytes)
-                .with_context(|| format!("failed to deserialize proof {i}"))?;
+                .with_context(|| format!(
+                    "failed to deserialize proof {i} ({} bytes, {} pvs)",
+                    proof_bytes.len(), pv_u64s.len()
+                ))?;
             let pvs: Vec<Val> = pv_u64s
                 .iter()
                 .map(|&u| Val::from_u64(u))
@@ -566,5 +575,298 @@ mod tests {
             index: 0,
         };
         assert!(matches!(err, AggregationError::PublicValuesLength { .. }));
+    }
+
+    #[test]
+    fn aggregate_real_ballot_proof() {
+        use davinci_stark::trace::{BallotInputs, BallotMode};
+        use ecgfp5::curve::Point;
+        use ecgfp5::scalar::Scalar;
+
+        // Valid ballot mode matching 8 fields.
+        let mode = BallotMode {
+            num_fields: 8,
+            group_size: 8,
+            unique_values: 0,
+            cost_from_weight: 0,
+            cost_exponent: 1,
+            max_value: 100,
+            min_value: 0,
+            max_value_sum: 1000,
+            min_value_sum: 0,
+        };
+
+        let sk = Scalar([12345, 0, 0, 0, 0]);
+        let inputs = BallotInputs {
+            k: Scalar([42, 0, 0, 0, 0]),
+            fields: core::array::from_fn(|i| Scalar([i as u64 + 1, 0, 0, 0, 0])),
+            pk: Point::mulgen(sk),
+            process_id: [Val::from_u64(1001), Val::ZERO, Val::ZERO, Val::ZERO],
+            address: [Val::from_u64(0xDEADBEEF), Val::ZERO, Val::ZERO, Val::ZERO],
+            weight: Val::from_u64(1),
+            packed_ballot_mode: mode.pack(),
+        };
+
+        let (ballot_proof, _outputs) = davinci_stark::prove_full_ballot(&inputs);
+
+        // Verify the proof itself is valid
+        davinci_stark::verify_ballot(&ballot_proof).expect("ballot proof should verify");
+
+        // Now try to aggregate a single proof
+        let proofs = vec![(ballot_proof.proof, ballot_proof.public_values)];
+        let result = aggregate_ballot_proofs(&proofs);
+        match &result {
+            Ok(_) => println!("aggregation succeeded!"),
+            Err(e) => println!("aggregation failed: {e:?}"),
+        }
+        result.expect("aggregation should succeed for a single valid ballot proof");
+    }
+
+    /// Minimal HidingFriPcs + Goldilocks D=2 recursive verification test.
+    /// Uses the simplest possible AIR to isolate HidingFriPcs-specific issues.
+    #[test]
+    fn minimal_hiding_fri_goldilocks_recursion() {
+        use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
+        use p3_field::Field;
+        use p3_lookup::logup::LogUpGadget;
+        use p3_lookup::{Lookup, LookupAir};
+        use p3_matrix::dense::RowMajorMatrix;
+        use p3_recursion::pcs::set_fri_mmcs_private_data;
+        use p3_recursion::public_inputs::StarkVerifierInputsBuilder;
+        use p3_recursion::{Poseidon2Config, verify_p3_uni_proof_circuit};
+        use p3_fri::{HidingFriPcs, FriParameters};
+        use p3_uni_stark::{StarkConfig, prove, verify};
+        use davinci_stark::config::{Dft, DeterministicRng};
+
+        // Simple 2-column AIR: a + b = c (but only 2 cols, c computed from next row)
+        #[derive(Clone)]
+        struct TwoColAir;
+        impl<F: Field> BaseAir<F> for TwoColAir {
+            fn width(&self) -> usize { 2 }
+        }
+        impl<AB: AirBuilder> Air<AB> for TwoColAir where AB::F: Field {
+            fn eval(&self, builder: &mut AB) {
+                let main = builder.main();
+                let local = main.current_slice();
+                // Just constrain col0 * col1 == 0 on every row
+                builder.assert_zero(local[0] * local[1]);
+            }
+        }
+        impl<F: Field> LookupAir<F> for TwoColAir {
+            fn add_lookup_columns(&mut self) -> Vec<usize> { vec![0] }
+            fn get_lookups(&mut self) -> Vec<Lookup<F>> { vec![] }
+        }
+
+        // Build trace: 8 rows of [0, anything]
+        let n = 8;
+        let mut values = Vec::with_capacity(n * 2);
+        for _ in 0..n {
+            values.push(Val::ZERO); // col0
+            values.push(Val::from_u64(42)); // col1
+        }
+        let trace = RowMajorMatrix::new(values, 2);
+
+        // Build HidingFriPcs config (same as davinci-stark but simpler params)
+        let perm = default_goldilocks_poseidon2_8();
+        let hash = MyHash::new(perm.clone());
+        let compress = MyCompress::new(perm.clone());
+        let val_mmcs = ValMmcs::new(hash, compress, 0);
+        let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
+
+        // Use small params like the test
+        let fri_params = FriParameters {
+            log_blowup: 2,
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 2,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 1,
+            mmcs: challenge_mmcs,
+        };
+        type HidingPcs = HidingFriPcs<Val, Dft, ValMmcs, ChallengeMmcs, DeterministicRng>;
+        let pcs = HidingPcs::new(
+            Dft::default(),
+            val_mmcs,
+            fri_params,
+            1,
+            DeterministicRng(42),
+        );
+        type HidingConfig = StarkConfig<HidingPcs, Challenge, Challenger>;
+        let config = HidingConfig::new(pcs, Challenger::new(perm.clone()));
+
+        let air = TwoColAir;
+        let pis: Vec<Val> = vec![];
+
+        println!("Proving simple AIR with HidingFriPcs...");
+        let proof = prove(&config, &air, trace, &pis);
+
+        // Verify natively first
+        verify(&config, &air, &proof, &pis).expect("native verify failed");
+        println!("Native verify OK");
+
+        // Now build recursive verification circuit
+        let fri_verifier_params = FriVerifierParams::arithmetic_only(2, 0, 0, 1);
+
+        let mut circuit_builder = CircuitBuilder::new();
+        circuit_builder.enable_poseidon2_perm_width_8::<GoldilocksD2Width8, _>(
+            generate_poseidon2_trace::<Challenge, GoldilocksD2Width8>,
+            perm.clone(),
+        );
+        circuit_builder.enable_recompose::<Val>(
+            generate_recompose_trace::<Val, Challenge>,
+        );
+
+        type InnerFriType = HidingFriProofTargets<
+            Val, Challenge, BallotRecExtMmcs, BallotInputProofTargets, Witness<Val>,
+        >;
+        let verifier_inputs = StarkVerifierInputsBuilder::<
+            HidingConfig,
+            MerkleCapTargets<Val, DIGEST_ELEMS>,
+            InnerFriType,
+        >::allocate(&mut circuit_builder, &proof, None, pis.len());
+
+        println!("Building verification circuit...");
+        let mmcs_op_ids = verify_p3_uni_proof_circuit::<
+            TwoColAir, HidingConfig,
+            MerkleCapTargets<Val, DIGEST_ELEMS>,
+            BallotInputProofTargets,
+            InnerFriType,
+            _, 8, 4,
+        >(
+            &config, &air, &mut circuit_builder,
+            &verifier_inputs.proof_targets,
+            &verifier_inputs.air_public_targets,
+            &None, &fri_verifier_params,
+            Poseidon2Config::GoldilocksD2Width8,
+        ).expect("build circuit");
+
+        let circuit = circuit_builder.build().expect("circuit build");
+        println!("Circuit: {} witnesses", circuit.witness_count);
+
+        let mut runner = circuit.runner();
+        let (public_inputs, private_inputs) = verifier_inputs.pack_values(&pis, &proof, &None);
+        runner.set_public_inputs(&public_inputs).expect("set pub");
+        runner.set_private_inputs(&private_inputs).expect("set priv");
+
+        if !mmcs_op_ids.is_empty() {
+            set_fri_mmcs_private_data::<
+                Val, Challenge, ChallengeMmcs, ValMmcs, MyHash, MyCompress, DIGEST_ELEMS,
+            >(&mut runner, &mmcs_op_ids, &proof.opening_proof.1)
+            .expect("set MMCS data");
+        }
+
+        println!("Running circuit...");
+        let _traces = runner.run().expect("circuit run should succeed");
+        println!("SUCCESS! HidingFriPcs recursive verification works for Goldilocks D=2");
+    }
+    #[test]
+    fn manual_ballot_verification_circuit() {
+        use davinci_stark::trace::{BallotInputs, BallotMode};
+        use ecgfp5::curve::Point;
+        use ecgfp5::scalar::Scalar;
+        use p3_recursion::pcs::set_fri_mmcs_private_data;
+        use p3_recursion::public_inputs::StarkVerifierInputsBuilder;
+        use p3_recursion::{Poseidon2Config, verify_p3_uni_proof_circuit};
+
+        // Same inputs as the real test
+        let mode = BallotMode {
+            num_fields: 8, group_size: 8, unique_values: 0,
+            cost_from_weight: 0, cost_exponent: 1, max_value: 100,
+            min_value: 0, max_value_sum: 1000, min_value_sum: 0,
+        };
+        let sk = Scalar([12345, 0, 0, 0, 0]);
+        let inputs = BallotInputs {
+            k: Scalar([42, 0, 0, 0, 0]),
+            fields: core::array::from_fn(|i| Scalar([i as u64 + 1, 0, 0, 0, 0])),
+            pk: Point::mulgen(sk),
+            process_id: [Val::from_u64(1001), Val::ZERO, Val::ZERO, Val::ZERO],
+            address: [Val::from_u64(0xDEADBEEF), Val::ZERO, Val::ZERO, Val::ZERO],
+            weight: Val::from_u64(1),
+            packed_ballot_mode: mode.pack(),
+        };
+
+        println!("Proving ballot...");
+        let (ballot_proof, _) = davinci_stark::prove_full_ballot(&inputs);
+        davinci_stark::verify_ballot(&ballot_proof).expect("ballot proof should verify");
+        println!("Ballot proof verified OK");
+
+        let config = davinci_stark::config::make_verifier_config();
+        let proof = &ballot_proof.proof;
+        let pis = &ballot_proof.public_values;
+        let air = BallotAir::new();
+
+        // Build FriVerifierParams — try without MMCS first to isolate the issue
+        let fri_verifier_params = FriVerifierParams::arithmetic_only(3, 0, 0, 0);
+
+        let perm = default_goldilocks_poseidon2_8();
+        let mut circuit_builder = CircuitBuilder::new();
+        circuit_builder.enable_poseidon2_perm_width_8::<GoldilocksD2Width8, _>(
+            generate_poseidon2_trace::<Challenge, GoldilocksD2Width8>,
+            perm,
+        );
+        circuit_builder.enable_recompose::<Val>(
+            generate_recompose_trace::<Val, Challenge>,
+        );
+
+        // Allocate targets (using BallotConfig types)
+        type InnerFriType = HidingFriProofTargets<
+            Val, Challenge, BallotRecExtMmcs, BallotInputProofTargets, Witness<Val>,
+        >;
+        let verifier_inputs = StarkVerifierInputsBuilder::<
+            BallotConfig,
+            MerkleCapTargets<Val, DIGEST_ELEMS>,
+            InnerFriType,
+        >::allocate(
+            &mut circuit_builder,
+            proof,
+            None,
+            pis.len(),
+        );
+
+        println!("Building verification circuit...");
+        let mmcs_op_ids = verify_p3_uni_proof_circuit::<
+            BallotAir,
+            BallotConfig,
+            MerkleCapTargets<Val, DIGEST_ELEMS>,
+            BallotInputProofTargets,
+            InnerFriType,
+            _,
+            8, // WIDTH
+            4, // RATE
+        >(
+            &config,
+            &air,
+            &mut circuit_builder,
+            &verifier_inputs.proof_targets,
+            &verifier_inputs.air_public_targets,
+            &None,
+            &fri_verifier_params,
+            Poseidon2Config::GoldilocksD2Width8,
+        )
+        .expect("verification circuit should build");
+
+        let circuit = circuit_builder.build().expect("circuit should build");
+        println!("Circuit built: {} witnesses", circuit.witness_count);
+
+        let mut runner = circuit.runner();
+
+        let (public_inputs, private_inputs) =
+            verifier_inputs.pack_values(pis, proof, &None);
+
+        runner.set_public_inputs(&public_inputs).expect("set public inputs");
+        runner.set_private_inputs(&private_inputs).expect("set private inputs");
+
+        // Set MMCS private data from the FRI proof (skip if arithmetic-only)
+        if !mmcs_op_ids.is_empty() {
+            // HidingFriPcs proof = (opened_values, fri_proof) — pass the .1
+            set_fri_mmcs_private_data::<
+                Val, Challenge, ChallengeMmcs, ValMmcs, MyHash, MyCompress, DIGEST_ELEMS,
+            >(&mut runner, &mmcs_op_ids, &proof.opening_proof.1)
+            .expect("set MMCS private data");
+        }
+
+        println!("Running verification circuit...");
+        let _traces = runner.run().expect("verification circuit should succeed");
+        println!("Verification circuit ran successfully!");
     }
 }
