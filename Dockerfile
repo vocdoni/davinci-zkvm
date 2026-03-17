@@ -28,10 +28,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Rust toolchain
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
-    -y --default-toolchain stable --profile minimal
+    -y --default-toolchain 1.85.0 --profile minimal
 ENV PATH="/root/.cargo/bin:$PATH"
 
-ARG ZISK_VERSION=v0.15.0
+ARG ZISK_VERSION=v0.16.0
 
 # Clone ZisK source at the pinned version
 RUN git clone --depth 1 --branch ${ZISK_VERSION} \
@@ -45,6 +45,8 @@ WORKDIR /src/zisk
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     cargo build --release --features packed 2>&1 | tee /tmp/build.log
+
+RUN /src/zisk/target/release/cargo-zisk sdk install-toolchain
 
 # Bundle ALL shared lib dependencies so the runtime needs no extra apt packages.
 # Also bundle libgomp.so.1 explicitly — ZisK dlopen()s it at runtime via libloading
@@ -67,16 +69,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN rustup target add x86_64-unknown-linux-musl
 
-WORKDIR /build
+WORKDIR /build/davinci-zkvm
 
-COPY Cargo.toml Cargo.lock ./
-COPY input-gen/Cargo.toml input-gen/Cargo.toml
-COPY service/Cargo.toml service/Cargo.toml
+COPY davinci-zkvm/Cargo.toml davinci-zkvm/Cargo.lock ./
+COPY davinci-zkvm/input-gen/Cargo.toml input-gen/Cargo.toml
+COPY davinci-zkvm/service/Cargo.toml service/Cargo.toml
+
+# Remove recursion-aggregator from workspace (it has complex path deps not needed for the service)
+RUN sed -i '/"recursion-aggregator",/d' Cargo.toml
 
 # Create stub sources to cache dependencies
-RUN mkdir -p input-gen/src input-gen/src/bin service/src && \
+RUN mkdir -p input-gen/src service/src && \
     echo 'pub fn placeholder() {}' > input-gen/src/lib.rs && \
-    echo 'fn main() {}' > input-gen/src/bin/gen-input.rs && \
     echo 'fn main() {}' > service/src/main.rs
 
 ENV RUSTFLAGS="-C target-feature=+crt-static"
@@ -84,17 +88,38 @@ RUN cargo build --release --target x86_64-unknown-linux-musl \
     -p davinci-zkvm-service -p davinci-zkvm-input-gen 2>&1 || true
 
 RUN rm -rf input-gen/src service/src
-COPY input-gen/src input-gen/src
-COPY service/src service/src
+COPY davinci-zkvm/input-gen/src input-gen/src
+COPY davinci-zkvm/service/src service/src
 
 # Invalidate fingerprints so Cargo rebuilds from real sources
 RUN find target -maxdepth 4 -path "*/release/.fingerprint/davinci*" -exec rm -rf {} + 2>/dev/null || true
+
+# Ensure recursion-aggregator is still excluded
+RUN sed -i '/"recursion-aggregator",/d' Cargo.toml 2>/dev/null || true
 
 ENV RUSTFLAGS="-C target-feature=+crt-static"
 RUN cargo build --release --target x86_64-unknown-linux-musl \
     -p davinci-zkvm-service -p davinci-zkvm-input-gen
 
-# ── Stage 3: Runtime image ────────────────────────────────────────────────────
+# ── Stage 3: Build the zkVM circuit ELF from source ──────────────────────────
+FROM zisk-builder AS circuit-builder
+
+WORKDIR /build
+
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY src src
+COPY vendor vendor
+COPY davinci-zkvm/input-gen/Cargo.toml davinci-zkvm/input-gen/Cargo.toml
+COPY davinci-zkvm/input-gen/src davinci-zkvm/input-gen/src
+COPY davinci-zkvm/circuit/Cargo.toml davinci-zkvm/circuit/Cargo.toml
+COPY davinci-zkvm/circuit/Cargo.lock davinci-zkvm/circuit/Cargo.lock
+COPY davinci-zkvm/circuit/src davinci-zkvm/circuit/src
+
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    cd /build/davinci-zkvm/circuit && /src/zisk/target/release/cargo-zisk build --release
+
+# ── Stage 4: Runtime image ────────────────────────────────────────────────────
 # Ubuntu 24.04 matches the builder glibc so bundled libs are compatible.
 FROM ubuntu:24.04
 
@@ -103,6 +128,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    make \
+    gcc \
+    g++ \
+    binutils \
+    libc6-dev \
+    libgmp-dev \
     openmpi-bin \
     openmpi-common \
     && rm -rf /var/lib/apt/lists/*
@@ -111,25 +142,32 @@ WORKDIR /app
 
 # Static service binary — zero dynamic dependencies
 COPY --from=service-builder \
-    /build/target/x86_64-unknown-linux-musl/release/davinci-zkvm \
+    /build/davinci-zkvm/target/x86_64-unknown-linux-musl/release/davinci-zkvm \
     /app/davinci-zkvm
 
-# cargo-zisk, tools, and witness library (all built from source)
+# cargo-zisk and tools (built from source)
 COPY --from=zisk-builder /src/zisk/target/release/cargo-zisk /usr/local/bin/cargo-zisk
 COPY --from=zisk-builder /src/zisk/target/release/ziskemu    /usr/local/bin/ziskemu
-COPY --from=zisk-builder /src/zisk/target/release/libzisk_witness.so \
-    /usr/local/lib/libzisk_witness.so
+# libzisk_witness.so output location varies across cargo/zisk builds.
+RUN --mount=from=zisk-builder,source=/src/zisk/target,target=/zisk-target \
+    sh -c 'lib="$(find /zisk-target -name libzisk_witness.so -print -quit)"; \
+           if [ -n "$lib" ]; then cp "$lib" /usr/local/lib/libzisk_witness.so; fi'
 
 # Bundled shared libs — all deps cargo-zisk needs, no apt required
 COPY --from=zisk-builder /libs /usr/local/lib/zisk-deps
+COPY --from=zisk-builder /src/zisk/emulator-asm /root/.zisk/zisk/emulator-asm
+COPY --from=zisk-builder /src/zisk/lib-c /root/.zisk/zisk/lib-c
 
 # Symlink libzisk_witness.so to where cargo-zisk looks for it
 RUN mkdir -p /root/.zisk/bin && \
     ln -s /usr/local/lib/libzisk_witness.so /root/.zisk/bin/libzisk_witness.so
+COPY --from=zisk-builder /src/zisk/target/release/libziskclib.a /root/.zisk/bin/libziskclib.a
 
-# Copy pre-built circuit ELF and entrypoint
-COPY circuit/elf/circuit.elf /app/circuit.elf
-COPY entrypoint.sh /app/entrypoint.sh
+# Copy fresh circuit ELF built from the current sources and entrypoint
+COPY --from=circuit-builder \
+    /build/davinci-zkvm/circuit/target/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-circuit \
+    /app/circuit.elf
+COPY davinci-zkvm/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 ENV LISTEN_ADDR=0.0.0.0:8080

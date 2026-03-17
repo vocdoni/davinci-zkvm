@@ -3,7 +3,7 @@
 # Profiles:
 #   cuda  — NVIDIA GPU prover (default). Requires NVIDIA driver 570+, CUDA 12.8,
 #           nvidia-container-toolkit.
-#   cpu   — API-only, no proof generation. ZisK v0.15.0 GPU proving keys are
+#   cpu   — API-only, no proof generation. ZisK v0.16.0 GPU proving keys are
 #           incompatible with CPU provers (different Merkle tree format).
 #
 # Usage:
@@ -18,19 +18,24 @@ services:
     profiles: [cuda]
     image: davinci-zkvm-cuda:latest
     build:
-      context: .
-      dockerfile: Dockerfile.cuda
+      context: ..
+      dockerfile: davinci-zkvm/Dockerfile.cuda
     ports:
       - "${LISTEN_PORT:-8080}:8080"
     volumes:
-      - ${PROVING_KEY_PATH:-~/.zisk/provingKey}:/proving-key
+      - ${PROVING_KEY_PATH:-${HOME}/.zisk/provingKey}:/proving-key
       - proofs:/proofs
+    shm_size: "${SHM_SIZE:-16gb}"
     environment:
       - PROOF_OUTPUT_DIR=/proofs
       - MAX_QUEUE_SIZE=${MAX_QUEUE_SIZE:-100}
       - ZISK_MPI_PROCS=${ZISK_MPI_PROCS:-1}
       - ZISK_MPI_THREADS=${ZISK_MPI_THREADS:-0}
       - ZISK_MPI_BIND_TO=${ZISK_MPI_BIND_TO:-none}
+      - ZISK_USE_EMULATOR=${ZISK_USE_EMULATOR:-0}
+      - ZISK_AGGREGATION=${ZISK_AGGREGATION:-0}
+      - ZISK_VERIFY_PROOFS=${ZISK_VERIFY_PROOFS:-0}
+      - BALLOT_AGGREGATION=${BALLOT_AGGREGATION:-0}
     restart: unless-stopped
     deploy:
       resources:
@@ -50,19 +55,24 @@ services:
     profiles: [cpu]
     image: davinci-zkvm:latest
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: davinci-zkvm/Dockerfile
     ports:
       - "${LISTEN_PORT:-8080}:8080"
     volumes:
-      - ${PROVING_KEY_PATH:-~/.zisk/provingKey}:/proving-key
+      - ${PROVING_KEY_PATH:-${HOME}/.zisk/provingKey}:/proving-key
       - proofs:/proofs
+    shm_size: "${SHM_SIZE:-16gb}"
     environment:
       - PROOF_OUTPUT_DIR=/proofs
       - MAX_QUEUE_SIZE=${MAX_QUEUE_SIZE:-100}
       - ZISK_MPI_PROCS=${ZISK_MPI_PROCS:-1}
       - ZISK_MPI_THREADS=${ZISK_MPI_THREADS:-0}
       - ZISK_MPI_BIND_TO=${ZISK_MPI_BIND_TO:-none}
+      - ZISK_USE_EMULATOR=${ZISK_USE_EMULATOR:-0}
+      - ZISK_AGGREGATION=${ZISK_AGGREGATION:-0}
+      - ZISK_VERIFY_PROOFS=${ZISK_VERIFY_PROOFS:-0}
+      - BALLOT_AGGREGATION=${BALLOT_AGGREGATION:-0}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
