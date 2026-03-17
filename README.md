@@ -31,6 +31,26 @@ The `recursion-aggregator/` crate provides CPU-side Plonky3-recursion
 aggregation that folds N ballot proofs into a single batch-STARK proof. The
 outer verifier checks both the aggregated proof and the ZisK proof.
 
+### Benchmarks
+
+ZisK proof times with `BALLOT_AGGREGATION=1` on an RTX 5090 GPU (ZisK v0.16.0).
+All times are proof-only (excludes ballot generation and network overhead).
+The per-ballot marginal cost is ~1.6s with a ~18s fixed overhead.
+
+| Ballots per job | Proof time (fresh) | Proof time (overwrites) | Throughput |
+|----------------:|-------------------:|------------------------:|-----------:|
+| 2               | ~20s               | —                       | 0.10 b/s   |
+| 4               | ~23s               | —                       | 0.17 b/s   |
+| 64              | ~118s              | ~148s                   | 0.54 b/s   |
+| 128             | ~222s              | ~278s                   | 0.58 b/s   |
+| 256 (2×128)     | ~445s              | —                       | 0.58 b/s   |
+| 512 (4×128)     | ~890s              | —                       | 0.58 b/s   |
+
+> **Note**: The current compiled `MAX_BATCH_SIZE=128`, so batches >128 are split
+> into sequential 128-ballot jobs. The 256 and 512 rows are measured by summing
+> sequential 128-batch jobs from the E2E test suite. Overwrite transitions are
+> heavier because they include result-subtraction SMT operations.
+
 ## Repository layout
 
 - `circuit/`: ZisK guest circuit
