@@ -32,17 +32,16 @@ type PublicOutputs struct {
 	BlobCommitmentLimbs [3]*big.Int
 
 	// Diagnostics (not public inputs for on-chain verification)
-	BatchOk bool   // Groth16 batch verification passed
+	BatchOk bool   // ballot proof verification passed
 	ECDSAOk bool   // ECDSA signature batch passed
-	NProofs uint32 // number of Groth16 proofs verified
+	NProofs uint32 // number of ballot proofs verified
 	NPublic uint32 // public inputs per proof
 	LogN    uint32 // log₂ aggregation tree depth
 }
 
 // Fail mask bit constants, matching circuit/src/types.rs.
 const (
-	FailCurve        = 1 << 1  // Groth16 BN254 curve check
-	FailPairing      = 1 << 2  // BN254 pairing check
+	FailPairing      = 1 << 2  // davinci-stark verification
 	FailECDSA        = 1 << 3  // ECDSA signature verification
 	FailSMTVoteID    = 1 << 10 // VoteID chain
 	FailSMTBallot    = 1 << 11 // Ballot chain
@@ -174,7 +173,6 @@ func (o *PublicOutputs) FailString() string {
 		bit  uint32
 		name string
 	}{
-		{FailCurve, "groth16_curve"},
 		{FailPairing, "pairing"},
 		{FailECDSA, "ecdsa"},
 		{FailSMTVoteID, "smt_voteid"},

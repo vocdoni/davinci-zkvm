@@ -2,12 +2,9 @@
 // (1) API service tests (service_test.go, e2e_test.go, smt_service_test.go,
 // integration_test.go) that submit jobs to a running davinci-zkvm service.
 // These require: docker compose up -d --build (starts the davinci-zkvm service).
-// (2) Circuit constraint violation tests (cheat_test.go) that use ziskemu
-// directly and do NOT require the API service. These require: ziskemu in PATH.
-// The integration_test.go suite generates real BN254 Groth16 ballot proofs
-// via go-rapidsnark, chains multiple state-transitions, verifies the accumulated
-// vote tally by ElGamal decryption, and checks that deliberate protocol
-// violations are rejected by the circuit.
+// The active integration suites generate real davinci-stark ballot proofs via
+// the WASM package, chain multiple state-transitions, verify the accumulated
+// vote tally by ecgfp5 ElGamal decryption.
 package integration
 
 import (
@@ -19,12 +16,11 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"testing"
 	"time"
 
 	iden3poseidon "github.com/iden3/go-iden3-crypto/poseidon"
 	arbo "github.com/vocdoni/arbo"
-	"github.com/vocdoni/davinci-node/crypto/ecc/format"
-	"github.com/vocdoni/davinci-node/crypto/elgamal"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 )
 
@@ -51,14 +47,14 @@ func proofTimeout() time.Duration {
 }
 
 // votesPerBatchFromEnv reads VOTES_PER_BATCH and returns the largest power of 2
-// <= the specified value, capped at davinci.MaxBatchSize. Default is 4 (matches
-// the current test batch layout: max batch size of 4 voters).
+// <= the specified value, capped at the configured batch limit. Default is 4.
 func votesPerBatchFromEnv() int {
+	maxBatchSize := davinci.ConfiguredMaxBatchSize()
 	if s := os.Getenv("VOTES_PER_BATCH"); s != "" {
 		n, err := strconv.Atoi(s)
 		if err == nil && n >= 2 {
 			p := 2
-			for p*2 <= n && p*2 <= davinci.MaxBatchSize {
+			for p*2 <= n && p*2 <= maxBatchSize {
 				p *= 2
 			}
 			return p
@@ -70,6 +66,16 @@ func votesPerBatchFromEnv() int {
 // newClient returns a new davinci SDK client.
 func newClient() *davinci.Client {
 	return davinci.NewClient(apiURL)
+}
+
+func requireCompatibleService(t testing.TB) *davinci.Client {
+	t.Helper()
+	client := newClient()
+	_, err := client.Health()
+	if err != nil {
+		t.Skipf("davinci-zkvm service not available at %s: %v (start with 'docker compose up -d --build')", apiURL, err)
+	}
+	return client
 }
 
 // arboHexToBEHex converts an arbo LE hex string (as produced by hex.EncodeToString
@@ -300,40 +306,7 @@ func buildArboReadProofs(tree *arbo.Tree, keys []uint64, bLen, levels int) ([]da
 
 // Census (lean-IMT Poseidon) helpers
 
-// ballotLeafHash computes a deterministic 32-byte SHA-256 leaf value for an
-// ElGamal ballot stored in the arbo state tree (keys 0x04 / 0x05).
-// Each of the 32 Twisted Edwards coordinates is encoded as a fixed-size 32-byte
-// big-endian word so the hash is unambiguous. Points are stored internally in
-// Reduced Twisted Edwards (RTE) form and must be converted to TE before hashing
-// to match the circuit's expected digest.
-func ballotLeafHash(b *elgamal.Ballot) *big.Int {
-	h := sha256.New()
-	buf := make([]byte, 32)
-	for i := 0; i < 8; i++ {
-		if b.Ciphertexts[i] == nil {
-			// Identity point (0,1) in TE: 4 coordinates = 0, 1, 0, 1
-			zeroCoord := make([]byte, 32)
-			oneCoord := make([]byte, 32)
-			oneCoord[31] = 1
-			h.Write(zeroCoord)
-			h.Write(oneCoord)
-			h.Write(zeroCoord)
-			h.Write(oneCoord)
-			continue
-		}
-		c1rx, c1ry := b.Ciphertexts[i].C1.Point()
-		c1tx, c1ty := format.FromRTEtoTE(c1rx, c1ry)
-		c2rx, c2ry := b.Ciphertexts[i].C2.Point()
-		c2tx, c2ty := format.FromRTEtoTE(c2rx, c2ry)
-		for _, coord := range []*big.Int{c1tx, c1ty, c2tx, c2ty} {
-			coord.FillBytes(buf)
-			h.Write(buf)
-		}
-	}
-	return new(big.Int).SetBytes(h.Sum(nil))
-}
-
-// poseidonHasher computes Poseidon(a, b) used by lean-IMT.
+// poseidonHasher computes Poseidon(a, b) used by the lean-IMT census.
 func poseidonHasher(a, b *big.Int) *big.Int {
 	out, err := iden3poseidon.Hash([]*big.Int{a, b})
 	if err != nil {
@@ -344,74 +317,6 @@ func poseidonHasher(a, b *big.Int) *big.Int {
 
 // bigIntEq compares two *big.Int values.
 func bigIntEq(a, b *big.Int) bool { return a.Cmp(b) == 0 }
-
-// Fr-wise ballot accumulator
-// The circuit accumulates ResultsAdd / ResultsSub using coordinate-wise
-// Fr addition (not EC point addition).  This type mirrors that behaviour
-// so the Go-side leaf hashes match what the circuit computes.
-
-// bn254ScalarField is the BN254 scalar field order (Fr).
-var bn254ScalarField, _ = new(big.Int).SetString(
-	"21888242871839275222246405745257275088548364400416034343698204186575808495617", 10)
-
-// frAccumBallot represents a ballot as 32 big.Int Fr elements (TE coordinates).
-// This is used for the result accumulator, not for EC point operations.
-type frAccumBallot [32]*big.Int
-
-// newZeroFrAccum returns the zero accumulator (all fields = 0).
-func newZeroFrAccum() frAccumBallot {
-	var b frAccumBallot
-	for i := range b {
-		b[i] = new(big.Int)
-	}
-	return b
-}
-
-// frAccumFromBallot converts an elgamal.Ballot to frAccumBallot (TE coordinates).
-func frAccumFromBallot(ballot *elgamal.Ballot) frAccumBallot {
-	var acc frAccumBallot
-	for i := 0; i < 8; i++ {
-		rx, ry := ballot.Ciphertexts[i].C1.Point()
-		c1tx, c1ty := format.FromRTEtoTE(rx, ry)
-		rx2, ry2 := ballot.Ciphertexts[i].C2.Point()
-		c2tx, c2ty := format.FromRTEtoTE(rx2, ry2)
-		acc[i*4] = c1tx
-		acc[i*4+1] = c1ty
-		acc[i*4+2] = c2tx
-		acc[i*4+3] = c2ty
-	}
-	return acc
-}
-
-// frAccumAdd performs coordinate-wise Fr addition: out[i] = (a[i] + b[i]) mod p.
-func frAccumAdd(a, b frAccumBallot) frAccumBallot {
-	var out frAccumBallot
-	for i := 0; i < 32; i++ {
-		out[i] = new(big.Int).Add(a[i], b[i])
-		out[i].Mod(out[i], bn254ScalarField)
-	}
-	return out
-}
-
-// frAccumLeafHash computes SHA-256 of the 32 Fr elements (32-byte BE each).
-func frAccumLeafHash(acc frAccumBallot) *big.Int {
-	h := sha256.New()
-	buf := make([]byte, 32)
-	for _, v := range acc {
-		v.FillBytes(buf)
-		h.Write(buf)
-	}
-	return new(big.Int).SetBytes(h.Sum(nil))
-}
-
-// frAccumToStrings converts frAccumBallot to 32 big-endian hex strings.
-func frAccumToStrings(acc frAccumBallot) []string {
-	out := make([]string, 32)
-	for i, v := range acc {
-		out[i] = bigIntToFr32(v)
-	}
-	return out
-}
 
 // packAddressWeight encodes address (160 bits) || weight (88 bits) into one big.Int.
 // This is the leaf value format used in the census lean-IMT.
@@ -429,21 +334,12 @@ func bigIntToFr32(v *big.Int) string {
 	return "0x" + hex.EncodeToString(padded)
 }
 
-// BabyJubJub point helper
-
-// bjjPointToFr32Hex converts a BabyJubJub point from RTE (Reduced Twisted Edwards)
-// to TE (Twisted Edwards) coordinates and returns them as 0x-prefixed 32-byte
-// big-endian hex strings. The circuit expects TE coordinates.
-func bjjPointToFr32Hex(p interface{ Point() (*big.Int, *big.Int) }) (xHex, yHex string) {
-	rx, ry := p.Point()
-	tx, ty := format.FromRTEtoTE(rx, ry)
-	return bigIntToFr32(tx), bigIntToFr32(ty)
-}
-
 // KZG helpers
 
 // deriveKZGZ computes the evaluation point Z for KZG verification:
+//
 //	Z = SHA-256(processID_be32 ‖ rootHashBefore_be32 ‖ commitment_48)
+//
 // This matches the derivation in circuit/src/kzg.rs.
 func deriveKZGZ(processIDHex, rootBeforeHex string, commitment [48]byte) *big.Int {
 	processIDBytes, _ := hex.DecodeString(strings.TrimPrefix(processIDHex, "0x"))
@@ -496,5 +392,3 @@ func runZiskEmu(inputBytes []byte) ([]uint32, error) {
 	}
 	return outputs, nil
 }
-
-// BabyJubJub point helpers

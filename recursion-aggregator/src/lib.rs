@@ -622,6 +622,88 @@ mod tests {
         result.expect("aggregation should succeed for a single valid ballot proof");
     }
 
+    /// Benchmark aggregation for N ballot proofs.
+    /// Uses `AGGREGATE_N` env var (default 2). Duplicates one proof N times.
+    #[test]
+    #[ignore] // run with: cargo test --release -- --ignored bench_aggregate_n --nocapture
+    fn bench_aggregate_n() {
+        use davinci_stark::air::BallotAir;
+        use davinci_stark::trace::{BallotInputs, BallotMode};
+        use ecgfp5::curve::Point;
+        use ecgfp5::scalar::Scalar;
+
+        let n: usize = std::env::var("AGGREGATE_N")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2);
+
+        let mode = BallotMode {
+            num_fields: 8,
+            group_size: 8,
+            unique_values: 0,
+            cost_from_weight: 0,
+            cost_exponent: 1,
+            max_value: 100,
+            min_value: 0,
+            max_value_sum: 1000,
+            min_value_sum: 0,
+        };
+        let sk = Scalar([12345, 0, 0, 0, 0]);
+        let inputs = BallotInputs {
+            k: Scalar([42, 0, 0, 0, 0]),
+            fields: core::array::from_fn(|i| Scalar([i as u64 + 1, 0, 0, 0, 0])),
+            pk: Point::mulgen(sk),
+            process_id: [Val::from_u64(1001), Val::ZERO, Val::ZERO, Val::ZERO],
+            address: [Val::from_u64(0xDEADBEEF), Val::ZERO, Val::ZERO, Val::ZERO],
+            weight: Val::from_u64(1),
+            packed_ballot_mode: mode.pack(),
+        };
+
+        println!("Generating 1 ballot proof (will duplicate to {n} via serde)...");
+        let t0 = std::time::Instant::now();
+        let (ballot_proof, _) = davinci_stark::prove_full_ballot(&inputs);
+        println!("  proof generated in {:.1}s", t0.elapsed().as_secs_f64());
+
+        // Duplicate via serialize/deserialize (Proof doesn't impl Clone)
+        let proof_bytes = postcard::to_allocvec(&ballot_proof.proof).unwrap();
+        let pv = ballot_proof.public_values;
+        let proofs: Vec<_> = (0..n)
+            .map(|_| {
+                let p: Proof<BallotConfig> = postcard::from_bytes(&proof_bytes).unwrap();
+                (p, pv.clone())
+            })
+            .collect();
+
+        println!("Aggregating {n} ballot proofs...");
+        let t1 = std::time::Instant::now();
+        // For now, only measure leaf wrapping time (aggregation layer has a separate bug)
+        let config = BallotRecursionConfig::new(davinci_stark::config::make_verifier_config());
+        let backend = FriRecursionBackend::<8, 4>::new_d2(Poseidon2Config::GoldilocksD2Width8);
+        let leaf_params = default_leaf_params();
+        let air = BallotAir::new();
+
+        let mut leaves = Vec::with_capacity(n);
+        for (i, (proof, public_values)) in proofs.iter().enumerate() {
+            let proof_ref: &Proof<BallotRecursionConfig> =
+                unsafe { &*(proof as *const Proof<BallotConfig> as *const Proof<BallotRecursionConfig>) };
+            let input = RecursionInput::UniStark {
+                proof: proof_ref,
+                air: &air,
+                public_inputs: public_values.clone(),
+                preprocessed_commit: None,
+            };
+            let t_leaf = std::time::Instant::now();
+            let output = build_and_prove_next_layer::<BallotRecursionConfig, BallotAir, _, D>(
+                &input, &config, &backend, &leaf_params,
+            ).unwrap();
+            println!("  leaf {i}: {:.1}s", t_leaf.elapsed().as_secs_f64());
+            leaves.push(output);
+        }
+        let leaf_secs = t1.elapsed().as_secs_f64();
+        println!("Leaf wrapping total: {leaf_secs:.1}s ({:.2}s/proof)", leaf_secs / n as f64);
+        println!("All {n} leaves created successfully");
+    }
+
     /// Minimal HidingFriPcs + Goldilocks D=2 recursive verification test.
     /// Uses the simplest possible AIR to isolate HidingFriPcs-specific issues.
     #[test]

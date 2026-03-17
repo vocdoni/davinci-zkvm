@@ -1,12 +1,11 @@
 /// DAVINCI protocol consistency checks:
 /// 1. **VoteID namespace**: each `vote_id_chain[i].new_key[0] ∈ [VoteIDMin, VoteIDMax]`
-/// 2. **VoteID–proof binding**: `vote_id_chain[i].new_key[0] == proofs[i].public_inputs[1][0]`
+/// 2. **VoteID–proof binding**: `vote_id_chain[i].new_key[0] == ballot_statement[i].vote_id`
 /// 3. **Ballot namespace**: each `ballot_chain[i].new_key[0] ∈ [BallotMin, BallotMax]`
 /// 4. **Ballot–address binding**: `(ballot_chain[i].new_key[0] & 0xFFFF) ==
-///    (proofs[i].public_inputs[0][0] & 0xFFFF)` (lower 16 bits of address)
+///    (ballot_statement[i].address & 0xFFFF)` (lower 16 bits of address)
 /// These checks are only applied when a STATETX block is present.
 /// When no state block is present, returns `true` immediately (absence is not a failure).
-
 use crate::io::ParsedInput;
 
 // From davinci-node/spec/params/params.go
@@ -14,11 +13,7 @@ const VOTE_ID_MIN: u64 = 0x8000_0000_0000_0000;
 const BALLOT_MIN: u64 = 0x0000_0000_0000_0010; // ConfigMax + 1
 const BALLOT_MAX: u64 = 0x7FFF_FFFF_FFFF_FFFF; // VoteIDMin - 1
 
-// Public input indices for the BN254 Groth16 ballot proof.
-const PUB_ADDRESS: usize = 0;
-const PUB_VOTE_ID: usize = 1;
-
-use crate::types::{FAIL_CONSISTENCY, FAIL_BALLOT_NS};
+use crate::types::{FAIL_BALLOT_NS, FAIL_CONSISTENCY};
 
 pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     let state = match &parsed.state {
@@ -53,15 +48,8 @@ pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
             ok = false;
         }
 
-        // Binding check: matches Groth16 public input[1] (voteID) for proof i.
-        if i < parsed.proofs.len() && parsed.n_public > PUB_VOTE_ID {
-            let pubs = &parsed.proofs[i].public_inputs[PUB_VOTE_ID];
-            let pub_vote_id = pubs[0];
-            // VoteIDs are 64-bit values; upper limbs must be zero.
-            if pubs[1] != 0 || pubs[2] != 0 || pubs[3] != 0 {
-                *fail_mask |= FAIL_CONSISTENCY;
-                ok = false;
-            }
+        // Binding check: matches the ballot proof's claimed voteID for proof i.
+        if let Some(pub_vote_id) = parsed.voter_vote_id(i) {
             if pub_vote_id != vid_key {
                 *fail_mask |= FAIL_CONSISTENCY;
                 ok = false;
@@ -88,12 +76,14 @@ pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
 
             // Address binding: (ballot_key - BallotMin) lower 16 bits == address lower 16 bits.
             // key = BallotMin + (censusIdx << 16) + (addr & 0xFFFF)
-            if ballot_key >= BALLOT_MIN && i < parsed.proofs.len() && parsed.n_public > PUB_ADDRESS {
-                let pub_addr_lo16 = parsed.proofs[i].public_inputs[PUB_ADDRESS][0] & 0xFFFF;
-                let key_addr_lo16 = (ballot_key.wrapping_sub(BALLOT_MIN)) & 0xFFFF;
-                if pub_addr_lo16 != key_addr_lo16 {
-                    *fail_mask |= FAIL_BALLOT_NS;
-                    ok = false;
+            if ballot_key >= BALLOT_MIN {
+                if let Some(addr) = parsed.voter_address(i) {
+                    let pub_addr_lo16 = addr[0] & 0xFFFF;
+                    let key_addr_lo16 = (ballot_key.wrapping_sub(BALLOT_MIN)) & 0xFFFF;
+                    if pub_addr_lo16 != key_addr_lo16 {
+                        *fail_mask |= FAIL_BALLOT_NS;
+                        ok = false;
+                    }
                 }
             }
         }

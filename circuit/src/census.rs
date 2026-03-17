@@ -9,7 +9,7 @@
 //! Index bit `i` (LSB-first): if bit=1, node is right child (sibling on left).
 
 use crate::poseidon::poseidon2;
-use crate::types::{FrRaw, FAIL_CENSUS};
+use crate::types::{FAIL_CENSUS, FrRaw};
 
 /// Verify a lean-IMT Poseidon membership proof.
 /// Compatible with `leanimt.VerifyProofWith` from lean-imt-go with `PoseidonHasher`.

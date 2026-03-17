@@ -5,7 +5,12 @@ pub mod prove;
 
 use crate::config::Config;
 use crate::prover::ProverHandle;
-use axum::{extract::{DefaultBodyLimit, State}, routing::get, routing::post, Json, Router};
+use axum::{
+    extract::{DefaultBodyLimit, State},
+    routing::get,
+    routing::post,
+    Json, Router,
+};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -36,6 +41,7 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
+        "zisk_version": state.config.cargo_zisk_version,
         "queue_len": state.prover.queue_len(),
     }))
 }

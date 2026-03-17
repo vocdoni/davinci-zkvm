@@ -11,7 +11,7 @@
 //! **Evaluation point Z** is derived deterministically:
 //!   `Z = SHA-256(processID_be32 ‖ rootHashBefore_be32 ‖ commitment_48bytes) mod p_bls`
 //!
-//! Using SHA-256 (hardware-accelerated via ZisK precompile) 
+//! Using SHA-256 (hardware-accelerated via ZisK precompile)
 //! keeps proving cost low while domain-separating Z from the blob data.
 //!
 //! **Barycentric formula** (degree-4095 polynomial in evaluation form):
@@ -33,7 +33,7 @@
 
 use crate::bls_fr::{self, BlsFrRaw, ONE, ZERO};
 use crate::hash::sha256_once;
-use crate::types::{FrRaw, KZGBlock, FAIL_KZG, FAIL_MISSING_BLOCK};
+use crate::types::{FAIL_KZG, FAIL_MISSING_BLOCK, FrRaw, KZGBlock};
 
 /// Number of cells in an EIP-4844 blob.
 const N: usize = 4096;
@@ -73,10 +73,8 @@ pub fn compute_z(process_id: &FrRaw, root_hash_before: &FrRaw, commitment: &[u8;
 /// Value: `10238227357739495823651030575849232062558860180284477541189508159991286009131`
 /// Hex BE: `16a2a19edfe81f20d09b681922c813b4b63683508c2280b93829971f439f0d2b`
 const ROU_BYTES: [u8; 32] = [
-    0x16, 0xa2, 0xa1, 0x9e, 0xdf, 0xe8, 0x1f, 0x20,
-    0xd0, 0x9b, 0x68, 0x19, 0x22, 0xc8, 0x13, 0xb4,
-    0xb6, 0x36, 0x83, 0x50, 0x8c, 0x22, 0x80, 0xb9,
-    0x38, 0x29, 0x97, 0x1f, 0x43, 0x9f, 0x0d, 0x2b,
+    0x16, 0xa2, 0xa1, 0x9e, 0xdf, 0xe8, 0x1f, 0x20, 0xd0, 0x9b, 0x68, 0x19, 0x22, 0xc8, 0x13, 0xb4,
+    0xb6, 0x36, 0x83, 0x50, 0x8c, 0x22, 0x80, 0xb9, 0x38, 0x29, 0x97, 0x1f, 0x43, 0x9f, 0x0d, 0x2b,
 ];
 
 /// Generate the 4096 EIP-4844 roots of unity in bit-reversed order.
@@ -220,7 +218,11 @@ pub fn verify_kzg(kzg: &Option<KZGBlock>, fail_mask: &mut u32) -> (bool, [u8; 48
         Some(b) => b,
     };
 
-    let z = compute_z(&block.process_id, &block.root_hash_before, &block.commitment);
+    let z = compute_z(
+        &block.process_id,
+        &block.root_hash_before,
+        &block.commitment,
+    );
     let y_computed = evaluate_barycentric(&block.blob, z);
     let y_bytes = bls_fr::to_be32(&y_computed);
 

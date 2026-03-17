@@ -12,31 +12,45 @@ import (
 )
 
 func TestHealth(t *testing.T) {
-	h, err := newClient().Health()
+	h, err := requireCompatibleService(t).Health()
 	if err != nil {
 		t.Fatalf("health check failed: %v", err)
 	}
 	if h.Status != "ok" {
 		t.Fatalf("expected status=ok, got %q", h.Status)
 	}
-	t.Logf("health: version=%s queue_len=%d", h.Version, h.QueueLen)
+	t.Logf("health: version=%s zisk=%s queue_len=%d", h.Version, h.ZiskVersion, h.QueueLen)
 }
 
 func TestInvalidRequest_EmptyProofs(t *testing.T) {
-	body := []byte(`{"vk":{"protocol":"groth16","curve":"bn128","nPublic":1,"vk_alpha_1":["0","0","0"],"vk_beta_2":[["0","0"],["0","0"],["0","0"]],"vk_gamma_2":[["0","0"],["0","0"],["0","0"]],"vk_delta_2":[["0","0"],["0","0"],["0","0"]],"IC":[]},"proofs":[],"public_inputs":[],"sigs":[]}`)
+	requireCompatibleService(t)
+	body := []byte(`{"stark_proofs":[],"sigs":[]}`)
 	resp, err := http.Post(apiURL+"/prove", "application/json", strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatalf("POST /prove: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 400 or 422, got %d", resp.StatusCode)
 	}
 }
 
 func TestJobNotFound(t *testing.T) {
-	_, err := newClient().GetJob("00000000-0000-0000-0000-000000000000")
+	_, err := requireCompatibleService(t).GetJob("00000000-0000-0000-0000-000000000000")
 	if err == nil {
 		t.Fatal("expected error for unknown job ID")
+	}
+}
+
+func TestServiceContractErrorsAreNotLegacy(t *testing.T) {
+	requireCompatibleService(t)
+	body := []byte(`{"state":{"voters_count":2,"overwritten_count":0,"process_id":"0x00","old_state_root":"0x00","new_state_root":"0x00","vote_id_smt":[],"ballot_smt":[],"process_smt":[],"ecgfp5_ballot_proofs":{"old_results_add":[],"old_results_sub":[],"voter_ballots":[],"overwritten_ballots":null}}}`)
+	resp, err := http.Post(apiURL+"/prove", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatalf("POST /prove: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("expected malformed state payload to fail with 400 or 422, got %d", resp.StatusCode)
 	}
 }

@@ -48,13 +48,14 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
 RUN /src/zisk/target/release/cargo-zisk sdk install-toolchain
 
-# ── Stage 2: Build the Rust service ───────────────────────────────────────────
+# ── Stage 2: Build the Rust service (with ballot-aggregation) ─────────────────
 FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04 AS service-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    git \
     build-essential \
     pkg-config \
     libssl-dev \
@@ -62,39 +63,54 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
-    -y --default-toolchain 1.85.0 --profile minimal
+    -y --default-toolchain 1.93.1 --profile minimal
 ENV PATH="/root/.cargo/bin:$PATH"
 
-WORKDIR /build/davinci-zkvm
+# -- Copy davinci-stark source (path dep of recursion-aggregator at ../../) --
+WORKDIR /build
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY src src
+COPY vendor vendor
 
+# -- Copy Plonky3-recursion (path deps of recursion-aggregator) --
+WORKDIR /build/davinci-zkvm
+COPY davinci-zkvm/Plonky3-recursion/Cargo.toml Plonky3-recursion/Cargo.toml
+COPY davinci-zkvm/Plonky3-recursion/circuit Plonky3-recursion/circuit
+COPY davinci-zkvm/Plonky3-recursion/circuit-prover Plonky3-recursion/circuit-prover
+COPY davinci-zkvm/Plonky3-recursion/recursion Plonky3-recursion/recursion
+COPY davinci-zkvm/Plonky3-recursion/poseidon2-circuit-air Plonky3-recursion/poseidon2-circuit-air
+COPY davinci-zkvm/Plonky3-recursion/test-utils Plonky3-recursion/test-utils
+
+# -- Copy workspace manifests --
 COPY davinci-zkvm/Cargo.toml davinci-zkvm/Cargo.lock ./
 COPY davinci-zkvm/input-gen/Cargo.toml input-gen/Cargo.toml
 COPY davinci-zkvm/service/Cargo.toml service/Cargo.toml
+COPY davinci-zkvm/recursion-aggregator/Cargo.toml recursion-aggregator/Cargo.toml
 
-# Remove recursion-aggregator from workspace (it has complex path deps not needed for the service)
-RUN sed -i '/"recursion-aggregator",/d' Cargo.toml && \
-    sed -i '/davinci-zkvm-recursion-aggregator/d' service/Cargo.toml && \
-    sed -i '/ballot-aggregation/d' service/Cargo.toml
-
-RUN mkdir -p input-gen/src service/src && \
+# Create stub sources to cache dependencies
+RUN mkdir -p input-gen/src service/src recursion-aggregator/src && \
     echo 'pub fn placeholder() {}' > input-gen/src/lib.rs && \
-    echo 'fn main() {}' > service/src/main.rs
+    echo 'fn main() {}' > service/src/main.rs && \
+    echo 'pub fn placeholder() {}' > recursion-aggregator/src/lib.rs
 
-RUN cargo build --release -p davinci-zkvm-service -p davinci-zkvm-input-gen 2>&1 || true
-RUN rm -rf input-gen/src service/src
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    cargo build --release --features ballot-aggregation \
+    -p davinci-zkvm-service -p davinci-zkvm-input-gen 2>&1 || true
+
+RUN rm -rf input-gen/src service/src recursion-aggregator/src
 
 COPY davinci-zkvm/input-gen/src input-gen/src
 COPY davinci-zkvm/service/src service/src
+COPY davinci-zkvm/recursion-aggregator/src recursion-aggregator/src
 
 # Invalidate fingerprints so cargo rebuilds the real crates
 RUN find target/release/.fingerprint -maxdepth 1 -name "davinci*" -exec rm -rf {} + 2>/dev/null || true
 
-# Ensure recursion-aggregator is still excluded (Cargo.toml was modified in cache layer)
-RUN sed -i '/"recursion-aggregator",/d' Cargo.toml 2>/dev/null || true && \
-    sed -i '/davinci-zkvm-recursion-aggregator/d' service/Cargo.toml 2>/dev/null || true && \
-    sed -i '/ballot-aggregation/d' service/Cargo.toml 2>/dev/null || true
-
-RUN cargo build --release -p davinci-zkvm-service -p davinci-zkvm-input-gen
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    cargo build --release --features ballot-aggregation \
+    -p davinci-zkvm-service -p davinci-zkvm-input-gen
 
 # ── Stage 3: Build the zkVM circuit ELF from source ──────────────────────────
 FROM cuda-builder AS circuit-builder

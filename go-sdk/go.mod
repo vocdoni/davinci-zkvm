@@ -28,7 +28,6 @@ require (
 	github.com/consensys/gnark-crypto v0.19.3-0.20260126145145-b5cf053fbc34 // indirect
 	github.com/crate-crypto/go-eth-kzg v1.4.0 // indirect
 	github.com/crate-crypto/go-ipa v0.0.0-20240724233137-53bbb0ceb27a // indirect
-	github.com/dchest/blake512 v1.0.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
 	github.com/emicklei/dot v1.6.4 // indirect
 	github.com/ethereum/c-kzg-4844/v2 v2.1.5 // indirect
@@ -42,11 +41,6 @@ require (
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/pprof v0.0.0-20251213031049-b05bdaca462f // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
-	github.com/iden3/go-rapidsnark/prover v0.0.12 // indirect
-	github.com/iden3/go-rapidsnark/types v0.0.3 // indirect
-	github.com/iden3/go-rapidsnark/witness v0.0.6 // indirect
-	github.com/iden3/wasmer-go v0.0.1 // indirect
-	github.com/ingonyama-zk/icicle-gnark/v3 v3.2.2 // indirect
 	github.com/klauspost/compress v1.18.3 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
@@ -71,10 +65,8 @@ require (
 	github.com/sethvargo/go-retry v0.3.0 // indirect
 	github.com/supranational/blst v0.3.16-0.20250831170142-f48500c1fdbe // indirect
 	github.com/syndtr/goleveldb v1.0.1-0.20220721030215-126854af5e6d // indirect
-	github.com/vocdoni/davinci-circom v0.1.0 // indirect
 	github.com/vocdoni/davinci-node/spec v0.0.0-20260302160544-e9393d9f6610 // indirect
 	github.com/vocdoni/gnark-crypto-primitives v0.0.2-0.20260115102516-64ce9c3fd55d // indirect
-	github.com/vocdoni/poseidon377 v0.0.0-20260107010505-905fd2aadb69 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
 	github.com/xdg-go/scram v1.2.0 // indirect

@@ -19,7 +19,11 @@ pub async fn get_job_status(
 ) -> impl IntoResponse {
     match state.prover.jobs.get(&id) {
         Some(job) => (StatusCode::OK, Json(job.clone())).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "job not found"}))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "job not found"})),
+        )
+            .into_response(),
     }
 }
 
@@ -30,7 +34,13 @@ pub async fn get_job_proof(
 ) -> impl IntoResponse {
     let job = match state.prover.jobs.get(&id) {
         Some(j) => j.clone(),
-        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "job not found"}))).into_response(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "job not found"})),
+            )
+                .into_response()
+        }
     };
 
     use crate::types::JobStatus;
@@ -46,18 +56,27 @@ pub async fn get_job_proof(
             return (
                 StatusCode::TOO_EARLY,
                 Json(serde_json::json!({"error": "proof not ready yet", "status": job.status})),
-            ).into_response();
+            )
+                .into_response();
         }
     }
 
     // The proof binary is stored at: <proof_output_dir>/<job_id>/vadcop_final_proof.bin
-    let proof_path = state.config.proof_output_dir
+    let proof_path = state
+        .config
+        .proof_output_dir
         .join(id.to_string())
         .join("vadcop_final_proof.bin");
 
     let file = match File::open(&proof_path).await {
         Ok(f) => f,
-        Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "proof file not found"}))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "proof file not found"})),
+            )
+                .into_response()
+        }
     };
 
     let stream = ReaderStream::new(file);
@@ -67,8 +86,12 @@ pub async fn get_job_proof(
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "application/octet-stream"),
-            (header::CONTENT_DISPOSITION, &format!("attachment; filename=\"proof_{}.bin\"", id)),
+            (
+                header::CONTENT_DISPOSITION,
+                &format!("attachment; filename=\"proof_{}.bin\"", id),
+            ),
         ],
         body,
-    ).into_response()
+    )
+        .into_response()
 }
