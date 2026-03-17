@@ -25,13 +25,21 @@
 //! - voter_address in each CSP entry must match the ballot proof's address (pub_inputs[0])
 
 use crate::hash::keccak256_short;
-use crate::types::{CspBlock, FrRaw, FAIL_CSP, ZERO_FR};
-use ziskos::syscalls::SyscallPoint256;
+use crate::types::{CspBlock, FAIL_CSP, FrRaw, ZERO_FR};
 use ziskos::zisklib::secp256k1_ecdsa_verify;
+
+fn secp256k1_pk_words(px: &FrRaw, py: &FrRaw) -> [u64; 8] {
+    [px[0], px[1], px[2], px[3], py[0], py[1], py[2], py[3]]
+}
 
 /// Compute the Ethereum signed-message hash for a CSP attestation.
 /// `z = keccak256("\x19Ethereum Signed Message:\n92" || processID_BE32 || address_BE20 || weight_BE32 || index_BE8)`
-fn csp_message_hash(process_id: &FrRaw, voter_address: &FrRaw, weight: &FrRaw, index: u64) -> [u64; 4] {
+fn csp_message_hash(
+    process_id: &FrRaw,
+    voter_address: &FrRaw,
+    weight: &FrRaw,
+    index: u64,
+) -> [u64; 4] {
     // Prefix: "\x19Ethereum Signed Message:\n92" = 28 bytes
     const PREFIX: &[u8] = b"\x19Ethereum Signed Message:\n92";
     let mut envelope = [0u8; 120]; // 28 + 32 + 20 + 32 + 8
@@ -96,8 +104,12 @@ fn eth_address_from_pk(px: &FrRaw, py: &FrRaw) -> [u8; 20] {
 /// Pack a 20-byte big-endian Ethereum address into an FrRaw (uint160 LE limbs).
 fn address_to_fr(addr: &[u8; 20]) -> FrRaw {
     [
-        u64::from_be_bytes([addr[12], addr[13], addr[14], addr[15], addr[16], addr[17], addr[18], addr[19]]),
-        u64::from_be_bytes([addr[4], addr[5], addr[6], addr[7], addr[8], addr[9], addr[10], addr[11]]),
+        u64::from_be_bytes([
+            addr[12], addr[13], addr[14], addr[15], addr[16], addr[17], addr[18], addr[19],
+        ]),
+        u64::from_be_bytes([
+            addr[4], addr[5], addr[6], addr[7], addr[8], addr[9], addr[10], addr[11],
+        ]),
         u32::from_be_bytes([addr[0], addr[1], addr[2], addr[3]]) as u64,
         0,
     ]
@@ -108,11 +120,7 @@ fn address_to_fr(addr: &[u8; 20]) -> FrRaw {
 /// as an FrRaw (used as the census root output).
 /// # Fail-mask bits
 /// - `FAIL_CSP` (bit 23) => CSP signature verification or address check failed
-pub fn verify_csp(
-    csp: &CspBlock,
-    process_id: &FrRaw,
-    fail_mask: &mut u32,
-) -> (bool, FrRaw) {
+pub fn verify_csp(csp: &CspBlock, process_id: &FrRaw, fail_mask: &mut u32) -> (bool, FrRaw) {
     if csp.entries.is_empty() {
         *fail_mask |= FAIL_CSP;
         return (false, ZERO_FR);
@@ -122,7 +130,7 @@ pub fn verify_csp(
     let csp_addr = eth_address_from_pk(&csp.csp_pub_key_x, &csp.csp_pub_key_y);
     let census_root = address_to_fr(&csp_addr);
 
-    let pk = SyscallPoint256 { x: csp.csp_pub_key_x, y: csp.csp_pub_key_y };
+    let pk = secp256k1_pk_words(&csp.csp_pub_key_x, &csp.csp_pub_key_y);
 
     // Invariant 1: no duplicate (voter_address, index) pairs
     let n = csp.entries.len();

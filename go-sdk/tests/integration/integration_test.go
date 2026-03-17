@@ -1,9 +1,9 @@
 // integration_test.go is the main integration test for chained DAVINCI protocol
 // state-transitions.
-// It creates a real election, generates BN254 Groth16 ballot proofs dynamically,
+// It creates a real election, generates davinci-stark ballot proofs dynamically,
 // submits multiple chained state-transitions to the running davinci-zkvm service,
-// accumulates the ElGamal ciphertexts homomorphically, and verifies the final
-// vote tally by decrypting with the election private key.
+// accumulates the ecgfp5 ElGamal ciphertexts homomorphically, and verifies the
+// final vote tally by decrypting with the election private key.
 // Prerequisites:
 //   - docker compose up -d --build (starts davinci-zkvm service)
 //   - DAVINCI_API_URL (default: http://localhost:8080)
@@ -101,19 +101,14 @@ func TestChainedStateTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewElection: %v", err)
 	}
+	if err := election.ConfigureForStark(); err != nil {
+		t.Fatalf("ConfigureForStark: %v", err)
+	}
 	t.Logf("Election created; initial state root: %s", election.OldRoot)
 
-	client := newClient()
+	client := requireCompatibleService(t)
 
-	// Verify service is reachable.
-	if err := checkServiceURL(apiURL + "/jobs"); err != nil {
-		t.Skipf("davinci-zkvm service not available at %s: %v (start with 'docker compose up -d --build')", apiURL, err)
-	}
-
-	// 2. Tally accumulator
-	tally := NewTallyAccumulator()
-
-	// 3. Run transitions
+	// 2. Run transitions
 	voterOffset := 0
 	for txIdx, spec := range batches {
 		batchSize := spec.Size
@@ -133,9 +128,9 @@ func TestChainedStateTransitions(t *testing.T) {
 
 		// Generate ballot proofs.
 		t.Logf("  Generating %d ballot proofs (seed base=%d)...", batchSize, seedBase)
-		batch, err := GenerateBallotBatch(election.ProcessID, election.EncKey, batchVoters, seedBase)
+		batch, err := GenerateStarkBallotBatch(election.ProcessID, election.StarkEncKeyHex, batchVoters, seedBase)
 		if err != nil {
-			t.Fatalf("transition %d: GenerateBallotBatch: %v", txIdx, err)
+			t.Fatalf("transition %d: GenerateStarkBallotBatch: %v", txIdx, err)
 		}
 		t.Logf("  Ballot proofs generated in %.1fs", time.Since(start).Seconds())
 
@@ -150,16 +145,16 @@ func TestChainedStateTransitions(t *testing.T) {
 
 		// Build re-encryption block before building the state block so the
 		// re-encrypted ballots can be accumulated into ResultsAdd.
-		reencBlock, reencBallots, err := election.BuildReencBlock(batch.Results)
+		reencBlock, reencBallots, err := election.BuildStarkReencBlock(batch.Results)
 		if err != nil {
-			t.Fatalf("transition %d: BuildReencBlock: %v", txIdx, err)
+			t.Fatalf("transition %d: BuildStarkReencBlock: %v", txIdx, err)
 		}
 
 		// Build state-transition block (advances election.OldRoot).
 		// Returns overwritten old ballots (non-empty only for overwrite batches).
-		stateBlock, overwrittenBallots, err := election.BuildStateBlock(batchVoters, batch.Results, reencBallots)
+		stateBlock, overwrittenBallots, err := election.BuildStarkStateBlock(batchVoters, batch.Results, reencBallots)
 		if err != nil {
-			t.Fatalf("transition %d: BuildStateBlock: %v", txIdx, err)
+			t.Fatalf("transition %d: BuildStarkStateBlock: %v", txIdx, err)
 		}
 
 		// Build census membership proofs.
@@ -168,19 +163,15 @@ func TestChainedStateTransitions(t *testing.T) {
 			t.Fatalf("transition %d: BuildCensusProofs: %v", txIdx, err)
 		}
 
-		// Accumulate re-encrypted ballots; subtract any overwritten old ones so
-		// the tally reflects only the latest ballot per voter.
-		tally.Add(reencBallots)
 		if len(overwrittenBallots) > 0 {
-			tally.Subtract(overwrittenBallots)
-			t.Logf("  %d overwrite(s) detected; subtracted from tally", len(overwrittenBallots))
+			t.Logf("  %d overwrite(s) detected", len(overwrittenBallots))
 		}
 
 		// Assemble the full ProveRequest.
 		req := batch.ToProveRequest()
 		req.State = stateBlock
 		req.CensusProofs = censusProofs
-		req.Reencryption = reencBlock
+		req.Ecgfp5Reencryption = reencBlock
 		req.KZG = kzgBlock
 
 		// Submit to the service.
@@ -213,13 +204,13 @@ func TestChainedStateTransitions(t *testing.T) {
 		t.Logf("  New state root: %s", election.OldRoot)
 	}
 
-	// 4. Verify tally
+	// 3. Verify tally
 	t.Logf("=== All %d transitions done; decrypting tally (%d net ballots) ===",
-		nTransitions, tally.count)
+		nTransitions, len(election.VotedBallotsG5))
 
-	fieldTotals, err := tally.DecryptTally(election.EncPrivKey)
+	fieldTotals, err := election.DecryptStarkTally(1024)
 	if err != nil {
-		t.Fatalf("DecryptTally: %v", err)
+		t.Fatalf("DecryptStarkTally: %v", err)
 	}
 
 	// Compute expected totals from the known ballot field generation formula.
@@ -227,19 +218,19 @@ func TestChainedStateTransitions(t *testing.T) {
 
 	t.Logf("Vote tally (field totals vs expected):")
 	for i, v := range fieldTotals {
-		t.Logf("  field[%d] = %s (expected %d)", i, v.String(), expected[i])
+		t.Logf("  field[%d] = %d (expected %d)", i, v, expected[i])
 	}
 
 	// Fields 0-5 must exactly match the analytically computed expected totals.
 	for i := 0; i < 6; i++ {
-		if fieldTotals[i].Int64() != expected[i] {
-			t.Errorf("field[%d]: got %s, want %d", i, fieldTotals[i].String(), expected[i])
+		if int64(fieldTotals[i]) != expected[i] {
+			t.Errorf("field[%d]: got %d, want %d", i, fieldTotals[i], expected[i])
 		}
 	}
 	// Fields 6-7 are always zero (padding slots).
 	for i := 6; i < 8; i++ {
-		if fieldTotals[i].Sign() != 0 {
-			t.Errorf("field[%d] (padding): got %s, want 0", i, fieldTotals[i].String())
+		if fieldTotals[i] != 0 {
+			t.Errorf("field[%d] (padding): got %d, want 0", i, fieldTotals[i])
 		}
 	}
 	t.Logf("Final state root: %s", election.OldRoot)
@@ -252,6 +243,7 @@ func TestChainedStateTransitions(t *testing.T) {
 //   - overwrite specs (VoterStart≥0) replace earlier votes for those voter indices
 //   - each ballot has 6 non-zero fields; values are unique within a ballot
 //   - field f, voter seed s: first (s+f*1000+attempt)%16 not already used in that ballot
+//
 // Only the LAST ballot cast by each voter is counted.
 func expectedTally(batches []batchSpec) [8]int64 {
 	// lastFields maps voter index → their most recently cast ballot fields.

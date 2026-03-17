@@ -8,7 +8,8 @@ import (
 )
 
 // stateMagic is "STATETX!" as a little-endian uint64 (matches circuit/src/types.rs STATE_MAGIC).
-var stateMagic = []byte("STATETX!")
+var stateG5Magic = []byte("STAG5TX!")
+var reencG5Magic = []byte("REG5BLK!")
 
 // EncodeStateBlock serializes a StateTransitionData into the STATETX binary block
 // that must be appended after the ECDSA block in the ZisK input.
@@ -22,7 +23,7 @@ func EncodeStateBlock(sd *StateTransitionData) ([]byte, error) {
 	var buf []byte
 
 	// Magic
-	buf = append(buf, stateMagic...)
+	buf = append(buf, stateG5Magic...)
 
 	// Metadata
 	buf = appendU64(buf, sd.VotersCount)
@@ -96,67 +97,38 @@ func EncodeStateBlock(sd *StateTransitionData) ([]byte, error) {
 	}
 
 	// Result accumulator ballot data
-	if sd.BallotProofs != nil {
-		bp := sd.BallotProofs
+	if sd.Ecgfp5BallotProofs != nil {
+		bp := sd.Ecgfp5BallotProofs
 		buf = appendU64(buf, 1) // has_ballot_data = true
-
-		// OldResultsAdd: 32 Fr elements
-		if len(bp.OldResultsAdd) != 32 {
-			return nil, fmt.Errorf("old_results_add must have 32 elements, got %d", len(bp.OldResultsAdd))
-		}
-		for i, s := range bp.OldResultsAdd {
-			fr, err := beHexToFrLE(s)
-			if err != nil {
+		for i, ct := range bp.OldResultsAdd {
+			if err := appendEcgfp5Ciphertext(&buf, ct); err != nil {
 				return nil, fmt.Errorf("old_results_add[%d]: %w", i, err)
 			}
-			buf = appendFr(buf, fr)
 		}
-
-		// OldResultsSub: 32 Fr elements
-		if len(bp.OldResultsSub) != 32 {
-			return nil, fmt.Errorf("old_results_sub must have 32 elements, got %d", len(bp.OldResultsSub))
-		}
-		for i, s := range bp.OldResultsSub {
-			fr, err := beHexToFrLE(s)
-			if err != nil {
+		for i, ct := range bp.OldResultsSub {
+			if err := appendEcgfp5Ciphertext(&buf, ct); err != nil {
 				return nil, fmt.Errorf("old_results_sub[%d]: %w", i, err)
 			}
-			buf = appendFr(buf, fr)
 		}
-
-		// VoterBallots: n_vb, then 32 Fr per ballot
 		buf = appendU64(buf, uint64(len(bp.VoterBallots)))
-		for i, vb := range bp.VoterBallots {
-			if len(vb) != 32 {
-				return nil, fmt.Errorf("voter_ballots[%d] must have 32 elements, got %d", i, len(vb))
-			}
-			for j, s := range vb {
-				fr, err := beHexToFrLE(s)
-				if err != nil {
+		for i, ballot := range bp.VoterBallots {
+			for j, ct := range ballot {
+				if err := appendEcgfp5Ciphertext(&buf, ct); err != nil {
 					return nil, fmt.Errorf("voter_ballots[%d][%d]: %w", i, j, err)
 				}
-				buf = appendFr(buf, fr)
 			}
 		}
-
-		// OverwrittenBallots: n_ob, then 32 Fr per ballot
 		buf = appendU64(buf, uint64(len(bp.OverwrittenBallots)))
-		for i, ob := range bp.OverwrittenBallots {
-			if len(ob) != 32 {
-				return nil, fmt.Errorf("overwritten_ballots[%d] must have 32 elements, got %d", i, len(ob))
-			}
-			for j, s := range ob {
-				fr, err := beHexToFrLE(s)
-				if err != nil {
+		for i, ballot := range bp.OverwrittenBallots {
+			for j, ct := range ballot {
+				if err := appendEcgfp5Ciphertext(&buf, ct); err != nil {
 					return nil, fmt.Errorf("overwritten_ballots[%d][%d]: %w", i, j, err)
 				}
-				buf = appendFr(buf, fr)
 			}
 		}
 	} else {
 		buf = appendU64(buf, 0) // has_ballot_data = false
 	}
-
 	return buf, nil
 }
 
@@ -339,87 +311,59 @@ func EncodeCensusBlock(proofs []CensusProof) ([]byte, error) {
 	return buf, nil
 }
 
-// EncodeReencBlock serialises the REENCBLK for the ZisK circuit.
-// Magic = "REENCBLK" (8 bytes LE u64), followed by n_voters, pub_key_x/y,
-// then per-voter: k, then 8×(c1x,c1y,c2x,c2y) original, 8×(c1x,c1y,c2x,c2y) reencrypted.
-func EncodeReencBlock(r *ReencryptionData) ([]byte, error) {
-if r == nil || len(r.Entries) == 0 {
-return nil, nil
+// EncodeEcgfp5ReencBlock serializes the ecgfp5-native re-encryption block.
+// Magic = "REG5BLK!" followed by n_voters, encryption_key (encoded point),
+// then per voter: k (scalar encoding), original[8], reencrypted[8].
+func EncodeEcgfp5ReencBlock(r *Ecgfp5ReencryptionData) ([]byte, error) {
+	if r == nil || len(r.Entries) == 0 {
+		return nil, nil
+	}
+	buf := append([]byte(nil), reencG5Magic...)
+	buf = appendU64(buf, uint64(len(r.Entries)))
+	if err := appendEcgfp5Words(&buf, r.EncryptionKey); err != nil {
+		return nil, fmt.Errorf("reenc encryption_key: %w", err)
+	}
+	for i, entry := range r.Entries {
+		if err := appendEcgfp5Words(&buf, entry.K); err != nil {
+			return nil, fmt.Errorf("reenc entry[%d] k: %w", i, err)
+		}
+		for j, ct := range entry.Original {
+			if err := appendEcgfp5Ciphertext(&buf, ct); err != nil {
+				return nil, fmt.Errorf("reenc entry[%d] original[%d]: %w", i, j, err)
+			}
+		}
+		for j, ct := range entry.Reencrypted {
+			if err := appendEcgfp5Ciphertext(&buf, ct); err != nil {
+				return nil, fmt.Errorf("reenc entry[%d] reencrypted[%d]: %w", i, j, err)
+			}
+		}
+	}
+	return buf, nil
 }
 
-// reencMagic matches Rust b"REENCBLK" interpreted as a LE u64.
-var magicU64 uint64
-for i, b := range []byte("REENCBLK") {
-magicU64 |= uint64(b) << (8 * i)
+func appendEcgfp5Ciphertext(buf *[]byte, ct Ecgfp5Ciphertext) error {
+	if err := appendEcgfp5Words(buf, ct.C1); err != nil {
+		return fmt.Errorf("c1: %w", err)
+	}
+	if err := appendEcgfp5Words(buf, ct.C2); err != nil {
+		return fmt.Errorf("c2: %w", err)
+	}
+	return nil
 }
 
-pKeyX, err := beHexToFrLE(r.EncryptionKeyX)
-if err != nil {
-return nil, fmt.Errorf("reenc pub_key_x: %w", err)
-}
-pKeyY, err := beHexToFrLE(r.EncryptionKeyY)
-if err != nil {
-return nil, fmt.Errorf("reenc pub_key_y: %w", err)
-}
-
-buf := appendU64(nil, magicU64)
-buf = appendU64(buf, uint64(len(r.Entries)))
-buf = appendFr(buf, pKeyX)
-buf = appendFr(buf, pKeyY)
-
-for i, entry := range r.Entries {
-k, err := beHexToFrLE(entry.K)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] k: %w", i, err)
-}
-buf = appendFr(buf, k)
-
-for j, ct := range entry.Original {
-c1x, err := beHexToFrLE(ct.C1.X)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] original[%d] c1x: %w", i, j, err)
-}
-c1y, err := beHexToFrLE(ct.C1.Y)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] original[%d] c1y: %w", i, j, err)
-}
-c2x, err := beHexToFrLE(ct.C2.X)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] original[%d] c2x: %w", i, j, err)
-}
-c2y, err := beHexToFrLE(ct.C2.Y)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] original[%d] c2y: %w", i, j, err)
-}
-buf = appendFr(buf, c1x)
-buf = appendFr(buf, c1y)
-buf = appendFr(buf, c2x)
-buf = appendFr(buf, c2y)
-}
-for j, ct := range entry.Reencrypted {
-c1x, err := beHexToFrLE(ct.C1.X)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] reencrypted[%d] c1x: %w", i, j, err)
-}
-c1y, err := beHexToFrLE(ct.C1.Y)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] reencrypted[%d] c1y: %w", i, j, err)
-}
-c2x, err := beHexToFrLE(ct.C2.X)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] reencrypted[%d] c2x: %w", i, j, err)
-}
-c2y, err := beHexToFrLE(ct.C2.Y)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] reencrypted[%d] c2y: %w", i, j, err)
-}
-buf = appendFr(buf, c1x)
-buf = appendFr(buf, c1y)
-buf = appendFr(buf, c2x)
-buf = appendFr(buf, c2y)
-}
-}
-return buf, nil
+func appendEcgfp5Words(buf *[]byte, hexWords string) error {
+	trimmed := strings.TrimPrefix(hexWords, "0x")
+	raw, err := hex.DecodeString(trimmed)
+	if err != nil {
+		return fmt.Errorf("invalid hex: %w", err)
+	}
+	if len(raw) != 40 {
+		return fmt.Errorf("expected 40 bytes, got %d", len(raw))
+	}
+	for i := 0; i < 5; i++ {
+		*buf = appendU64(*buf, binary.LittleEndian.Uint64(raw[i*8:(i+1)*8]))
+	}
+	return nil
 }
 
 // kzgMagic is "KZGBLK!!" as literal bytes (matches circuit/src/types.rs KZG_MAGIC).
@@ -427,73 +371,73 @@ var kzgMagic = []byte("KZGBLK!!")
 
 // KZGEvalData holds all inputs needed to encode a KZG blob barycentric evaluation block.
 type KZGEvalData struct {
-// ProcessID is the BN254 Fr process identifier (big-endian bytes, up to 32).
-ProcessID []byte
-// RootHashBefore is the Arbo state root before the batch (big-endian bytes, up to 32).
-RootHashBefore []byte
-// Commitment is the 48-byte compressed BLS12-381 G1 KZG commitment.
-Commitment [48]byte
-// YClaimed is the 32-byte big-endian BLS12-381 Fr claimed evaluation result Y = P(Z).
-YClaimed [32]byte
-// Blob is the full EIP-4844 blob data (131072 bytes = 4096 × 32-byte big-endian cells).
-Blob []byte
+	// ProcessID is the BN254 Fr process identifier (big-endian bytes, up to 32).
+	ProcessID []byte
+	// RootHashBefore is the Arbo state root before the batch (big-endian bytes, up to 32).
+	RootHashBefore []byte
+	// Commitment is the 48-byte compressed BLS12-381 G1 KZG commitment.
+	Commitment [48]byte
+	// YClaimed is the 32-byte big-endian BLS12-381 Fr claimed evaluation result Y = P(Z).
+	YClaimed [32]byte
+	// Blob is the full EIP-4844 blob data (131072 bytes = 4096 × 32-byte big-endian cells).
+	Blob []byte
 }
 
 // EncodeKZGBlock encodes the KZG blob barycentric evaluation block.
 //
 // Block format (binary, appended after the last optional block):
 //
-//KZGBLK!! (8 bytes LE magic)
-//processID       (32 bytes: 4×u64 LE words, converted from big-endian input)
-//rootHashBefore  (32 bytes: 4×u64 LE words)
-//commitment      (48 raw bytes, big-endian compressed BLS12-381 G1)
-//y_claimed       (32 raw bytes, big-endian BLS12-381 Fr)
-//blob            (131072 bytes = 4096 × 32-byte big-endian cells)
+// KZGBLK!! (8 bytes LE magic)
+// processID       (32 bytes: 4×u64 LE words, converted from big-endian input)
+// rootHashBefore  (32 bytes: 4×u64 LE words)
+// commitment      (48 raw bytes, big-endian compressed BLS12-381 G1)
+// y_claimed       (32 raw bytes, big-endian BLS12-381 Fr)
+// blob            (131072 bytes = 4096 × 32-byte big-endian cells)
 func EncodeKZGBlock(d *KZGEvalData) ([]byte, error) {
-if len(d.Blob) != 4096*32 {
-return nil, fmt.Errorf("blob must be exactly 131072 bytes, got %d", len(d.Blob))
-}
-if len(d.ProcessID) > 32 {
-return nil, fmt.Errorf("processID too large: %d bytes", len(d.ProcessID))
-}
-if len(d.RootHashBefore) > 32 {
-return nil, fmt.Errorf("rootHashBefore too large: %d bytes", len(d.RootHashBefore))
-}
+	if len(d.Blob) != 4096*32 {
+		return nil, fmt.Errorf("blob must be exactly 131072 bytes, got %d", len(d.Blob))
+	}
+	if len(d.ProcessID) > 32 {
+		return nil, fmt.Errorf("processID too large: %d bytes", len(d.ProcessID))
+	}
+	if len(d.RootHashBefore) > 32 {
+		return nil, fmt.Errorf("rootHashBefore too large: %d bytes", len(d.RootHashBefore))
+	}
 
-// Build magic u64 from literal bytes (LE interpretation matching Rust b"KZGBLK!!")
-var magicU64 uint64
-for i := 0; i < 8; i++ {
-magicU64 |= uint64(kzgMagic[i]) << (8 * i)
-}
+	// Build magic u64 from literal bytes (LE interpretation matching Rust b"KZGBLK!!")
+	var magicU64 uint64
+	for i := 0; i < 8; i++ {
+		magicU64 |= uint64(kzgMagic[i]) << (8 * i)
+	}
 
-pid := beBytes32ToFrLE(d.ProcessID)
-rhb := beBytes32ToFrLE(d.RootHashBefore)
+	pid := beBytes32ToFrLE(d.ProcessID)
+	rhb := beBytes32ToFrLE(d.RootHashBefore)
 
-buf := appendU64(nil, magicU64)
-buf = appendFr(buf, pid)
-buf = appendFr(buf, rhb)
-buf = append(buf, d.Commitment[:]...)
-buf = append(buf, d.YClaimed[:]...)
-buf = append(buf, d.Blob...)
-return buf, nil
+	buf := appendU64(nil, magicU64)
+	buf = appendFr(buf, pid)
+	buf = appendFr(buf, rhb)
+	buf = append(buf, d.Commitment[:]...)
+	buf = append(buf, d.YClaimed[:]...)
+	buf = append(buf, d.Blob...)
+	return buf, nil
 }
 
 // beBytes32ToFrLE converts a big-endian byte slice (≤32 bytes) into the 4×u64
 // little-endian FrRaw representation used by the Rust circuit.
 // word[0] = least-significant 64 bits = bytes[24..32] read as a big-endian u64.
 func beBytes32ToFrLE(b []byte) [4]uint64 {
-var padded [32]byte
-if len(b) <= 32 {
-copy(padded[32-len(b):], b)
-} else {
-copy(padded[:], b[len(b)-32:])
-}
-var out [4]uint64
-out[0] = binary.BigEndian.Uint64(padded[24:32])
-out[1] = binary.BigEndian.Uint64(padded[16:24])
-out[2] = binary.BigEndian.Uint64(padded[8:16])
-out[3] = binary.BigEndian.Uint64(padded[0:8])
-return out
+	var padded [32]byte
+	if len(b) <= 32 {
+		copy(padded[32-len(b):], b)
+	} else {
+		copy(padded[:], b[len(b)-32:])
+	}
+	var out [4]uint64
+	out[0] = binary.BigEndian.Uint64(padded[24:32])
+	out[1] = binary.BigEndian.Uint64(padded[16:24])
+	out[2] = binary.BigEndian.Uint64(padded[8:16])
+	out[3] = binary.BigEndian.Uint64(padded[0:8])
+	return out
 }
 
 // cspMagic is "CSPBLK!!" in little-endian.

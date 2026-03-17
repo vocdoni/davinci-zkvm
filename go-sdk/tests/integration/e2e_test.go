@@ -6,16 +6,17 @@ package integration
 // scenario with interleaved fresh votes, first-time overwrites, and double
 // overwrites (same voter votes three times).
 // Phases verified per transition:
-//   1. Groth16 batch proof verification (ballot proofs + VK)
+//   1. davinci-stark ballot proof verification
 //   2. ECDSA signature verification (one per ballot)
 //   3. STATETX state transition (voteID / ballot / ResultsAdd / ResultsSub SMT ops)
 //   4. CENSUS lean-IMT Poseidon membership proofs
-//   5. REENCBLK BabyJubJub ElGamal re-encryption verification
+//   5. REG5BLK ecgfp5 ElGamal re-encryption verification
 //   6. KZGBLK EIP-4844 blob barycentric evaluation
 //
-// Batch layout (8 transitions): scale = VOTES_PER_BATCH / 4 (rounded down to power of 2).
+// Batch layout (8 transitions): scale = VOTES_PER_BATCH / 4 (rounded down to a power of 2).
 // Default VOTES_PER_BATCH=4 gives the historic layout (max 4 voters per batch).
-// Set VOTES_PER_BATCH=256 for full-scale batches of up to 256 voters.
+// The effective cap comes from DAVINCI_MAX_BATCH_SIZE, which must match the
+// input-gen/service/circuit build configuration.
 //   Batch 1:  2*scale fresh voters   (idx 0 .. 2s-1)
 //   Batch 2:  4*scale fresh voters   (idx 2s .. 6s-1)
 //   Batch 3:  2*scale overwrites     (idx 0 .. 2s-1 => 1st overwrite)
@@ -30,7 +31,9 @@ package integration
 //   - docker compose up -d --build (starts davinci-zkvm service)
 //   - DAVINCI_API_URL (default: http://localhost:8080)
 //   - DAVINCI_PROOF_TIMEOUT (default: 5m per ZisK proof)
-//   - VOTES_PER_BATCH (default: 4, max: 256)
+//   - VOTES_PER_BATCH (default: 4, capped by DAVINCI_MAX_BATCH_SIZE)
+//   - DAVINCI_MAX_BATCH_SIZE (default: 128, power of two)
+//   - DAVINCI_STARK_MAX_CONCURRENCY (default: 8)
 
 import (
 	"testing"
@@ -40,13 +43,14 @@ import (
 func TestFullE2E(t *testing.T) {
 	// Scale all batch sizes by VOTES_PER_BATCH / 4.
 	// With the default VOTES_PER_BATCH=4, scale=1 and sizes are unchanged.
-	// With VOTES_PER_BATCH=256, scale=64 and each batch has up to 256 voters.
+	// Larger values are capped to the configured max batch size.
 	votesPerBatch := votesPerBatchFromEnv()
 	scale := votesPerBatch / 4
 	if scale < 1 {
 		scale = 1
 	}
 	t.Logf("VOTES_PER_BATCH=%d => scale=%d (max batch size=%d)", votesPerBatch, scale, 4*scale)
+	t.Logf("max proofs per zkVM job=%d", maxProofsPerJobFromEnv())
 
 	// Batch layout
 	// Size: voters in this batch (must be power of two >= 2).
@@ -55,20 +59,20 @@ func TestFullE2E(t *testing.T) {
 	//   values differ from the originals, making the tally verifiable.
 	batches := []batchSpec{
 		// Phase A: initial fresh votes
-		{Size: 2 * scale, VoterStart: -1, SeedOffset: 0},          // batch 1: fresh
-		{Size: 4 * scale, VoterStart: -1, SeedOffset: 0},          // batch 2: fresh
+		{Size: 2 * scale, VoterStart: -1, SeedOffset: 0}, // batch 1: fresh
+		{Size: 4 * scale, VoterStart: -1, SeedOffset: 0}, // batch 2: fresh
 
 		// Phase B: first round of overwrites (interleaved with fresh)
-		{Size: 2 * scale, VoterStart: 0, SeedOffset: 7},           // batch 3: overwrite batch-1 voters (1st time)
-		{Size: 2 * scale, VoterStart: -1, SeedOffset: 0},          // batch 4: fresh
-		{Size: 4 * scale, VoterStart: -1, SeedOffset: 0},          // batch 5: fresh
+		{Size: 2 * scale, VoterStart: 0, SeedOffset: 7},  // batch 3: overwrite batch-1 voters (1st time)
+		{Size: 2 * scale, VoterStart: -1, SeedOffset: 0}, // batch 4: fresh
+		{Size: 4 * scale, VoterStart: -1, SeedOffset: 0}, // batch 5: fresh
 
 		// Phase C: more overwrites and double overwrite
-		{Size: 4 * scale, VoterStart: 2 * scale, SeedOffset: 7},   // batch 6: overwrite batch-2 voters (1st time)
-		{Size: 2 * scale, VoterStart: 0, SeedOffset: 13},          // batch 7: overwrite batch-1 voters (2nd time = 3rd vote)
+		{Size: 4 * scale, VoterStart: 2 * scale, SeedOffset: 7}, // batch 6: overwrite batch-2 voters (1st time)
+		{Size: 2 * scale, VoterStart: 0, SeedOffset: 13},        // batch 7: overwrite batch-1 voters (2nd time = 3rd vote)
 
 		// Phase D: final fresh votes after all overwrites
-		{Size: 2 * scale, VoterStart: -1, SeedOffset: 0},          // batch 8: fresh
+		{Size: 2 * scale, VoterStart: -1, SeedOffset: 0}, // batch 8: fresh
 	}
 
 	nFresh := freshVoterCount(batches)
@@ -87,23 +91,23 @@ func TestFullE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewElection(%d): %v", nFresh, err)
 	}
+	if err := election.ConfigureForStark(); err != nil {
+		t.Fatalf("ConfigureForStark: %v", err)
+	}
 	t.Logf("Election created with %d voters", nFresh)
 	t.Logf("  ProcessID:    %s", election.ProcessIDHex())
 	t.Logf("  Initial root: %s", election.OldRoot)
 
 	// 2. Service check
-	client := newClient()
-	if err := checkServiceURL(apiURL + "/jobs"); err != nil {
-		t.Skipf("davinci-zkvm service not available at %s: %v "+
-			"(start with 'docker compose up -d --build')", apiURL, err)
-	}
-	t.Logf("Service reachable at %s", apiURL)
+	client := requireCompatibleService(t)
+	t.Logf("Service compatible at %s", apiURL)
 
 	// 3. Run transitions
-	tally := NewTallyAccumulator()
 	voterOffset := 0
 	prevRoot := election.OldRoot
 	totalWall := time.Now()
+	overwritesSeen := 0
+	proofStepIdx := 0
 
 	for txIdx, spec := range batches {
 		isOverwrite := spec.VoterStart >= 0
@@ -120,95 +124,115 @@ func TestFullE2E(t *testing.T) {
 		if isOverwrite {
 			kind = "OVERWRITE"
 		}
-		t.Logf("Transition %d/%d [%s]: %d voters, seed=%d",
-			txIdx+1, nTransitions, kind, spec.Size, seedBase)
+		progress := batchProgressSummary(
+			spec,
+			voterOffset,
+			nFresh,
+			len(election.VotedBallotsG5),
+			overwritesSeen,
+		)
+		t.Logf("Transition %d/%d [%s]: batch=%d seed=%d created=%d overwrites=%d freshAssigned=%d/%d freshRemaining=%d netBallots=%d",
+			txIdx+1, nTransitions, kind, spec.Size, seedBase,
+			progress.Created, progress.Overwrites,
+			progress.FreshAssigned, nFresh, progress.FreshRemaining, progress.NetBallots)
 
-		start := time.Now()
+		chunks := chunkBatchSize(len(batchVoters))
+		totalChunkWall := time.Now()
+		totalProofInputs := 0
 
-		// (a) Generate ballot proofs.
-		batch, err := GenerateBallotBatch(election.ProcessID, election.EncKey, batchVoters, seedBase)
-		if err != nil {
-			t.Fatalf("tx %d: GenerateBallotBatch: %v", txIdx+1, err)
-		}
-		t.Logf("  Ballot proofs generated (%d) in %.1fs", spec.Size, time.Since(start).Seconds())
+		chunkStart := 0
+		for chunkIdx, chunkSize := range chunks {
+			chunkEnd := chunkStart + chunkSize
+			chunkVoters := batchVoters[chunkStart:chunkEnd]
+			chunkSeedBase := seedBase + int64(chunkStart)
+			start := time.Now()
 
-		// (b) Save old root for KZG derivation.
-		oldRoot := election.OldRoot
+			t.Logf("  Chunk %d/%d: proofs=%d seed=%d", chunkIdx+1, len(chunks), chunkSize, chunkSeedBase)
 
-		// Verify state root continuity: the current root must equal the
-		// previous transition's new root (or the initial root for tx 1).
-		if oldRoot != prevRoot {
-			t.Fatalf("tx %d: root discontinuity: expected %s, got %s", txIdx+1, prevRoot, oldRoot)
-		}
-
-		// (c) Build protocol blocks.
-		kzgBlock, err := election.BuildKZGBlock(txIdx, oldRoot)
-		if err != nil {
-			t.Fatalf("tx %d: BuildKZGBlock: %v", txIdx+1, err)
-		}
-		reencBlock, reencBallots, err := election.BuildReencBlock(batch.Results)
-		if err != nil {
-			t.Fatalf("tx %d: BuildReencBlock: %v", txIdx+1, err)
-		}
-		stateBlock, overwrittenBallots, err := election.BuildStateBlock(batchVoters, batch.Results, reencBallots)
-		if err != nil {
-			t.Fatalf("tx %d: BuildStateBlock: %v", txIdx+1, err)
-		}
-		censusProofs, err := election.BuildCensusProofs(batchVoters)
-		if err != nil {
-			t.Fatalf("tx %d: BuildCensusProofs: %v", txIdx+1, err)
-		}
-
-		// (d) Accumulate tally (add new, subtract old overwritten).
-		tally.Add(reencBallots)
-		if len(overwrittenBallots) > 0 {
-			tally.Subtract(overwrittenBallots)
-			t.Logf("  %d overwrite(s): subtracted old ballots from tally", len(overwrittenBallots))
-		}
-
-		// (e) Assemble and submit.
-		req := batch.ToProveRequest()
-		req.State = stateBlock
-		req.CensusProofs = censusProofs
-		req.Reencryption = reencBlock
-		req.KZG = kzgBlock
-
-		t.Logf("  Submitting to %s …", apiURL)
-		jobID, err := client.SubmitProve(req)
-		if err != nil {
-			t.Fatalf("tx %d: SubmitProve: %v", txIdx+1, err)
-		}
-		t.Logf("  Job %s submitted", jobID)
-
-		job, err := client.WaitForJob(jobID, proofTimeout())
-		if err != nil {
-			t.Fatalf("tx %d: WaitForJob %s: %v", txIdx+1, jobID, err)
-		}
-		elapsed := time.Since(start)
-		if job.ElapsedMs != nil {
-			t.Logf("  Done in %dms (proof) / %.1fs (wall)", *job.ElapsedMs, elapsed.Seconds())
-		} else {
-			t.Logf("  Done in %.1fs (wall)", elapsed.Seconds())
-		}
-		if job.Status != "done" {
-			errMsg := "<no error>"
-			if job.Error != nil {
-				errMsg = *job.Error
+			batch, err := GenerateStarkBallotBatch(election.ProcessID, election.StarkEncKeyHex, chunkVoters, chunkSeedBase)
+			if err != nil {
+				t.Fatalf("tx %d chunk %d: GenerateStarkBallotBatch: %v", txIdx+1, chunkIdx+1, err)
 			}
-			t.Fatalf("tx %d: job %s status=%q: %s", txIdx+1, jobID, job.Status, errMsg)
+			totalProofInputs += len(batch.StarkProofs)
+			t.Logf("    Ballot proofs generated (%d) in %.1fs", chunkSize, time.Since(start).Seconds())
+
+			oldRoot := election.OldRoot
+			if oldRoot != prevRoot {
+				t.Fatalf("tx %d chunk %d: root discontinuity: expected %s, got %s", txIdx+1, chunkIdx+1, prevRoot, oldRoot)
+			}
+
+			kzgBlock, err := election.BuildKZGBlock(proofStepIdx, oldRoot)
+			if err != nil {
+				t.Fatalf("tx %d chunk %d: BuildKZGBlock: %v", txIdx+1, chunkIdx+1, err)
+			}
+			reencBlock, reencBallots, err := election.BuildStarkReencBlock(batch.Results)
+			if err != nil {
+				t.Fatalf("tx %d chunk %d: BuildStarkReencBlock: %v", txIdx+1, chunkIdx+1, err)
+			}
+			stateBlock, overwrittenBallots, err := election.BuildStarkStateBlock(chunkVoters, batch.Results, reencBallots)
+			if err != nil {
+				t.Fatalf("tx %d chunk %d: BuildStarkStateBlock: %v", txIdx+1, chunkIdx+1, err)
+			}
+			censusProofs, err := election.BuildCensusProofs(chunkVoters)
+			if err != nil {
+				t.Fatalf("tx %d chunk %d: BuildCensusProofs: %v", txIdx+1, chunkIdx+1, err)
+			}
+
+			if len(overwrittenBallots) > 0 {
+				t.Logf("    %d overwrite(s): subtracted old ballots from tally", len(overwrittenBallots))
+			}
+			overwritesSeen += len(overwrittenBallots)
+			t.Logf("    State summary: distinctVotersCreated=%d overwrittenVotes=%d netBallots=%d proofInputs=%d",
+				voterOffset, overwritesSeen, len(election.VotedBallotsG5), len(batch.StarkProofs))
+
+			req := batch.ToProveRequest()
+			req.State = stateBlock
+			req.CensusProofs = censusProofs
+			req.Ecgfp5Reencryption = reencBlock
+			req.KZG = kzgBlock
+
+			t.Logf("    Submitting to %s …", apiURL)
+			jobID, err := client.SubmitProve(req)
+			if err != nil {
+				t.Fatalf("tx %d chunk %d: SubmitProve: %v", txIdx+1, chunkIdx+1, err)
+			}
+			t.Logf("    Job %s submitted", jobID)
+
+			job, err := client.WaitForJob(jobID, proofTimeout())
+			if err != nil {
+				t.Fatalf("tx %d chunk %d: WaitForJob %s: %v", txIdx+1, chunkIdx+1, jobID, err)
+			}
+			elapsed := time.Since(start)
+			if job.ElapsedMs != nil {
+				t.Logf("    Done in %dms (proof) / %.1fs (wall)", *job.ElapsedMs, elapsed.Seconds())
+			} else {
+				t.Logf("    Done in %.1fs (wall)", elapsed.Seconds())
+			}
+			if job.Status != "done" {
+				errMsg := "<no error>"
+				if job.Error != nil {
+					errMsg = *job.Error
+				}
+				t.Fatalf("tx %d chunk %d: job %s status=%q: %s", txIdx+1, chunkIdx+1, jobID, job.Status, errMsg)
+			}
+
+			prevRoot = election.OldRoot
+			t.Logf("    New root: %s", prevRoot)
+			proofStepIdx++
+			chunkStart = chunkEnd
 		}
 
-		prevRoot = election.OldRoot
-		t.Logf("  New root: %s", prevRoot)
+		t.Logf("  Logical transition completed in %.1fs across %d proof job(s) and %d proof inputs",
+			time.Since(totalChunkWall).Seconds(), len(chunks), totalProofInputs)
 	}
 
 	t.Logf("=== All %d transitions done in %.1fs; decrypting tally (%d net ballots) ===",
-		nTransitions, time.Since(totalWall).Seconds(), tally.count)
+		nTransitions, time.Since(totalWall).Seconds(), len(election.VotedBallotsG5))
 
 	// 4. Verify tally
-	fieldTotals, err := tally.DecryptTally(election.EncPrivKey)
+	fieldTotals, err := election.DecryptStarkTally(4096)
 	if err != nil {
-		t.Fatalf("DecryptTally: %v", err)
+		t.Fatalf("DecryptStarkTally: %v", err)
 	}
 
 	expected := expectedTally(batches)
@@ -216,23 +240,23 @@ func TestFullE2E(t *testing.T) {
 	allOK := true
 	for i, v := range fieldTotals {
 		marker := "✓"
-		if v.Int64() != expected[i] {
+		if int64(v) != expected[i] {
 			marker = "✗"
 			allOK = false
 		}
-		t.Logf("  field[%d] = %3s (expected %3d) %s", i, v.String(), expected[i], marker)
+		t.Logf("  field[%d] = %3d (expected %3d) %s", i, v, expected[i], marker)
 	}
 
 	// Fields 0-5: deterministic ballot values (must match exactly).
 	for i := 0; i < 6; i++ {
-		if fieldTotals[i].Int64() != expected[i] {
-			t.Errorf("field[%d]: got %s, want %d", i, fieldTotals[i].String(), expected[i])
+		if int64(fieldTotals[i]) != expected[i] {
+			t.Errorf("field[%d]: got %d, want %d", i, fieldTotals[i], expected[i])
 		}
 	}
 	// Fields 6-7: padding (must be zero).
 	for i := 6; i < 8; i++ {
-		if fieldTotals[i].Sign() != 0 {
-			t.Errorf("field[%d] (padding): got %s, want 0", i, fieldTotals[i].String())
+		if fieldTotals[i] != 0 {
+			t.Errorf("field[%d] (padding): got %d, want 0", i, fieldTotals[i])
 		}
 	}
 

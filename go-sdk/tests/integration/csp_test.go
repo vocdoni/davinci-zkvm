@@ -1,5 +1,5 @@
 // csp_test.go is the CSP ECDSA census integration test.
-// It creates a CSP-mode election (censusOrigin=4), generates ballot proofs,
+// It creates a CSP-mode election (censusOrigin=4), generates davinci-stark ballot proofs,
 // signs each voter with the CSP key, and submits 4 chained state transitions
 // (with overwrites in the last batch) to the running davinci-zkvm service.
 // Prerequisites:
@@ -21,10 +21,10 @@ func TestCSPChainedStateTransitions(t *testing.T) {
 		scale = 1
 	}
 	cspBatches := []batchSpec{
-		{2 * scale, -1, 0},  // batch 1: fresh voters
-		{2 * scale, -1, 0},  // batch 2: fresh voters
-		{2 * scale, -1, 0},  // batch 3: fresh voters
-		{2 * scale, 0, 7},   // batch 4: overwrite voters from batch 1
+		{2 * scale, -1, 0}, // batch 1: fresh voters
+		{2 * scale, -1, 0}, // batch 2: fresh voters
+		{2 * scale, -1, 0}, // batch 3: fresh voters
+		{2 * scale, 0, 7},  // batch 4: overwrite voters from batch 1
 	}
 
 	nFresh := freshVoterCount(cspBatches)
@@ -36,18 +36,15 @@ func TestCSPChainedStateTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCSPElection: %v", err)
 	}
+	if err := election.ConfigureForStark(); err != nil {
+		t.Fatalf("ConfigureForStark: %v", err)
+	}
 	t.Logf("CSP election created; initial state root: %s", election.OldRoot)
 	t.Logf("CSP address: 0x%040x", election.CspKey.PublicKey.X)
 
-	client := newClient()
-	if err := checkServiceURL(apiURL + "/jobs"); err != nil {
-		t.Skipf("davinci-zkvm service not available at %s: %v (start with 'docker compose up -d --build')", apiURL, err)
-	}
+	client := requireCompatibleService(t)
 
-	// 2. Tally accumulator
-	tally := NewTallyAccumulator()
-
-	// 3. Run CSP transitions
+	// 2. Run CSP transitions
 	voterOffset := 0
 	for txIdx, spec := range cspBatches {
 		batchSize := spec.Size
@@ -65,11 +62,11 @@ func TestCSPChainedStateTransitions(t *testing.T) {
 
 		start := time.Now()
 
-		// Generate ballot proofs (same as Merkle mode).
+		// Generate ballot proofs.
 		t.Logf("  Generating %d ballot proofs...", batchSize)
-		batch, err := GenerateBallotBatch(election.ProcessID, election.EncKey, batchVoters, seedBase)
+		batch, err := GenerateStarkBallotBatch(election.ProcessID, election.StarkEncKeyHex, batchVoters, seedBase)
 		if err != nil {
-			t.Fatalf("transition %d: GenerateBallotBatch: %v", txIdx, err)
+			t.Fatalf("transition %d: GenerateStarkBallotBatch: %v", txIdx, err)
 		}
 		t.Logf("  Ballot proofs generated in %.1fs", time.Since(start).Seconds())
 
@@ -82,15 +79,15 @@ func TestCSPChainedStateTransitions(t *testing.T) {
 		}
 
 		// Build re-encryption block.
-		reencBlock, reencBallots, err := election.BuildReencBlock(batch.Results)
+		reencBlock, reencBallots, err := election.BuildStarkReencBlock(batch.Results)
 		if err != nil {
-			t.Fatalf("transition %d: BuildReencBlock: %v", txIdx, err)
+			t.Fatalf("transition %d: BuildStarkReencBlock: %v", txIdx, err)
 		}
 
 		// Build state-transition block (advances election.OldRoot).
-		stateBlock, overwrittenBallots, err := election.BuildStateBlock(batchVoters, batch.Results, reencBallots)
+		stateBlock, overwrittenBallots, err := election.BuildStarkStateBlock(batchVoters, batch.Results, reencBallots)
 		if err != nil {
-			t.Fatalf("transition %d: BuildStateBlock: %v", txIdx, err)
+			t.Fatalf("transition %d: BuildStarkStateBlock: %v", txIdx, err)
 		}
 
 		// Build CSP proofs (instead of census membership proofs).
@@ -99,18 +96,15 @@ func TestCSPChainedStateTransitions(t *testing.T) {
 			t.Fatalf("transition %d: BuildCspData: %v", txIdx, err)
 		}
 
-		// Accumulate tally.
-		tally.Add(reencBallots)
 		if len(overwrittenBallots) > 0 {
-			tally.Subtract(overwrittenBallots)
-			t.Logf("  %d overwrite(s) detected; subtracted from tally", len(overwrittenBallots))
+			t.Logf("  %d overwrite(s) detected", len(overwrittenBallots))
 		}
 
 		// Assemble the full ProveRequest.
 		req := batch.ToProveRequest()
 		req.State = stateBlock
 		req.CspData = cspData
-		req.Reencryption = reencBlock
+		req.Ecgfp5Reencryption = reencBlock
 		req.KZG = kzgBlock
 
 		// Submit to the service.
@@ -143,30 +137,30 @@ func TestCSPChainedStateTransitions(t *testing.T) {
 		t.Logf("  New state root: %s", election.OldRoot)
 	}
 
-	// 4. Verify tally
+	// 3. Verify tally
 	t.Logf("=== All %d CSP transitions done; decrypting tally (%d net ballots) ===",
-		len(cspBatches), tally.count)
+		len(cspBatches), len(election.VotedBallotsG5))
 
-	fieldTotals, err := tally.DecryptTally(election.EncPrivKey)
+	fieldTotals, err := election.DecryptStarkTally(2048)
 	if err != nil {
-		t.Fatalf("DecryptTally: %v", err)
+		t.Fatalf("DecryptStarkTally: %v", err)
 	}
 
 	expected := expectedTally(cspBatches)
 
 	t.Logf("Vote tally (field totals vs expected):")
 	for i, v := range fieldTotals {
-		t.Logf("  field[%d] = %s (expected %d)", i, v.String(), expected[i])
+		t.Logf("  field[%d] = %d (expected %d)", i, v, expected[i])
 	}
 
 	for i := 0; i < 6; i++ {
-		if fieldTotals[i].Int64() != expected[i] {
-			t.Errorf("field[%d]: got %s, want %d", i, fieldTotals[i].String(), expected[i])
+		if int64(fieldTotals[i]) != expected[i] {
+			t.Errorf("field[%d]: got %d, want %d", i, fieldTotals[i], expected[i])
 		}
 	}
 	for i := 6; i < 8; i++ {
-		if fieldTotals[i].Sign() != 0 {
-			t.Errorf("field[%d] (padding): got %s, want 0", i, fieldTotals[i].String())
+		if fieldTotals[i] != 0 {
+			t.Errorf("field[%d] (padding): got %d, want 0", i, fieldTotals[i])
 		}
 	}
 	t.Logf("Final state root: %s", election.OldRoot)

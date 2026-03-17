@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-ZISK_VERSION="${ZISK_VERSION:-v0.15.0}"
+ZISK_VERSION="${ZISK_VERSION:-v0.16.0}"
 ZISK_REPO="${ZISK_REPO:-https://github.com/0xPolygonHermez/zisk.git}"
 ZISK_SRC="${ZISK_SRC:-$HOME/zisk}"
 ZISK_HOME="${ZISK_HOME:-$HOME/.zisk}"
@@ -31,6 +31,24 @@ warn() {
   echo "[install][warn] $*" >&2
 }
 
+is_ubuntu_host() {
+  [[ -r /etc/os-release ]] || return 1
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  [[ "${ID:-}" == "ubuntu" ]]
+}
+
+missing_apt_packages() {
+  local missing=()
+  local pkg
+  for pkg in "$@"; do
+    if ! dpkg-query -W -f='${Status}\n' "$pkg" 2>/dev/null | grep -q '^install ok installed$'; then
+      missing+=("$pkg")
+    fi
+  done
+  printf '%s\n' "${missing[@]}"
+}
+
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "[install][error] Missing required command: $1" >&2
@@ -39,6 +57,28 @@ need_cmd() {
 }
 
 install_system_deps() {
+  local required_packages=(
+    ca-certificates
+    curl
+    git
+    build-essential
+    pkg-config
+    libssl-dev
+    cmake
+    libgmp-dev
+    nlohmann-json3-dev
+    libsodium-dev
+    libopenmpi-dev
+    libomp-dev
+    nasm
+    libclang-dev
+    clang
+    protobuf-compiler
+    libprotobuf-dev
+    openmpi-bin
+    openmpi-common
+    libgomp1
+  )
   local want_install=0
   case "$INSTALL_SYSTEM_DEPS" in
     1|true|yes) want_install=1 ;;
@@ -62,6 +102,20 @@ install_system_deps() {
     warn "apt-get not available; skipping system packages."
     return 0
   fi
+  if ! command -v dpkg-query >/dev/null 2>&1; then
+    warn "dpkg-query not available; skipping package detection and apt install."
+    return 0
+  fi
+  if ! is_ubuntu_host; then
+    warn "Host is not Ubuntu; skipping apt package installation."
+    return 0
+  fi
+
+  mapfile -t missing_packages < <(missing_apt_packages "${required_packages[@]}")
+  if [[ "${#missing_packages[@]}" -eq 0 ]]; then
+    log "All required Ubuntu packages are already installed."
+    return 0
+  fi
 
   local apt_prefix=""
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
@@ -73,29 +127,9 @@ install_system_deps() {
     fi
   fi
 
-  log "Installing Ubuntu packages required by Dockerfile.cuda and local GPU proving..."
+  log "Installing missing Ubuntu packages required by Dockerfile.cuda and local GPU proving..."
   ${apt_prefix} apt-get update
-  ${apt_prefix} apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    git \
-    build-essential \
-    pkg-config \
-    libssl-dev \
-    cmake \
-    libgmp-dev \
-    nlohmann-json3-dev \
-    libsodium-dev \
-    libopenmpi-dev \
-    libomp-dev \
-    nasm \
-    libclang-dev \
-    clang \
-    protobuf-compiler \
-    libprotobuf-dev \
-    openmpi-bin \
-    openmpi-common \
-    libgomp1
+  ${apt_prefix} apt-get install -y --no-install-recommends "${missing_packages[@]}"
 }
 
 ensure_path() {
@@ -220,11 +254,31 @@ build_davinci_bins() {
   fi
 }
 
+build_circuit_elf() {
+  log "Building fresh zkVM circuit ELF from current sources"
+  (
+    cd "$REPO_ROOT/circuit"
+    "$ZISK_BIN_DIR/cargo-zisk" build --release
+  )
+
+  local built_elf="$REPO_ROOT/circuit/target/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-circuit"
+  local published_elf="$REPO_ROOT/circuit/elf/circuit.elf"
+  mkdir -p "$(dirname "$published_elf")"
+  cp "$built_elf" "$published_elf"
+  chmod +x "$published_elf"
+  log "Updated circuit ELF at $published_elf"
+}
+
 SETUP_BUCKET="${SETUP_BUCKET:-https://storage.googleapis.com/zisk-setup}"
 
 setup_proving_key() {
   local need_download=0
+  local required_file="$PROVING_KEY_PATH/zisk/vadcop_final_compressed/vadcop_final_compressed.starkinfo.json"
   if [[ ! -d "$PROVING_KEY_PATH" ]]; then
+    need_download=1
+  fi
+  if [[ -d "$PROVING_KEY_PATH" && ! -f "$required_file" ]]; then
+    warn "Existing proving key at $PROVING_KEY_PATH is incompatible with ZisK $ZISK_VERSION (missing $(basename "$required_file"))."
     need_download=1
   fi
   if [[ "$FORCE_SETUP_DOWNLOAD" == "1" ]]; then
@@ -237,7 +291,7 @@ setup_proving_key() {
   fi
 
   if [[ "$need_download" -ne 1 ]]; then
-    log "Proving key already present at $PROVING_KEY_PATH (skip download)"
+    log "Proving key already present at $PROVING_KEY_PATH and compatible with ZisK $ZISK_VERSION (skip download)"
     return 0
   fi
 
@@ -348,6 +402,7 @@ main() {
   install_zisk_artifacts
   install_zisk_toolchain
   build_davinci_bins
+  build_circuit_elf
   setup_proving_key
   setup_const_trees
   mkdir -p "$PROOF_OUTPUT_DIR"
@@ -368,4 +423,6 @@ In another terminal:
 EOF2
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

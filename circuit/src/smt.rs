@@ -14,8 +14,10 @@
 
 use crate::hash::sha256_once;
 use crate::io::ParsedInput;
-use crate::types::{FrRaw, SmtTransition, ZERO_FR,
-    FAIL_SMT_VOTEID, FAIL_SMT_BALLOT, FAIL_SMT_RESULTS, FAIL_SMT_PROCESS};
+use crate::types::{
+    FAIL_SMT_BALLOT, FAIL_SMT_PROCESS, FAIL_SMT_RESULTS, FAIL_SMT_VOTEID, FrRaw, SmtTransition,
+    ZERO_FR,
+};
 
 // Byte-order helpers
 
@@ -71,7 +73,9 @@ fn switcher(sel: bool, l: FrRaw, r: FrRaw) -> (FrRaw, FrRaw) {
 fn get_bit(key: &FrRaw, level: usize) -> bool {
     let word_idx = level / 64;
     let bit_idx = level % 64;
-    if word_idx >= 4 { return false; }
+    if word_idx >= 4 {
+        return false;
+    }
     (key[word_idx] >> bit_idx) & 1 == 1
 }
 
@@ -88,7 +92,11 @@ fn lev_ins_flag(siblings: &[FrRaw], enabled: bool) -> (bool, Vec<bool>) {
     }
     if n == 1 {
         // Single-level tree: levIns[0] = 1 always.
-        let valid = if enabled { siblings[0] == [0u64; 4] } else { true };
+        let valid = if enabled {
+            siblings[0] == [0u64; 4]
+        } else {
+            true
+        };
         return (valid, vec![true]);
     }
 
@@ -113,7 +121,11 @@ fn lev_ins_flag(siblings: &[FrRaw], enabled: bool) -> (bool, Vec<bool>) {
     // Validity: leaf-level sibling must be 0, and exactly one levIns is set.
     let leaf_zero_ok = is_zero[n - 1];
     let one_hot = lev_ins.iter().filter(|&&x| x).count() == 1;
-    let valid = if enabled { leaf_zero_ok && one_hot } else { true };
+    let valid = if enabled {
+        leaf_zero_ok && one_hot
+    } else {
+        true
+    };
 
     (valid, lev_ins)
 }
@@ -253,14 +265,29 @@ pub fn verify_transition(t: &SmtTransition) -> bool {
         let (top, old0, bot, new1, na, upd) = if i == 0 {
             // Initial state: top=enabled, na=1-enabled, rest=0.
             processor_sm(
-                xors[i], is0, lev_ins[i] as u8, fnc0,
-                enabled_u, 0, 0, 0, 1 - enabled_u, 0,
+                xors[i],
+                is0,
+                lev_ins[i] as u8,
+                fnc0,
+                enabled_u,
+                0,
+                0,
+                0,
+                1 - enabled_u,
+                0,
             )
         } else {
             processor_sm(
-                xors[i], is0, lev_ins[i] as u8, fnc0,
-                st_top_v[i-1], st_old0_v[i-1], st_bot_v[i-1],
-                st_new1_v[i-1], st_na_v[i-1], st_upd_v[i-1],
+                xors[i],
+                is0,
+                lev_ins[i] as u8,
+                fnc0,
+                st_top_v[i - 1],
+                st_old0_v[i - 1],
+                st_bot_v[i - 1],
+                st_new1_v[i - 1],
+                st_na_v[i - 1],
+                st_upd_v[i - 1],
             )
         };
         st_top_v[i] = top;
@@ -291,10 +318,17 @@ pub fn verify_transition(t: &SmtTransition) -> bool {
         };
         let new_lr_bit = get_bit(&t.new_key, i);
         let (or, nr) = processor_level(
-            st_top_v[i], st_old0_v[i], st_bot_v[i], st_new1_v[i], st_upd_v[i],
-            &t.siblings[i], &hash1_old, &hash1_new,
+            st_top_v[i],
+            st_old0_v[i],
+            st_bot_v[i],
+            st_new1_v[i],
+            st_upd_v[i],
+            &t.siblings[i],
+            &hash1_old,
+            &hash1_new,
             new_lr_bit,
-            &old_child, &new_child,
+            &old_child,
+            &new_child,
         );
         levels_old_root[i] = or;
         levels_new_root[i] = nr;
@@ -338,7 +372,9 @@ pub fn verify_chain(
     if transitions.is_empty() {
         // Empty chain: old root must equal new root.
         let ok = declared_old == declared_new;
-        if !ok { *fail_mask |= fail_flag; }
+        if !ok {
+            *fail_mask |= fail_flag;
+        }
         return ok;
     }
 
@@ -378,10 +414,7 @@ pub fn verify_chain(
 /// Returns `(ok, old_root, new_root, voters, overwritten)`.
 /// `old_root` and `new_root` are the full 256-bit Arbo SHA-256 roots as `FrRaw`.
 /// When no state block is present, returns `(true, ZERO, ZERO, 0, 0)` => absence is not a failure.
-pub fn verify_state(
-    parsed: &ParsedInput,
-    fail_mask: &mut u32,
-) -> (bool, FrRaw, FrRaw, u64, u64) {
+pub fn verify_state(parsed: &ParsedInput, fail_mask: &mut u32) -> (bool, FrRaw, FrRaw, u64, u64) {
     let state = match &parsed.state {
         None => {
             *fail_mask |= crate::types::FAIL_MISSING_BLOCK;
@@ -409,7 +442,9 @@ pub fn verify_state(
     // In the SMT Processor, an UPDATE operation has fnc0=false, fnc1=true.
     // Each ballot UPDATE corresponds to an overwritten vote. The declared
     // n_overwritten must match the actual count.
-    let actual_overwrites = state.ballot_chain.iter()
+    let actual_overwrites = state
+        .ballot_chain
+        .iter()
         .filter(|t| !t.fnc0 && t.fnc1)
         .count();
     if actual_overwrites != state.n_overwritten {
@@ -557,5 +592,11 @@ pub fn verify_state(
     let old = state.old_state_root;
     let new = state.new_state_root;
 
-    (ok, old, new, state.n_voters as u64, state.n_overwritten as u64)
+    (
+        ok,
+        old,
+        new,
+        state.n_voters as u64,
+        state.n_overwritten as u64,
+    )
 }
