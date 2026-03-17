@@ -388,6 +388,7 @@ mod tests {
             zisk_aggregation: false,
             zisk_verify_proofs: false,
             zisk_use_emulator: false,
+            ballot_aggregation: false,
         };
         let task = ProveTask {
             job_id: Uuid::nil(),
@@ -419,6 +420,7 @@ mod tests {
             zisk_aggregation: true,
             zisk_verify_proofs: true,
             zisk_use_emulator: true,
+            ballot_aggregation: false,
         };
         let task = ProveTask {
             job_id: Uuid::nil(),

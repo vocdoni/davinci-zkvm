@@ -7,9 +7,10 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use davinci_zkvm_input_gen::stark_types::StarkProofBundle;
 use davinci_zkvm_input_gen::{
     address_hex_to_fr_le, be_hex32_to_fr_le, census_proof_from_hex, generate_stark_input,
-    wrap_for_zisk_vm, write_census_block, write_csp_block, write_kzg_block, write_reenc_block_g5,
-    write_state_block, CspBlockData, CspEntryData, Ecgfp5BallotProofData, Ecgfp5CiphertextData,
-    Ecgfp5ReencEntryData, KzgData, SmtEntry, StateData,
+    generate_stark_input_aggregated, wrap_for_zisk_vm, write_census_block, write_csp_block,
+    write_kzg_block, write_reenc_block_g5, write_state_block, CspBlockData, CspEntryData,
+    Ecgfp5BallotProofData, Ecgfp5CiphertextData, Ecgfp5ReencEntryData, KzgData, SmtEntry,
+    StateData,
 };
 use tracing::{debug, error, info, warn};
 
@@ -21,6 +22,7 @@ fn build_zisk_input_bytes(
     csp_json: Option<crate::types::CspDataJson>,
     reenc_g5_json: Option<crate::types::Ecgfp5ReencryptionDataJson>,
     kzg_json: Option<crate::types::KzgEvalJson>,
+    ballot_aggregation: bool,
 ) -> anyhow::Result<Vec<u8>> {
     let bundles = stark_proofs
         .iter()
@@ -37,7 +39,11 @@ fn build_zisk_input_bytes(
             StarkProofBundle::decode_wire(&wire)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let mut bytes = generate_stark_input(&bundles, &sigs)?;
+    let mut bytes = if ballot_aggregation {
+        generate_stark_input_aggregated(&bundles, &sigs)?
+    } else {
+        generate_stark_input(&bundles, &sigs)?
+    };
 
     if let Some(st) = state_json {
         let sd = StateData {
@@ -241,6 +247,11 @@ pub async fn submit_prove(
     let csp_json = req.csp_data.clone();
     let reenc_g5_json = req.ecgfp5_reencryption.clone();
     let kzg_json = req.kzg.clone();
+    let ballot_aggregation = state.config.ballot_aggregation;
+
+    if ballot_aggregation {
+        info!("Ballot aggregation enabled — STARK proof bytes will be stripped from guest input");
+    }
 
     let input_bytes = match tokio::task::spawn_blocking(move || {
         build_zisk_input_bytes(
@@ -251,6 +262,7 @@ pub async fn submit_prove(
             csp_json,
             reenc_g5_json,
             kzg_json,
+            ballot_aggregation,
         )
     }).await {
         Ok(Ok(bytes)) => { debug!("Input generation succeeded: {} bytes", bytes.len()); bytes }
@@ -327,6 +339,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 

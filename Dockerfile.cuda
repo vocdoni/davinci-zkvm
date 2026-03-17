@@ -27,10 +27,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Rust toolchain
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
-    -y --default-toolchain stable --profile minimal
+    -y --default-toolchain 1.85.0 --profile minimal
 ENV PATH="/root/.cargo/bin:$PATH"
 
-ARG ZISK_VERSION=v0.15.0
+ARG ZISK_VERSION=v0.16.0
 
 # Clone ZisK source at the pinned version and build with GPU support
 RUN git clone --depth 1 --branch ${ZISK_VERSION} \
@@ -46,6 +46,8 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     bash -c 'set -euo pipefail; cargo build --release --features gpu 2>&1 | tee /tmp/build.log'
 
+RUN /src/zisk/target/release/cargo-zisk sdk install-toolchain
+
 # ── Stage 2: Build the Rust service ───────────────────────────────────────────
 FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04 AS service-builder
 
@@ -60,43 +62,72 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
-    -y --default-toolchain stable --profile minimal
+    -y --default-toolchain 1.85.0 --profile minimal
 ENV PATH="/root/.cargo/bin:$PATH"
 
-WORKDIR /build
+WORKDIR /build/davinci-zkvm
 
-COPY Cargo.toml Cargo.lock ./
-COPY input-gen/Cargo.toml input-gen/Cargo.toml
-COPY service/Cargo.toml service/Cargo.toml
+COPY davinci-zkvm/Cargo.toml davinci-zkvm/Cargo.lock ./
+COPY davinci-zkvm/input-gen/Cargo.toml input-gen/Cargo.toml
+COPY davinci-zkvm/service/Cargo.toml service/Cargo.toml
 
-RUN mkdir -p input-gen/src input-gen/src/bin service/src && \
+# Remove recursion-aggregator from workspace (it has complex path deps not needed for the service)
+RUN sed -i '/"recursion-aggregator",/d' Cargo.toml
+
+RUN mkdir -p input-gen/src service/src && \
     echo 'pub fn placeholder() {}' > input-gen/src/lib.rs && \
-    echo 'fn main() {}' > input-gen/src/bin/gen-input.rs && \
     echo 'fn main() {}' > service/src/main.rs
 
 RUN cargo build --release -p davinci-zkvm-service -p davinci-zkvm-input-gen 2>&1 || true
 RUN rm -rf input-gen/src service/src
 
-COPY input-gen/src input-gen/src
-COPY service/src service/src
+COPY davinci-zkvm/input-gen/src input-gen/src
+COPY davinci-zkvm/service/src service/src
 
 # Invalidate fingerprints so cargo rebuilds the real crates
 RUN find target/release/.fingerprint -maxdepth 1 -name "davinci*" -exec rm -rf {} + 2>/dev/null || true
 
+# Ensure recursion-aggregator is still excluded (Cargo.toml was modified in cache layer)
+RUN sed -i '/"recursion-aggregator",/d' Cargo.toml 2>/dev/null || true
+
 RUN cargo build --release -p davinci-zkvm-service -p davinci-zkvm-input-gen
 
-# ── Stage 3: CUDA runtime image ───────────────────────────────────────────────
+# ── Stage 3: Build the zkVM circuit ELF from source ──────────────────────────
+FROM cuda-builder AS circuit-builder
+
+WORKDIR /build
+
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY src src
+COPY vendor vendor
+COPY davinci-zkvm/input-gen/Cargo.toml davinci-zkvm/input-gen/Cargo.toml
+COPY davinci-zkvm/input-gen/src davinci-zkvm/input-gen/src
+COPY davinci-zkvm/circuit/Cargo.toml davinci-zkvm/circuit/Cargo.toml
+COPY davinci-zkvm/circuit/Cargo.lock davinci-zkvm/circuit/Cargo.lock
+COPY davinci-zkvm/circuit/src davinci-zkvm/circuit/src
+
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    cd /build/davinci-zkvm/circuit && /src/zisk/target/release/cargo-zisk build --release
+
+# ── Stage 4: CUDA runtime image ───────────────────────────────────────────────
 FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    make \
+    gcc \
+    g++ \
+    binutils \
+    libc6-dev \
     libssl3 \
     libgomp1 \
     libsodium23 \
     libopenmpi3 \
     openmpi-bin \
     openmpi-common \
+    libgmp-dev \
     libomp5-18 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -108,15 +139,21 @@ RUN mkdir -p /root/.zisk/bin && \
 
 # Copy GPU-enabled cargo-zisk
 COPY --from=cuda-builder /src/zisk/target/release/cargo-zisk /usr/local/bin/cargo-zisk
-# libzisk_witness.so may not exist in all builds; copy if present
-RUN --mount=from=cuda-builder,source=/src/zisk/target/release,target=/zisk-build \
-    cp /zisk-build/libzisk_witness.so /usr/local/lib/libzisk_witness.so 2>/dev/null || true
+COPY --from=cuda-builder /src/zisk/emulator-asm /root/.zisk/zisk/emulator-asm
+COPY --from=cuda-builder /src/zisk/lib-c /root/.zisk/zisk/lib-c
+COPY --from=cuda-builder /src/zisk/target/release/libziskclib.a /root/.zisk/bin/libziskclib.a
+# libzisk_witness.so output location varies across cargo/zisk builds.
+RUN --mount=from=cuda-builder,source=/src/zisk/target,target=/zisk-target \
+    bash -c 'lib="$(find /zisk-target -name libzisk_witness.so -print -quit)"; \
+             if [ -n "$lib" ]; then cp "$lib" /usr/local/lib/libzisk_witness.so; fi'
 
 # Copy service binary
-COPY --from=service-builder /build/target/release/davinci-zkvm /app/davinci-zkvm
+COPY --from=service-builder /build/davinci-zkvm/target/release/davinci-zkvm /app/davinci-zkvm
 
-# Copy pre-built circuit ELF
-COPY circuit/elf/circuit.elf /app/circuit.elf
+# Copy fresh circuit ELF built from the current sources
+COPY --from=circuit-builder \
+    /build/davinci-zkvm/circuit/target/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-circuit \
+    /app/circuit.elf
 
 ENV LISTEN_ADDR=0.0.0.0:8080
 ENV PROVING_KEY_PATH=/proving-key
@@ -134,27 +171,7 @@ ENV OMPI_MCA_btl_smcuda_use_cuda_ipc=0
 ENV OMPI_ALLOW_RUN_AS_ROOT=1
 ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 
-# Check-setup entrypoint: build GPU constant trees if missing, warm up CUDA, then start service
-COPY <<'EOF' /app/entrypoint.sh
-#!/bin/bash
-set -e
-
-# Build constant trees if not present (GPU-specific format: .consttree_gpu)
-CONSTTREE_CHECK="${PROVING_KEY_PATH}/zisk/Zisk/airs/ArithEq/compressor/compressor.consttree_gpu"
-CONSTTREE_CHECK_CPU="${PROVING_KEY_PATH}/zisk/Zisk/airs/ArithEq/compressor/compressor.consttree"
-if [ ! -f "${CONSTTREE_CHECK}" ] && [ ! -f "${CONSTTREE_CHECK_CPU}" ]; then
-    echo "=== Constant trees not found. Running check-setup (this may take a while) ==="
-    /usr/local/bin/cargo-zisk check-setup --proving-key "${PROVING_KEY_PATH}" -a
-fi
-
-# GPU warmup: run check-setup (basic, no -a) to initialize CUDA twiddle factors
-# and force the NVIDIA driver to create a stable device context before serving.
-# This prevents the "context is destroyed" cold-start race on the first prove call.
-echo "=== GPU warmup: initializing CUDA context ==="
-/usr/local/bin/cargo-zisk check-setup --proving-key "${PROVING_KEY_PATH}" 2>/dev/null || true
-
-exec /app/davinci-zkvm "$@"
-EOF
+COPY davinci-zkvm/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 8080

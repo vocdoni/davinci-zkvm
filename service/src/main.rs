@@ -1,7 +1,8 @@
-//! davinci-zkvm: ZisK proof service for batched Groth16 BN254 verification
+//! davinci-zkvm: ZisK proof service for batched DAVINCI ballot verification
 //!
 //! Starts an HTTP server that accepts POST /prove requests, queues proving jobs,
-//! and serves the resulting ZisK proofs.
+//! and serves the resulting ZisK proofs. The active production ballot path is
+//! `davinci-stark` plus ecgfp5 state-transition data.
 
 mod api;
 mod config;
@@ -35,6 +36,18 @@ async fn main() -> anyhow::Result<()> {
             config.proving_key_path
         );
     }
+    let required_setup = config
+        .proving_key_path
+        .join("zisk/vadcop_final_compressed/vadcop_final_compressed.starkinfo.json");
+    if !required_setup.exists() {
+        anyhow::bail!(
+            "Incompatible ZisK proving key at {:?}: missing {:?}. \
+             The current ZisK runtime requires the compressed VADCOP final setup. \
+             Re-run 'make setup' (or './install.sh' with FORCE_SETUP_DOWNLOAD=1) and rebuild/restart the service/container.",
+            config.proving_key_path,
+            required_setup
+        );
+    }
     if !config.circuit_elf_path.exists() {
         anyhow::bail!(
             "Circuit ELF not found at {:?}. Set CIRCUIT_ELF_PATH env var.",
@@ -49,15 +62,27 @@ async fn main() -> anyhow::Result<()> {
     info!("  proving key:   {:?}", config.proving_key_path);
     info!("  circuit ELF:   {:?}", config.circuit_elf_path);
     info!("  cargo-zisk:    {}", config.cargo_zisk_bin);
+    info!("  zisk version:  {}", config.cargo_zisk_version);
     info!(
         "  zisk mpi:      procs={}, threads={}, bind-to={}",
         config.zisk_mpi_procs, config.zisk_mpi_threads, config.zisk_mpi_bind_to
+    );
+    info!(
+        "  zisk prove:    useEmulator={}, aggregation={}, verifyProofs={}",
+        config.zisk_use_emulator, config.zisk_aggregation, config.zisk_verify_proofs
+    );
+    info!(
+        "  ballot aggregation: {}",
+        if config.ballot_aggregation { "enabled (STARK proofs stripped from guest input)" } else { "disabled" }
     );
     info!("  proof output:  {:?}", config.proof_output_dir);
     info!("  listen:        {}", config.listen_addr);
 
     let prover = Arc::new(ProverHandle::new(config.clone()));
-    let state = AppState { config: config.clone(), prover };
+    let state = AppState {
+        config: config.clone(),
+        prover,
+    };
     let app = router(state);
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
