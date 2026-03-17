@@ -25,31 +25,33 @@ old root, new root, voter counts, census root, blob commitment limbs, and a fail
 When `BALLOT_AGGREGATION=1`, the service strips individual ballot STARK proof
 bytes from the guest input. The ZisK guest skips STARK verification and runs
 only the lightweight checks (ECDSA, census, SMT, binding, re-encryption). This
-yields ~3x faster proof times (e.g. ~23s vs ~76s for 4 ballots).
+yields ~3x faster proof times (e.g. ~68s vs ~76s for 32 ballots).
 
 The `recursion-aggregator/` crate provides CPU-side Plonky3-recursion
-aggregation that folds N ballot proofs into a single batch-STARK proof. The
-outer verifier checks both the aggregated proof and the ZisK proof.
+aggregation that folds N ballot proofs into a single batch-STARK proof. A bug
+in the Plonky3-recursion library's handling of HidingFriPcs + Goldilocks D=2
+recursive verification was [identified and fixed](Plonky3-recursion/recursion/src/verifier/stark.rs)
+(the uni-STARK circuit verifier was missing FRI random codeword opened values
+from the Fiat-Shamir transcript). All aggregation tests now pass.
 
 ### Benchmarks
 
 ZisK proof times with `BALLOT_AGGREGATION=1` on an RTX 5090 GPU (ZisK v0.16.0).
 All times are proof-only (excludes ballot generation and network overhead).
-The per-ballot marginal cost is ~1.6s with a ~18s fixed overhead.
+Each ZisK job processes up to 32 ballots; the per-ballot marginal cost is
+~1.1s (fresh) / ~1.6s (overwrites) with a ~18s fixed overhead.
 
 | Ballots per job | Proof time (fresh) | Proof time (overwrites) | Throughput |
 |----------------:|-------------------:|------------------------:|-----------:|
-| 2               | ~20s               | —                       | 0.10 b/s   |
-| 4               | ~23s               | —                       | 0.17 b/s   |
-| 64              | ~118s              | ~148s                   | 0.54 b/s   |
-| 128             | ~222s              | ~278s                   | 0.58 b/s   |
-| 256 (2×128)     | ~445s              | —                       | 0.58 b/s   |
-| 512 (4×128)     | ~890s              | —                       | 0.58 b/s   |
+| 32              | ~68s               | ~83s                    | 0.47 b/s   |
+| 64 (2×32)       | ~137s              | ~166s                   | 0.47 b/s   |
+| 128 (4×32)      | ~274s              | ~333s                   | 0.47 b/s   |
 
-> **Note**: The current compiled `MAX_BATCH_SIZE=128`, so batches >128 are split
-> into sequential 128-ballot jobs. The 256 and 512 rows are measured by summing
-> sequential 128-batch jobs from the E2E test suite. Overwrite transitions are
-> heavier because they include result-subtraction SMT operations.
+> **Note**: The current compiled `MAX_BATCH_SIZE=128`, so batches are split into
+> sequential 32-ballot ZisK jobs (the `max proofs per zkVM job` setting).
+> Overwrite transitions are heavier because they include result-subtraction SMT
+> operations. The 128-ballot E2E test (8 transitions, 448 fresh voters, 256
+> overwrites) completes in ~44 minutes total including ballot proof generation.
 
 ## Repository layout
 
