@@ -40,6 +40,21 @@ fn build_zisk_input_bytes(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let mut bytes = if ballot_aggregation {
+        #[cfg(feature = "ballot-aggregation")]
+        {
+            let wire_bundles: Vec<(Vec<u8>, Vec<u64>)> = bundles
+                .iter()
+                .map(|b| (b.proof_bytes.clone(), b.public_values.as_u64_vec()))
+                .collect();
+            info!(
+                "running ballot proof aggregation for {} proofs",
+                wire_bundles.len()
+            );
+            let _aggregated =
+                davinci_zkvm_recursion_aggregator::aggregate_and_verify_from_wire(&wire_bundles)
+                    .context("ballot proof aggregation failed")?;
+            info!("ballot aggregation + verification succeeded");
+        }
         generate_stark_input_aggregated(&bundles, &sigs)?
     } else {
         generate_stark_input(&bundles, &sigs)?

@@ -76,7 +76,9 @@ COPY davinci-zkvm/input-gen/Cargo.toml input-gen/Cargo.toml
 COPY davinci-zkvm/service/Cargo.toml service/Cargo.toml
 
 # Remove recursion-aggregator from workspace (it has complex path deps not needed for the service)
-RUN sed -i '/"recursion-aggregator",/d' Cargo.toml
+RUN sed -i '/"recursion-aggregator",/d' Cargo.toml && \
+    sed -i '/davinci-zkvm-recursion-aggregator/d' service/Cargo.toml && \
+    sed -i '/ballot-aggregation/d' service/Cargo.toml
 
 # Create stub sources to cache dependencies
 RUN mkdir -p input-gen/src service/src && \
@@ -95,7 +97,9 @@ COPY davinci-zkvm/service/src service/src
 RUN find target -maxdepth 4 -path "*/release/.fingerprint/davinci*" -exec rm -rf {} + 2>/dev/null || true
 
 # Ensure recursion-aggregator is still excluded
-RUN sed -i '/"recursion-aggregator",/d' Cargo.toml 2>/dev/null || true
+RUN sed -i '/"recursion-aggregator",/d' Cargo.toml 2>/dev/null || true && \
+    sed -i '/davinci-zkvm-recursion-aggregator/d' service/Cargo.toml 2>/dev/null || true && \
+    sed -i '/ballot-aggregation/d' service/Cargo.toml 2>/dev/null || true
 
 ENV RUSTFLAGS="-C target-feature=+crt-static"
 RUN cargo build --release --target x86_64-unknown-linux-musl \

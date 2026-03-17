@@ -7,8 +7,12 @@ edition = "2021"
 name = "davinci-zkvm"
 path = "src/main.rs"
 
+[features]
+ballot-aggregation = ["dep:davinci-zkvm-recursion-aggregator"]
+
 [dependencies]
 davinci-zkvm-input-gen = { path = "../input-gen" }
+davinci-zkvm-recursion-aggregator = { path = "../recursion-aggregator", optional = true }
 anyhow = "1"
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
@@ -23,3 +27,6 @@ chrono = { version = "0.4", features = ["serde"] }
 dashmap = "5"
 hex = "0.4"
 tokio-util = { version = "0.7", features = ["io"] }
+
+[dev-dependencies]
+tempfile = "3"

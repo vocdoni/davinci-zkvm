@@ -494,6 +494,50 @@ pub fn verify_aggregated_proof(aggregated: &AggregatedBallotProof) -> Result<()>
     aggregated.verify(&config)
 }
 
+/// Aggregate ballot proofs from raw wire data.
+///
+/// Each element is `(postcard_proof_bytes, public_values_u64)` as decoded by
+/// `StarkProofBundle::decode_wire`. This is the entry point for the service:
+/// it handles deserialization from wire format to typed proofs internally.
+///
+/// After aggregation, the proof is verified before returning.
+pub fn aggregate_and_verify_from_wire(
+    bundles: &[(Vec<u8>, Vec<u64>)],
+) -> Result<AggregatedBallotProof> {
+    use p3_field::PrimeCharacteristicRing;
+
+    if bundles.is_empty() {
+        return Err(AggregationError::EmptyInput.into());
+    }
+
+    info!(
+        num_proofs = bundles.len(),
+        "deserializing ballot proofs from wire format"
+    );
+
+    let proofs: Vec<(Proof<BallotConfig>, Vec<Val>)> = bundles
+        .iter()
+        .enumerate()
+        .map(|(i, (proof_bytes, pv_u64s))| {
+            let proof: Proof<BallotConfig> = postcard::from_bytes(proof_bytes)
+                .with_context(|| format!("failed to deserialize proof {i}"))?;
+            let pvs: Vec<Val> = pv_u64s
+                .iter()
+                .map(|&u| Val::from_u64(u))
+                .collect();
+            Ok((proof, pvs))
+        })
+        .collect::<Result<_>>()?;
+
+    let aggregated = aggregate_ballot_proofs(&proofs)?;
+
+    info!("verifying aggregated proof");
+    verify_aggregated_proof(&aggregated)?;
+    info!("aggregated proof verified successfully");
+
+    Ok(aggregated)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
