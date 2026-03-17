@@ -1,211 +1,94 @@
 # davinci-zkvm
 
-A [ZisK](https://github.com/0xPolygonHermez/zisk) zkVM service that verifies complete
-[DAVINCI](https://github.com/vocdoni/davinci-node) voting protocol state-transitions
-inside a single RISC-V circuit, producing a STARK (→ FFLONK) proof suitable for
-on-chain verification.
+A ZisK zkVM service that verifies DAVINCI state transitions with the active
+`davinci-stark` ballot proof system and ecgfp5-native ballot state.
 
-## What it does
+Current ZisK runtime target: `v0.16.0`
 
-Each state-transition batch is verified end-to-end in a single ZisK circuit execution:
+## Active protocol
 
-| Step | Description |
-|------|-------------|
-| **Groth16 batch verify** | BN254 pairing-based verification of voter ballot proofs (snarkjs) |
-| **ECDSA batch verify** | secp256k1 signature verification (one per voter) |
-| **State SMT transitions** | Arbo SHA-256 sparse Merkle tree updates for vote-ID, ballot, results, and process chains |
-| **Census membership** | Lean-IMT Poseidon BN254 inclusion proofs (Merkle census) or ECDSA CSP authentication |
-| **ElGamal re-encryption** | BabyJubJub twisted-Edwards re-encryption verification |
-| **KZG blob evaluation** | EIP-4844 barycentric evaluation of encrypted ballot blobs |
-| **Result accumulation** | Homomorphic ballot tally verification with overwrite support |
-| **Cross-block binding** | Cryptographic binding between all protocol blocks |
+Each batch is verified inside one guest execution with these components:
 
-The circuit produces public outputs matching
-[davinci-node](https://github.com/vocdoni/davinci-node)'s `StateTransitionCircuit`
-interface: root hashes, census root, voter counts, KZG blob commitment, and a
-diagnostic fail-mask.
+- `DSTARKB!`: `davinci-stark` ballot proofs (public values always present; proof bytes present in standalone mode, stripped in aggregated mode)
+- ECDSA voter signatures bound to ballot `vote_id`
+- `STAG5TX!`: SHA-256 Arbo state-transition proofs plus ecgfp5 ballot payloads
+- `CENSUS!!` or `CSPBLK!!`: voter eligibility proofs
+- `REG5BLK!`: ecgfp5 re-encryption witnesses
+- `KZGBLK!!`: EIP-4844 blob evaluation
+- cross-block binding between the ballot statement, state, re-encryption key, and blob context
 
-## Architecture
+The public outputs remain compatible with `davinci-node`'s state-transition verifier:
+old root, new root, voter counts, census root, blob commitment limbs, and a fail mask.
 
-```
-davinci-zkvm/
-├── circuit/            ZisK RISC-V guest circuit (Rust, requires +zisk toolchain)
-│   ├── elf/            Pre-built circuit ELF (checked in)
-│   └── src/            Source: groth16, ecdsa, smt, census, csp, results, kzg, …
-├── input-gen/          Rust library: typed protocol blocks → ZisK binary input
-├── service/            HTTP API service (axum + tokio)
-│   └── src/
-│       ├── api/        POST /prove, GET /jobs/*, GET /health
-│       ├── prover/     Background job queue and worker
-│       ├── config.rs   Environment variable configuration
-│       └── types.rs    Full typed request/response structures
-└── go-sdk/             Go client library with typed builder API
-    ├── *.go            Client, types, ProveBatch, PublicOutputs, converters
-    └── tests/
-        ├── integration/  Cheat tests (emulator), e2e + CSP integration tests
-        └── Makefile      Docker compose test orchestration
-```
+### Ballot aggregation mode
 
-## Quick start
+When `BALLOT_AGGREGATION=1`, the service strips individual ballot STARK proof
+bytes from the guest input. The ZisK guest skips STARK verification and runs
+only the lightweight checks (ECDSA, census, SMT, binding, re-encryption). This
+yields ~3x faster proof times (e.g. ~23s vs ~76s for 4 ballots).
 
-### Prerequisites
+The `recursion-aggregator/` crate provides CPU-side Plonky3-recursion
+aggregation that folds N ballot proofs into a single batch-STARK proof. The
+outer verifier checks both the aggregated proof and the ZisK proof.
 
-- Docker + Docker Compose
-- NVIDIA GPU with driver 570+, CUDA 12.8, nvidia-container-toolkit
-- ZisK proving key (~36 GB) — see [Proving key setup](#proving-key-setup)
+## Repository layout
 
-### Run with Docker
+- `circuit/`: ZisK guest circuit
+- `input-gen/`: Rust encoder for `DSTARKB!`, `STAG5TX!`, `REG5BLK!`, census, CSP, and KZG blocks
+- `service/`: HTTP proving service
+- `recursion-aggregator/`: Plonky3-recursion ballot proof aggregation
+- `go-sdk/`: typed client SDK and integration tests
 
-```bash
-git clone https://github.com/vocdoni/davinci-zkvm.git
-cd davinci-zkvm
+## API
 
-# GPU prover (default)
-docker compose up -d
+`POST /prove` accepts a STARK-only request body with:
 
-# CPU-only (API only — ZisK v0.15 GPU keys are incompatible with CPU proving)
-COMPOSE_PROFILES=cpu docker compose up -d
-```
+- `stark_proofs`
+- `sigs`
+- optional `state`
+- optional `census_proofs` or `csp_data`
+- optional `ecgfp5_reencryption`
+- optional `kzg`
 
-### Run locally (non-Docker)
-
-```bash
-# Full install: clone + build ZisK, build service, download proving key
-make setup
-
-# Run the service (sources .env.local.nodocker automatically)
-make run
-
-# Run integration tests (starts/stops service automatically)
-make test
-```
-
-Override defaults as needed:
-
-```bash
-make setup PROVER_MODE=gpu ZISK_VERSION=v0.15.0 PROVING_KEY_PATH=/data/provingKey
-make run   ZISK_MPI_PROCS=4 ZISK_MPI_THREADS=8
-```
-
-### Submit a proof via the Go SDK
-
-```go
-import davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
-
-client := davinci.NewClient("http://localhost:8080")
-
-batch := &davinci.ProveBatch{
-    VK:     vk,
-    Voters: voters,       // []VoterBallot with Groth16 proofs + ECDSA sigs
-    State:  stateData,    // StateTransitionData (SMT transitions)
-    Census: censusProofs, // []CensusProof (Merkle) or CspData
-    Reenc:  reencData,    // ReencryptionData (ElGamal)
-    KZG:    kzgData,      // KZGRequest (blob evaluation)
-}
-
-result, err := client.Prove(ctx, batch)
-// result.Outputs.OK, result.Outputs.RootHashAfter, ...
-```
-
-See [go-sdk/README.md](go-sdk/README.md) for full API documentation.
-
-## API reference
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/prove` | Submit a state-transition batch for proving |
-| `GET` | `/jobs/{id}` | Get job status |
-| `GET` | `/jobs/{id}/proof` | Download proof binary (once done) |
-| `GET` | `/health` | Service health check |
-
-### `POST /prove`
-
-Accepts a JSON body with typed protocol blocks. See `service/src/types.rs` for the
-full `ProveRequest` schema, or use the Go SDK's `ProveBatch` which handles serialization.
-
-### `GET /jobs/{id}`
-
-```json
-{
-  "job_id": "...",
-  "status": "queued|running|done|failed",
-  "elapsed_ms": 35000,
-  "error": null
-}
-```
-
-## Proving key setup
-
-The proving key (~36 GB) is downloaded automatically by `make setup`.
-
-For Docker, mount it as a volume:
-
-```bash
-# Point PROVING_KEY_PATH to your existing key, or let install.sh download it first
-docker compose up -d
-```
-
-Or set `PROVING_KEY_PATH` in `.env` to point to an existing key directory.
+See `service/src/types.rs` and `go-sdk/types.go` for the exact schema.
 
 ## Configuration
+
+Key environment variables for the service:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LISTEN_ADDR` | `0.0.0.0:8080` | HTTP listen address |
 | `PROVING_KEY_PATH` | `/proving-key` | ZisK proving key directory |
-| `CIRCUIT_ELF_PATH` | `/app/circuit.elf` | Pre-built circuit ELF |
-| `CARGO_ZISK_BIN` | `cargo-zisk` | Path to cargo-zisk binary |
-| `PROOF_OUTPUT_DIR` | `/tmp/proofs` | Proof output directory |
-| `MAX_QUEUE_SIZE` | `100` | Maximum queued jobs |
-| `ZISK_MPI_PROCS` | `1` | MPI processes for proving (`>1` runs `mpirun`) |
-| `ZISK_MPI_THREADS` | `0` | Threads per MPI process (sets `OMP_NUM_THREADS` and `RAYON_NUM_THREADS`; `0` = unset) |
-| `ZISK_MPI_BIND_TO` | `none` | `mpirun --bind-to` policy |
+| `CIRCUIT_ELF_PATH` | `/app/circuit.elf` | Compiled circuit ELF |
+| `BALLOT_AGGREGATION` | `0` | Enable aggregated mode (strip STARK proofs) |
+| `ZISK_MPI_PROCS` | `1` | MPI parallel proving processes |
+| `ZISK_AGGREGATION` | `0` | ZisK recursive proof aggregation |
 
 ## Development
 
 ```bash
-# Build the circuit ELF (requires +zisk toolchain)
-cd circuit && cargo +zisk build --release --target riscv64ima-zisk-zkvm-elf
-cp circuit/target/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-circuit circuit/elf/circuit.elf
+# Workspace (service + input-gen + recursion-aggregator)
+cargo test
 
-# Build service binary only
-cargo build --release -p davinci-zkvm-service
+# Circuit checks/tests (requires +zisk toolchain for build, host tests only)
+cargo test --manifest-path circuit/Cargo.toml
 
-# Run cheat tests (emulator, no service needed)
-cd go-sdk/tests && make test-unit
+# Go SDK and integration tests
+cd go-sdk && go test ./... -count=1
 
-# Run full integration tests (requires running service)
-cd go-sdk/tests && make test
+# Docker + full E2E
+BALLOT_AGGREGATION=1 docker compose up -d --build
+cd go-sdk/tests/integration
+VOTES_PER_BATCH=4 DAVINCI_PROOF_TIMEOUT=80m go test -v -run TestFullE2E -timeout 4h
 ```
 
-### Docker
+## Circuit spec
 
-```bash
-# Build images
-docker compose build davinci-zkvm      # CUDA GPU image  (Dockerfile.cuda)
-docker compose build davinci-zkvm-cpu  # CPU-only image  (Dockerfile)
-
-# Run
-docker compose --profile cuda up -d    # Start CUDA GPU service
-docker compose --profile cpu  up -d    # Start CPU-only service
-```
-
-## Circuit specification
-
-See [CIRCUIT.md](CIRCUIT.md) for a detailed formal specification of every constraint
-checked by the circuit, including input/output encoding, fail-mask bits, and
-cross-block binding rules.
-
-## Tests
-
-| Test suite | Command | Requirements |
-|------------|---------|--------------|
-| **Cheat tests** (7 tests) | `make test` | `ziskemu` in PATH |
-| **CSP integration** | `cd go-sdk/tests && make test` | Running service |
-| **Full E2E** (8 transitions) | `cd go-sdk/tests && make test` | Running service |
-| **Lightweight** | `make test-unit` | Running service |
-
-Cheat tests exercise the circuit in the ZisK emulator with deliberate protocol
-violations (wrong census root, wrong state root, mismatched vote IDs, wrong
-re-encryption key, wrong KZG data) and verify that the fail-mask correctly
-identifies each violation.
+See `circuit/CIRCUIT.md` for the current STARK/ecgfp5 guest format and checks.
+In particular:
+- the ballot-proof verifier uses width-8 Goldilocks Poseidon2
+  (`default_goldilocks_poseidon2_8()`) for STARK infrastructure hashing
+- in aggregated mode, the guest skips STARK verification entirely
+- the BN254/iden3 Poseidon implementation is still retained only for Lean-IMT
+  census proofs, because the external census format is still BN254 Poseidon based
