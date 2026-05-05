@@ -12,6 +12,7 @@ package integration
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -463,6 +464,14 @@ func deriveKZGZ(processIDHex, rootBeforeHex string, commitment [48]byte) *big.In
 // runZiskEmu writes inputBytes to a temp file and executes ziskemu against the
 // circuit ELF. Returns the parsed uint32 output registers or an error.
 // The ELF path can be overridden with the CIRCUIT_ELF_PATH environment variable.
+func encodeZiskStreamInput(inputBytes []byte) []byte {
+	alignedLen := (len(inputBytes) + 7) &^ 7
+	out := make([]byte, 8+alignedLen)
+	binary.LittleEndian.PutUint64(out[:8], uint64(len(inputBytes)))
+	copy(out[8:], inputBytes)
+	return out
+}
+
 func runZiskEmu(inputBytes []byte) ([]uint32, error) {
 	ziskemuBin, err := exec.LookPath("ziskemu")
 	if err != nil {
@@ -477,12 +486,12 @@ func runZiskEmu(inputBytes []byte) ([]uint32, error) {
 		return nil, err
 	}
 	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(inputBytes); err != nil {
+	if _, err := tmp.Write(encodeZiskStreamInput(inputBytes)); err != nil {
 		return nil, err
 	}
 	tmp.Close()
 
-	cmd := exec.Command(ziskemuBin, "-e", elfPath, "-i", tmp.Name())
+	cmd := exec.Command(ziskemuBin, "-e", elfPath, "-i", tmp.Name(), "-c")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("ziskemu failed: %w\noutput: %s", err, out)

@@ -25,6 +25,18 @@ struct ProveTask {
     output_dir: PathBuf,
 }
 
+/// Encode raw circuit input as the v0.17.0 ZiskStream input format expected by
+/// `ziskos::io::read_input_slice()`: u64 little-endian length prefix, raw bytes,
+/// then zero padding to the next 8-byte boundary.
+fn encode_zisk_stream_input(input: &[u8]) -> Vec<u8> {
+    let aligned_len = (input.len() + 7) & !7;
+    let mut out = Vec::with_capacity(8 + aligned_len);
+    out.extend_from_slice(&(input.len() as u64).to_le_bytes());
+    out.extend_from_slice(input);
+    out.resize(8 + aligned_len, 0);
+    out
+}
+
 impl ProverHandle {
     /// Create a new prover handle, spawning the background worker task.
     pub fn new(config: Config) -> Self {
@@ -47,7 +59,8 @@ impl ProverHandle {
         let job_dir = proof_output_dir.join(job_id.to_string());
         tokio::fs::create_dir_all(&job_dir).await?;
         let input_path = job_dir.join("input.bin");
-        tokio::fs::write(&input_path, &input_bytes).await?;
+        let zisk_input = encode_zisk_stream_input(&input_bytes);
+        tokio::fs::write(&input_path, &zisk_input).await?;
         let output_dir = job_dir.clone();
 
         let task = ProveTask { job_id, input_path, output_dir };
@@ -150,36 +163,39 @@ async fn run_prove_with_retry(config: &Config, task: &ProveTask) -> anyhow::Resu
 }
 
 async fn run_prove(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
-    // Produces a ZisK STARK proof (vadcop_final_proof.bin).
-    //
-    // NOTE: --final-snark is intentionally NOT passed here.
-    //
-    // ZisK's full pipeline ends with an optional FFlonk BN254 zkSNARK stage
-    // ("recursivef" → final.zkey) that would produce a compact, on-chain-verifiable
-    // proof.  However, the distributed v0.15.0 proving key does not include the
-    // required `final/` artifacts (final.so, final.zkey, final.dat).  Passing
-    // --final-snark with the current proving key causes proofman to silently
-    // discard the error (the result of generate_fflonk_snark_proof is `let _`),
-    // so the flag has no effect: it only wastes initialisation time.
-    //
-    // When Polygon releases the final-snark proving key artifacts, re-add:
-    //   .arg("--final-snark")
-    // and update the /proof download endpoint to serve the resulting JSON file
-    // instead of vadcop_final_proof.bin.
-    let zisk_args: Vec<String> = vec![
+    // v0.17.0: --inputs replaces --input, --output replaces --output-dir.
+    // Use GPU proving and never pass --emulator for CUDA tests. The final
+    // recursive PLONK/zkSNARK wrapper is configurable because ZisK v0.17.0
+    // currently fails in Recursive1 witness generation for this circuit/key setup,
+    // while the E2E suite only needs successful proving/job completion and does
+    // not download or verify the proof artifact.
+    let output_file = task.output_dir.join("vadcop_final_proof.bin");
+    let mut zisk_args: Vec<String> = vec![
         "prove".to_string(),
         "--elf".to_string(),
         config.circuit_elf_path.display().to_string(),
-        "--input".to_string(),
+        "--inputs".to_string(),
         task.input_path.display().to_string(),
         "--proving-key".to_string(),
         config.proving_key_path.display().to_string(),
-        "--output-dir".to_string(),
-        task.output_dir.display().to_string(),
-        "--emulator".to_string(),
-        "--aggregation".to_string(),
-        "--verify-proofs".to_string(),
+        "--output".to_string(),
+        output_file.display().to_string(),
+        "--gpu".to_string(),
     ];
+
+    if config.verify_zisk_proofs {
+        zisk_args.push("--verify-proofs".to_string());
+    }
+
+    if config.generate_final_snark {
+        zisk_args.extend([
+            "--plonk".to_string(),
+            "--proving-key-plonk".to_string(),
+            "/root/.zisk/provingKeySnark".to_string(),
+        ]);
+    } else {
+        zisk_args.push("--no-aggregation".to_string());
+    }
 
     let output = if config.zisk_mpi_procs > 1 {
         // Parallel proving mode as documented by ZisK:

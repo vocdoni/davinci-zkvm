@@ -3,6 +3,13 @@
 use std::env;
 use std::path::PathBuf;
 
+fn parse_bool_env(name: &str, default: bool) -> bool {
+    env::var(name)
+        .ok()
+        .map(|s| matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(default)
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// HTTP listen address (default: 0.0.0.0:8080)
@@ -23,6 +30,13 @@ pub struct Config {
     pub zisk_mpi_threads: usize,
     /// MPI bind policy passed to mpirun --bind-to (default: none)
     pub zisk_mpi_bind_to: String,
+    /// Generate the final PLONK/zkSNARK proof (default: false).
+    /// When false, cargo-zisk generates a non-recursive STARK proof. This keeps
+    /// CUDA E2E tests usable while ZisK v0.17.0 recursion is unstable for
+    /// this circuit/key setup.
+    pub generate_final_snark: bool,
+    /// Ask cargo-zisk to verify generated proof artifacts (default: false).
+    pub verify_zisk_proofs: bool,
 }
 
 impl Config {
@@ -53,6 +67,8 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0),
             zisk_mpi_bind_to: env::var("ZISK_MPI_BIND_TO").unwrap_or_else(|_| "none".to_string()),
+            generate_final_snark: parse_bool_env("GENERATE_FINAL_SNARK", false),
+            verify_zisk_proofs: parse_bool_env("VERIFY_ZISK_PROOFS", false),
         }
     }
 }

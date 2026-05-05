@@ -31,7 +31,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
     -y --default-toolchain stable --profile minimal
 ENV PATH="/root/.cargo/bin:$PATH"
 
-ARG ZISK_VERSION=v0.15.0
+ARG ZISK_VERSION=v0.17.0
 
 # Clone ZisK source at the pinned version
 RUN git clone --depth 1 --branch ${ZISK_VERSION} \
@@ -39,18 +39,17 @@ RUN git clone --depth 1 --branch ${ZISK_VERSION} \
 
 WORKDIR /src/zisk
 
-# Build cargo-zisk with packed SIMD arithmetic (CPU only — no GPU feature)
-# The 'packed' feature enables AVX-optimized polynomial arithmetic needed for
-# correct STARK proof generation. It's included in 'gpu' but works CPU-only too.
+# Build cargo-zisk in CPU mode (no CUDA available in this image)
+# GPU/CPU is auto-detected at build time by ziskbuild
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
-    cargo build --release --features packed 2>&1 | tee /tmp/build.log
+    cargo build --release 2>&1 | tee /tmp/build.log
 
 # Bundle ALL shared lib dependencies so the runtime needs no extra apt packages.
-# Also bundle libgomp.so.1 explicitly — ZisK dlopen()s it at runtime via libloading
-# (won't appear in ldd output since it's loaded dynamically, not via NEEDED entries).
+# v0.17.0: libzisk_witness.so no longer exists (statically linked).
+# Also bundle libgomp.so.1 explicitly — ZisK dlopen()s it at runtime.
 RUN mkdir -p /libs && \
-    for bin in target/release/cargo-zisk target/release/ziskemu target/release/libzisk_witness.so; do \
+    for bin in target/release/cargo-zisk target/release/ziskemu; do \
         ldd $bin 2>/dev/null | grep '=> /' | awk '{print $3}' | \
         while read lib; do cp -L --no-clobber "$lib" /libs/ 2>/dev/null || true; done; \
     done && \
@@ -103,6 +102,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    make \
+    gcc \
+    g++ \
+    binutils \
+    libgmp-dev \
     openmpi-bin \
     openmpi-common \
     && rm -rf /var/lib/apt/lists/*
@@ -114,18 +118,17 @@ COPY --from=service-builder \
     /build/target/x86_64-unknown-linux-musl/release/davinci-zkvm \
     /app/davinci-zkvm
 
-# cargo-zisk, tools, and witness library (all built from source)
+# cargo-zisk, tools, and runtime helpers (all built from source)
+# v0.17.0: libzisk_witness.so no longer exists (statically linked into cargo-zisk)
+RUN mkdir -p /root/.zisk/bin /root/.zisk/zisk
 COPY --from=zisk-builder /src/zisk/target/release/cargo-zisk /usr/local/bin/cargo-zisk
 COPY --from=zisk-builder /src/zisk/target/release/ziskemu    /usr/local/bin/ziskemu
-COPY --from=zisk-builder /src/zisk/target/release/libzisk_witness.so \
-    /usr/local/lib/libzisk_witness.so
+COPY --from=zisk-builder /src/zisk/target/release/libziskclib.a /root/.zisk/bin/libziskclib.a
+COPY --from=zisk-builder /src/zisk/emulator-asm /root/.zisk/zisk/emulator-asm
+COPY --from=zisk-builder /src/zisk/lib-c /root/.zisk/zisk/lib-c
 
 # Bundled shared libs — all deps cargo-zisk needs, no apt required
 COPY --from=zisk-builder /libs /usr/local/lib/zisk-deps
-
-# Symlink libzisk_witness.so to where cargo-zisk looks for it
-RUN mkdir -p /root/.zisk/bin && \
-    ln -s /usr/local/lib/libzisk_witness.so /root/.zisk/bin/libzisk_witness.so
 
 # Copy pre-built circuit ELF and entrypoint
 COPY circuit/elf/circuit.elf /app/circuit.elf

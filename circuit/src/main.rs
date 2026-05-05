@@ -19,7 +19,7 @@ mod smt;
 mod types;
 
 use crate::types::{FrRaw, ZERO_FR};
-use ziskos::{read_input_slice, set_output};
+use ziskos::io::{commit_slice, read_input_slice};
 
 /// Extract the Ethereum address (uint160) from a packed census leaf.
 /// Census leaves encode `PackAddressWeight(address, weight) = (address << 88) | weight`.
@@ -82,16 +82,6 @@ fn hash_enc_key(x: &FrRaw, y: &FrRaw) -> FrRaw {
 // [43] nproofs     => number of Groth16 proofs verified
 // [44] n_public    => number of public inputs per proof
 // [45] log_n       => log₂ of the aggregation tree depth
-
-/// Emit a 256-bit `FrRaw` (4 × u64 LE words) as 8 consecutive u32 output registers
-/// starting at `base`.  Each u64 word is split into lo (bits 0-31) and hi (bits 32-63).
-#[inline(always)]
-fn set_fr_output(base: usize, v: &FrRaw) {
-    for i in 0..4 {
-        set_output(base + i * 2,     (v[i] & 0xFFFF_FFFF) as u32);
-        set_output(base + i * 2 + 1, (v[i] >> 32) as u32);
-    }
-}
 
 fn main() {
     let input = read_input_slice();
@@ -340,29 +330,39 @@ fn main() {
 
     // census_root is the Merkle root or CSP Ethereum address depending on censusOrigin.
 
-    // Status
-    set_output(0, overall_ok as u32);
-    set_output(1, fail_mask);
-
-    // Public inputs (davinci-node StateTransitionCircuit)
-    set_fr_output( 2, &old_root);      // RootHashBefore
-    set_fr_output(10, &new_root);      // RootHashAfter
-    set_output(18, voters as u32);     // VotersCount
-    set_output(19, overwritten as u32);// OverwrittenVotesCount
-    set_fr_output(20, &census_root);   // CensusRoot
-
-    // BlobCommitmentLimbs: each 128-bit limb stored as 4 × u32 LE.
-    let limb_u32s = kzg::commitment_to_limb_u32s(&kzg_commitment);
-    for (l, limb) in limb_u32s.iter().enumerate() {
-        for (w, &word) in limb.iter().enumerate() {
-            set_output(28 + l * 4 + w, word);
+    // Commit public outputs as a single byte buffer (v0.17.0: sequential commit_slice API).
+    // Output register layout (46 × u32 = 184 bytes):
+    //   [0] overall_ok, [1] fail_mask
+    //   [2-9] RootHashBefore (FrRaw, 8 u32s), [10-17] RootHashAfter
+    //   [18] VotersCount, [19] OverwrittenVotesCount
+    //   [20-27] CensusRoot (FrRaw, 8 u32s)
+    //   [28-39] BlobCommitmentLimbs (12 u32s)
+    //   [40] batch_ok, [41] auth_ok, [42] reserved=0
+    //   [43] nproofs, [44] n_public, [45] log_n
+    let mut output = Vec::with_capacity(184);
+    output.extend_from_slice(&(overall_ok as u32).to_le_bytes());
+    output.extend_from_slice(&fail_mask.to_le_bytes());
+    // FrRaw helpers: 4 × u64 LE → 8 × u32 LE
+    for v in &[&old_root, &new_root, &census_root] {
+        for limb in v.iter() {
+            output.extend_from_slice(&(*limb as u32).to_le_bytes());
+            output.extend_from_slice(&((limb >> 32) as u32).to_le_bytes());
         }
     }
-
-    // Diagnostics
-    set_output(40, batch_ok as u32);
-    set_output(41, auth_ok as u32);
-    set_output(43, parsed.nproofs as u32);
-    set_output(44, parsed.n_public as u32);
-    set_output(45, parsed.log_n as u32);
+    output.extend_from_slice(&(voters as u32).to_le_bytes());
+    output.extend_from_slice(&(overwritten as u32).to_le_bytes());
+    // BlobCommitmentLimbs: each 128-bit limb as 4 × u32 LE
+    let limb_u32s = kzg::commitment_to_limb_u32s(&kzg_commitment);
+    for limb in limb_u32s.iter() {
+        for &word in limb.iter() {
+            output.extend_from_slice(&word.to_le_bytes());
+        }
+    }
+    output.extend_from_slice(&(batch_ok as u32).to_le_bytes());
+    output.extend_from_slice(&(auth_ok as u32).to_le_bytes());
+    output.extend_from_slice(&0u32.to_le_bytes()); // reserved
+    output.extend_from_slice(&(parsed.nproofs as u32).to_le_bytes());
+    output.extend_from_slice(&(parsed.n_public as u32).to_le_bytes());
+    output.extend_from_slice(&(parsed.log_n as u32).to_le_bytes());
+    commit_slice(&output);
 }

@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-ZISK_VERSION="${ZISK_VERSION:-v0.15.0}"
+ZISK_VERSION="${ZISK_VERSION:-v0.17.0}"
 ZISK_REPO="${ZISK_REPO:-https://github.com/0xPolygonHermez/zisk.git}"
 ZISK_SRC="${ZISK_SRC:-$HOME/zisk}"
 ZISK_HOME="${ZISK_HOME:-$HOME/.zisk}"
@@ -154,8 +154,8 @@ build_zisk() {
       exit 1
     fi
 
-    log "Building zisk with GPU support (--features gpu)"
-    (cd "$ZISK_SRC" && cargo build --release --features gpu)
+    log "Building zisk with GPU support (auto-detected via CUDA)"
+    (cd "$ZISK_SRC" && cargo build --release)
   else
     log "Building zisk in CPU mode"
     (cd "$ZISK_SRC" && cargo build --release)
@@ -273,8 +273,8 @@ setup_const_trees() {
     return 0
   fi
 
-  log "Building constant trees (this can take a long time)"
-  "$ZISK_BIN_DIR/cargo-zisk" check-setup --proving-key "$PROVING_KEY_PATH" -a
+  log "Validating proving key (constant trees are built on-demand during prove)"
+  "$ZISK_BIN_DIR/cargo-zisk" check-setup --proving-key "$PROVING_KEY_PATH"
 
   if [[ "$SELECTED_PROVER_MODE" == "gpu" ]]; then
     log "GPU warmup check-setup"

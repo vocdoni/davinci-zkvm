@@ -26,8 +26,7 @@
 
 use crate::hash::keccak256_short;
 use crate::types::{CspBlock, FrRaw, FAIL_CSP, ZERO_FR};
-use ziskos::syscalls::SyscallPoint256;
-use ziskos::zisklib::secp256k1_ecdsa_verify;
+use ziskos::zisklib::ecdsa_verify_secp256k1;
 
 /// Compute the Ethereum signed-message hash for a CSP attestation.
 /// `z = keccak256("\x19Ethereum Signed Message:\n92" || processID_BE32 || address_BE20 || weight_BE32 || index_BE8)`
@@ -122,7 +121,10 @@ pub fn verify_csp(
     let csp_addr = eth_address_from_pk(&csp.csp_pub_key_x, &csp.csp_pub_key_y);
     let census_root = address_to_fr(&csp_addr);
 
-    let pk = SyscallPoint256 { x: csp.csp_pub_key_x, y: csp.csp_pub_key_y };
+    // v0.17.0: ecdsa_verify_secp256k1 takes pk as &[u64; 8] (x || y).
+    let mut pk_bytes = [0u64; 8];
+    pk_bytes[0..4].copy_from_slice(&csp.csp_pub_key_x);
+    pk_bytes[4..8].copy_from_slice(&csp.csp_pub_key_y);
 
     // Invariant 1: no duplicate (voter_address, index) pairs
     let n = csp.entries.len();
@@ -140,7 +142,7 @@ pub fn verify_csp(
     // Invariant 2: each CSP signature is valid
     for entry in &csp.entries {
         let z = csp_message_hash(process_id, &entry.voter_address, &entry.weight, entry.index);
-        if !secp256k1_ecdsa_verify(&pk, &z, &entry.r, &entry.s) {
+        if !ecdsa_verify_secp256k1(&pk_bytes, &z, &entry.r, &entry.s) {
             *fail_mask |= FAIL_CSP;
             return (false, census_root);
         }

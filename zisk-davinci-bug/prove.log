@@ -1,0 +1,388 @@
+
+[38;2;10;191;131m   ZisK zkVM 0.17.0[0m
+      System Ubuntu 7.0.0-14-generic (Linux (Ubuntu 26.04))
+    Hostname z6
+     Command Prove
+         Elf /home/p4u/davinci-zkvm/zisk-davinci-bug/circuit.elf
+       Input /home/p4u/davinci-zkvm/zisk-davinci-bug/input.bin
+ Proving Key /home/p4u/.zisk/provingKey
+   SNARK Key /home/p4u/.zisk/provingKeySnark
+
+2026-05-05T08:33:18.225818Z INFO: Creating proof context
+2026-05-05T08:33:18.233367Z INFO: >>> INITIALIZING_PROOFMAN
+[INFO] PilStark: GPU assignment: node_rank=0 numa=0 GPUs=[0(numa0)]
+[INFO] PilStark: Process rank 0 - GPU 0 [0/1]: 30.609253 GB free / 31.356567 GB total
+[INFO] PilStark: Process rank 0: Using minimum memory across 1 GPUs: 30.609253 GB
+[INFO] PilStark: Minimum free memory available for GPU usage: 30.609253 GB
+2026-05-05T08:33:18.630372Z INFO: Max prover buffer size: 7.41 GB
+2026-05-05T08:33:18.630386Z INFO: Max prover recursive buffer size: 0.00 Bytes
+2026-05-05T08:33:18.630387Z INFO: Max prover recursive1/recursive2 buffer size: 0.00 Bytes
+2026-05-05T08:33:18.630389Z INFO: Using 3 streams per GPU for basic proofs and 0 streams per GPU for recursive proofs. Using 1.38 GB for fixed pols
+[INFO] PilStark: Memory allocation per GPU:
+[INFO] PilStark:   - Constant polynomials (separate): 1.375653 GB
+[INFO] PilStark:   - Constant polynomials aggregation: 0.000000 GB
+[INFO] PilStark:   - Auxiliary trace (3 streams): 22.240759 GB
+[INFO] PilStark:   - Auxiliary trace recursive (0 streams): 0.000000 GB
+[INFO] PilStark:   - Unified buffer per GPU: 22.240759 GB
+[INFO] PilStark:   - Total GPU memory per GPU: 23.616412 GB
+[INFO] PilStark:   - Pinned host memory per GPU: 2.000000 GB
+[INFO] PilStark: GPU 0: Available memory: 30.605347 GB / 31.356567 GB
+[INFO] PilStark: GPU 0: Allocated 23.616412 GB (22.240759 GB unified + 1.375653 GB const pols)
+[INFO] PilStark: All GPU memory allocations successful
+2026-05-05T08:33:18.970121Z INFO: >>> LOADING_FIXED_POLS
+2026-05-05T08:33:19.185595Z INFO: <<< LOADING_FIXED_POLS (215ms)
+2026-05-05T08:33:19.185618Z INFO: <<< INITIALIZING_PROOFMAN (952ms)
+2026-05-05T08:33:19.185624Z INFO: >>> INIT_PROOFMAN
+2026-05-05T08:33:19.185627Z INFO: <<< INIT_PROOFMAN (0ms)
+2026-05-05T08:33:19.185691Z INFO: MemoryHandler::Total memory for basic traces: 4.38 GB
+2026-05-05T08:33:19.185697Z INFO: MemoryHandlerRecursive::Total memory for recursive traces: 0.00 Bytes
+2026-05-05T08:33:19.188862Z INFO: Node has 16 cores
+2026-05-05T08:33:19.189050Z INFO: Using 16 threads based on physical cores per process, considering there are 1 processes per node
+2026-05-05T08:33:19.189052Z INFO: Using 2 threads per witness computation
+2026-05-05T08:33:19.219293Z INFO: Computing custom trace ROM
+2026-05-05T08:33:20.501653Z INFO: Root hash: [7497481596970012039, 23807978007057662, 7111201060682107717, 6955769463328064825]
+2026-05-05T08:33:20.884347Z INFO: >>> ROM SETUP (one time only) - Generating assembly files for ELF: circuit
+2026-05-05T08:33:20.884361Z INFO: >>> ROM_SETUP
+cargo 1.93.1 (083ac5135 2025-12-15) (built from a source tarball)
+2026-05-05T08:33:20.888774Z INFO: Looking for emulator-asm at: /home/p4u/.zisk/zisk/emulator-asm
+2026-05-05T08:33:20.888783Z INFO: Looking for ziskclib at: /home/p4u/.zisk/bin/libziskclib.a
+2026-05-05T08:33:29.526895Z INFO: <<< ROM_SETUP (8642ms)
+2026-05-05T08:33:29.526910Z INFO: <<< ROM SETUP complete - Assembly files cached for future use
+2026-05-05T08:33:29.526914Z INFO: >>> STARTING_ASM_MICROSERVICES
+2026-05-05T08:33:32.251956Z INFO: <<< STARTING_ASM_MICROSERVICES (2725ms)
+2026-05-05T08:33:32.252050Z INFO: Initializing publics custom_commits
+2026-05-05T08:33:32.263074Z INFO: >>> EXECUTE
+2026-05-05T08:33:32.288301Z INFO: >>> COMPUTE_MINIMAL_TRACE
+2026-05-05T08:33:32.307585Z INFO: ··· Assembly execution speed: 294MHz (18.637158ms)
+2026-05-05T08:33:32.310690Z INFO: <<< COMPUTE_MINIMAL_TRACE (22ms)
+2026-05-05T08:33:32.310700Z INFO: >>> PLAN
+2026-05-05T08:33:32.310906Z INFO: <<< PLAN (0ms)
+2026-05-05T08:33:32.310909Z INFO: >>> WAIT_PLAN_MEM_CPP
+2026-05-05T08:33:32.315702Z INFO: >>> COLLECT_MEM_PLANS
+2026-05-05T08:33:32.315770Z INFO: <<< COLLECT_MEM_PLANS (0ms)
+2026-05-05T08:33:32.315951Z INFO: <<< WAIT_PLAN_MEM_CPP (5ms)
+2026-05-05T08:33:32.315973Z INFO: >>> WAIT_ASM_RH
+2026-05-05T08:33:32.501090Z INFO: <<< WAIT_ASM_RH (185ms)
+2026-05-05T08:33:32.501512Z INFO: --- PROOF INSTANCES SUMMARY ---
+2026-05-05T08:33:32.501544Z INFO: Zisk | Arith: 1 | ArithEq: 2 | Binary: 1 | BinaryExtension: 1 | Dma: 1 | Dma64Aligned: 1 | DmaPrePost: 1 | DmaUnaligned: 1 | InputData: 1 | Keccakf: 1 | Main: 2 | Mem: 1 | MemAlign: 1 | Rom: 1 | RomData: 1 | Sha256f: 2 | SpecifiedRanges: 1 | VirtualTable0: 1 | VirtualTable1: 1 | Total global instances: 22
+2026-05-05T08:33:32.501552Z INFO: --------------------------------
+2026-05-05T08:33:32.501583Z INFO: <<< EXECUTE (238ms)
+2026-05-05T08:33:32.501610Z INFO: >>> CALCULATING_CONTRIBUTIONS
+2026-05-05T08:33:33.517309Z INFO: <<< CALCULATING_CONTRIBUTIONS (1015ms)
+2026-05-05T08:33:33.517398Z INFO: ··· Global challenge: [3548480242573464458, 11435066096433963410, 12306615279746811896]
+2026-05-05T08:33:33.517407Z INFO: >>> GENERATING_PROOFS
+2026-05-05T08:33:33.517409Z INFO: >>> GENERATING_INNER_PROOFS
+2026-05-05T08:33:37.302522Z INFO: <<< GENERATING_INNER_PROOFS (3785ms)
+2026-05-05T08:33:37.302537Z INFO: >>> VERIFYING_PROOFS
+2026-05-05T08:33:37.302550Z INFO:     Verifying proof of Rom: Instance #0 with global index #0
+[ERROR]: Invalid evaluations
+[ERROR]: Final polynomial is not zero at position 16
+[ERROR]: Final polynomial is not zero at position 16
+[ERROR]: Final polynomial is not zero at position 16
+[ERROR]: Final polynomial is not zero at position 17
+[ERROR]: Final polynomial is not zero at position 17
+[ERROR]: Final polynomial is not zero at position 17
+[ERROR]: Final polynomial is not zero at position 18
+[ERROR]: Final polynomial is not zero at position 18
+[ERROR]: Final polynomial is not zero at position 18
+[ERROR]: Final polynomial is not zero at position 19
+[ERROR]: Final polynomial is not zero at position 19
+[ERROR]: Final polynomial is not zero at position 19
+[ERROR]: Final polynomial is not zero at position 20
+[ERROR]: Final polynomial is not zero at position 20
+[ERROR]: Final polynomial is not zero at position 20
+[ERROR]: Final polynomial is not zero at position 21
+[ERROR]: Final polynomial is not zero at position 21
+[ERROR]: Final polynomial is not zero at position 21
+[ERROR]: Final polynomial is not zero at position 22
+[ERROR]: Final polynomial is not zero at position 22
+[ERROR]: Final polynomial is not zero at position 22
+[ERROR]: Final polynomial is not zero at position 23
+[ERROR]: Final polynomial is not zero at position 23
+[ERROR]: Final polynomial is not zero at position 23
+[ERROR]: Final polynomial is not zero at position 24
+[ERROR]: Final polynomial is not zero at position 24
+[ERROR]: Final polynomial is not zero at position 24
+[ERROR]: Final polynomial is not zero at position 25
+[ERROR]: Final polynomial is not zero at position 25
+[ERROR]: Final polynomial is not zero at position 25
+[ERROR]: Final polynomial is not zero at position 26
+[ERROR]: Final polynomial is not zero at position 26
+[ERROR]: Final polynomial is not zero at position 26
+[ERROR]: Final polynomial is not zero at position 27
+[ERROR]: Final polynomial is not zero at position 27
+[ERROR]: Final polynomial is not zero at position 27
+[ERROR]: Final polynomial is not zero at position 28
+[ERROR]: Final polynomial is not zero at position 28
+[ERROR]: Final polynomial is not zero at position 28
+[ERROR]: Final polynomial is not zero at position 29
+[ERROR]: Final polynomial is not zero at position 29
+[ERROR]: Final polynomial is not zero at position 29
+[ERROR]: Final polynomial is not zero at position 30
+[ERROR]: Final polynomial is not zero at position 30
+[ERROR]: Final polynomial is not zero at position 30
+[ERROR]: Final polynomial is not zero at position 31
+[ERROR]: Final polynomial is not zero at position 31
+[ERROR]: Final polynomial is not zero at position 31
+2026-05-05T08:33:37.451767Z INFO: ··· ✗ Proof of Rom: Instance #0 was not verified
+2026-05-05T08:33:37.451791Z INFO:     Verifying proof of Main: Instance #0 with global index #1
+[ERROR]: Invalid evaluations
+2026-05-05T08:33:37.657419Z INFO: ··· ✗ Proof of Main: Instance #0 was not verified
+2026-05-05T08:33:37.657444Z INFO:     Verifying proof of Main: Instance #1 with global index #2
+[ERROR]: Invalid evaluations
+2026-05-05T08:33:37.799763Z INFO: ··· ✗ Proof of Main: Instance #1 was not verified
+2026-05-05T08:33:37.799780Z INFO:     Verifying proof of Keccakf: Instance #0 with global index #10
+[ERROR]: Invalid evaluations
+2026-05-05T08:33:38.194214Z INFO: ··· ✗ Proof of Keccakf: Instance #0 was not verified
+2026-05-05T08:33:38.194237Z INFO:     Verifying proof of Binary: Instance #0 with global index #8
+[ERROR]: Invalid evaluations
+[ERROR]: Final polynomial is not zero at position 16
+[ERROR]: Final polynomial is not zero at position 16
+[ERROR]: Final polynomial is not zero at position 16
+[ERROR]: Final polynomial is not zero at position 17
+[ERROR]: Final polynomial is not zero at position 17
+[ERROR]: Final polynomial is not zero at position 17
+[ERROR]: Final polynomial is not zero at position 18
+[ERROR]: Final polynomial is not zero at position 18
+[ERROR]: Final polynomial is not zero at position 18
+[ERROR]: Final polynomial is not zero at position 19
+[ERROR]: Final polynomial is not zero at position 19
+[ERROR]: Final polynomial is not zero at position 19
+[ERROR]: Final polynomial is not zero at position 20
+[ERROR]: Final polynomial is not zero at position 20
+[ERROR]: Final polynomial is not zero at position 20
+[ERROR]: Final polynomial is not zero at position 21
+[ERROR]: Final polynomial is not zero at position 21
+[ERROR]: Final polynomial is not zero at position 21
+[ERROR]: Final polynomial is not zero at position 22
+[ERROR]: Final polynomial is not zero at position 22
+[ERROR]: Final polynomial is not zero at position 22
+[ERROR]: Final polynomial is not zero at position 23
+[ERROR]: Final polynomial is not zero at position 23
+[ERROR]: Final polynomial is not zero at position 23
+[ERROR]: Final polynomial is not zero at position 24
+[ERROR]: Final polynomial is not zero at position 24
+[ERROR]: Final polynomial is not zero at position 24
+[ERROR]: Final polynomial is not zero at position 25
+[ERROR]: Final polynomial is not zero at position 25
+[ERROR]: Final polynomial is not zero at position 25
+[ERROR]: Final polynomial is not zero at position 26
+[ERROR]: Final polynomial is not zero at position 26
+[ERROR]: Final polynomial is not zero at position 26
+[ERROR]: Final polynomial is not zero at position 27
+[ERROR]: Final polynomial is not zero at position 27
+[ERROR]: Final polynomial is not zero at position 27
+[ERROR]: Final polynomial is not zero at position 28
+[ERROR]: Final polynomial is not zero at position 28
+[ERROR]: Final polynomial is not zero at position 28
+[ERROR]: Final polynomial is not zero at position 29
+[ERROR]: Final polynomial is not zero at position 29
+[ERROR]: Final polynomial is not zero at position 29
+[ERROR]: Final polynomial is not zero at position 30
+[ERROR]: Final polynomial is not zero at position 30
+[ERROR]: Final polynomial is not zero at position 30
+[ERROR]: Final polynomial is not zero at position 31
+[ERROR]: Final polynomial is not zero at position 31
+[ERROR]: Final polynomial is not zero at position 31
+2026-05-05T08:33:38.333020Z INFO: ··· ✗ Proof of Binary: Instance #0 was not verified
+2026-05-05T08:33:38.333037Z INFO:     Verifying proof of BinaryExtension: Instance #0 with global index #7
+2026-05-05T08:33:38.470884Z INFO:     ✓ Proof of BinaryExtension: Instance #0 was verified
+2026-05-05T08:33:38.470899Z INFO:     Verifying proof of DmaPrePost: Instance #0 with global index #16
+2026-05-05T08:33:38.582824Z INFO:     ✓ Proof of DmaPrePost: Instance #0 was verified
+2026-05-05T08:33:38.582842Z INFO:     Verifying proof of Arith: Instance #0 with global index #9
+[ERROR]: Invalid evaluations
+[ERROR]: Final polynomial is not zero at position 16
+[ERROR]: Final polynomial is not zero at position 16
+[ERROR]: Final polynomial is not zero at position 16
+[ERROR]: Final polynomial is not zero at position 17
+[ERROR]: Final polynomial is not zero at position 17
+[ERROR]: Final polynomial is not zero at position 17
+[ERROR]: Final polynomial is not zero at position 18
+[ERROR]: Final polynomial is not zero at position 18
+[ERROR]: Final polynomial is not zero at position 18
+[ERROR]: Final polynomial is not zero at position 19
+[ERROR]: Final polynomial is not zero at position 19
+[ERROR]: Final polynomial is not zero at position 19
+[ERROR]: Final polynomial is not zero at position 20
+[ERROR]: Final polynomial is not zero at position 20
+[ERROR]: Final polynomial is not zero at position 20
+[ERROR]: Final polynomial is not zero at position 21
+[ERROR]: Final polynomial is not zero at position 21
+[ERROR]: Final polynomial is not zero at position 21
+[ERROR]: Final polynomial is not zero at position 22
+[ERROR]: Final polynomial is not zero at position 22
+[ERROR]: Final polynomial is not zero at position 22
+[ERROR]: Final polynomial is not zero at position 23
+[ERROR]: Final polynomial is not zero at position 23
+[ERROR]: Final polynomial is not zero at position 23
+[ERROR]: Final polynomial is not zero at position 24
+[ERROR]: Final polynomial is not zero at position 24
+[ERROR]: Final polynomial is not zero at position 24
+[ERROR]: Final polynomial is not zero at position 25
+[ERROR]: Final polynomial is not zero at position 25
+[ERROR]: Final polynomial is not zero at position 25
+[ERROR]: Final polynomial is not zero at position 26
+[ERROR]: Final polynomial is not zero at position 26
+[ERROR]: Final polynomial is not zero at position 26
+[ERROR]: Final polynomial is not zero at position 27
+[ERROR]: Final polynomial is not zero at position 27
+[ERROR]: Final polynomial is not zero at position 27
+[ERROR]: Final polynomial is not zero at position 28
+[ERROR]: Final polynomial is not zero at position 28
+[ERROR]: Final polynomial is not zero at position 28
+[ERROR]: Final polynomial is not zero at position 29
+[ERROR]: Final polynomial is not zero at position 29
+[ERROR]: Final polynomial is not zero at position 29
+[ERROR]: Final polynomial is not zero at position 30
+[ERROR]: Final polynomial is not zero at position 30
+[ERROR]: Final polynomial is not zero at position 30
+[ERROR]: Final polynomial is not zero at position 31
+[ERROR]: Final polynomial is not zero at position 31
+[ERROR]: Final polynomial is not zero at position 31
+2026-05-05T08:33:38.692716Z INFO: ··· ✗ Proof of Arith: Instance #0 was not verified
+2026-05-05T08:33:38.692730Z INFO:     Verifying proof of ArithEq: Instance #0 with global index #13
+[ERROR]: Invalid evaluations
+2026-05-05T08:33:38.792072Z INFO: ··· ✗ Proof of ArithEq: Instance #0 was not verified
+2026-05-05T08:33:38.792087Z INFO:     Verifying proof of ArithEq: Instance #1 with global index #14
+[ERROR]: Invalid evaluations
+2026-05-05T08:33:38.892060Z INFO: ··· ✗ Proof of ArithEq: Instance #1 was not verified
+2026-05-05T08:33:38.892079Z INFO:     Verifying proof of Dma64Aligned: Instance #0 with global index #17
+[ERROR]: Invalid evaluations
+2026-05-05T08:33:39.002411Z INFO: ··· ✗ Proof of Dma64Aligned: Instance #0 was not verified
+2026-05-05T08:33:39.002429Z INFO:     Verifying proof of Dma: Instance #0 with global index #15
+[ERROR]: Invalid evaluations
+[ERROR]: Final polynomial is not zero at position 16
+[ERROR]: Final polynomial is not zero at position 16
+[ERROR]: Final polynomial is not zero at position 16
+[ERROR]: Final polynomial is not zero at position 17
+[ERROR]: Final polynomial is not zero at position 17
+[ERROR]: Final polynomial is not zero at position 17
+[ERROR]: Final polynomial is not zero at position 18
+[ERROR]: Final polynomial is not zero at position 18
+[ERROR]: Final polynomial is not zero at position 18
+[ERROR]: Final polynomial is not zero at position 19
+[ERROR]: Final polynomial is not zero at position 19
+[ERROR]: Final polynomial is not zero at position 19
+[ERROR]: Final polynomial is not zero at position 20
+[ERROR]: Final polynomial is not zero at position 20
+[ERROR]: Final polynomial is not zero at position 20
+[ERROR]: Final polynomial is not zero at position 21
+[ERROR]: Final polynomial is not zero at position 21
+[ERROR]: Final polynomial is not zero at position 21
+[ERROR]: Final polynomial is not zero at position 22
+[ERROR]: Final polynomial is not zero at position 22
+[ERROR]: Final polynomial is not zero at position 22
+[ERROR]: Final polynomial is not zero at position 23
+[ERROR]: Final polynomial is not zero at position 23
+[ERROR]: Final polynomial is not zero at position 23
+[ERROR]: Final polynomial is not zero at position 24
+[ERROR]: Final polynomial is not zero at position 24
+[ERROR]: Final polynomial is not zero at position 24
+[ERROR]: Final polynomial is not zero at position 25
+[ERROR]: Final polynomial is not zero at position 25
+[ERROR]: Final polynomial is not zero at position 25
+[ERROR]: Final polynomial is not zero at position 26
+[ERROR]: Final polynomial is not zero at position 26
+[ERROR]: Final polynomial is not zero at position 26
+[ERROR]: Final polynomial is not zero at position 27
+[ERROR]: Final polynomial is not zero at position 27
+[ERROR]: Final polynomial is not zero at position 27
+[ERROR]: Final polynomial is not zero at position 28
+[ERROR]: Final polynomial is not zero at position 28
+[ERROR]: Final polynomial is not zero at position 28
+[ERROR]: Final polynomial is not zero at position 29
+[ERROR]: Final polynomial is not zero at position 29
+[ERROR]: Final polynomial is not zero at position 29
+[ERROR]: Final polynomial is not zero at position 30
+[ERROR]: Final polynomial is not zero at position 30
+[ERROR]: Final polynomial is not zero at position 30
+[ERROR]: Final polynomial is not zero at position 31
+[ERROR]: Final polynomial is not zero at position 31
+[ERROR]: Final polynomial is not zero at position 31
+2026-05-05T08:33:39.108763Z INFO: ··· ✗ Proof of Dma: Instance #0 was not verified
+2026-05-05T08:33:39.108777Z INFO:     Verifying proof of MemAlign: Instance #0 with global index #3
+[ERROR]: Invalid evaluations
+2026-05-05T08:33:39.214867Z INFO: ··· ✗ Proof of MemAlign: Instance #0 was not verified
+2026-05-05T08:33:39.214882Z INFO:     Verifying proof of DmaUnaligned: Instance #0 with global index #18
+[ERROR]: Invalid evaluations
+2026-05-05T08:33:39.319433Z INFO: ··· ✗ Proof of DmaUnaligned: Instance #0 was not verified
+2026-05-05T08:33:39.319450Z INFO:     Verifying proof of Sha256f: Instance #0 with global index #11
+[ERROR]: Invalid evaluations
+2026-05-05T08:33:39.417156Z INFO: ··· ✗ Proof of Sha256f: Instance #0 was not verified
+2026-05-05T08:33:39.417173Z INFO:     Verifying proof of Sha256f: Instance #1 with global index #12
+[ERROR]: Invalid evaluations
+2026-05-05T08:33:39.514949Z INFO: ··· ✗ Proof of Sha256f: Instance #1 was not verified
+2026-05-05T08:33:39.514966Z INFO:     Verifying proof of Mem: Instance #0 with global index #6
+[ERROR]: Invalid evaluations
+[ERROR]: Final polynomial is not zero at position 16
+[ERROR]: Final polynomial is not zero at position 16
+[ERROR]: Final polynomial is not zero at position 16
+[ERROR]: Final polynomial is not zero at position 17
+[ERROR]: Final polynomial is not zero at position 17
+[ERROR]: Final polynomial is not zero at position 17
+[ERROR]: Final polynomial is not zero at position 18
+[ERROR]: Final polynomial is not zero at position 18
+[ERROR]: Final polynomial is not zero at position 18
+[ERROR]: Final polynomial is not zero at position 19
+[ERROR]: Final polynomial is not zero at position 19
+[ERROR]: Final polynomial is not zero at position 19
+[ERROR]: Final polynomial is not zero at position 20
+[ERROR]: Final polynomial is not zero at position 20
+[ERROR]: Final polynomial is not zero at position 20
+[ERROR]: Final polynomial is not zero at position 21
+[ERROR]: Final polynomial is not zero at position 21
+[ERROR]: Final polynomial is not zero at position 21
+[ERROR]: Final polynomial is not zero at position 22
+[ERROR]: Final polynomial is not zero at position 22
+[ERROR]: Final polynomial is not zero at position 22
+[ERROR]: Final polynomial is not zero at position 23
+[ERROR]: Final polynomial is not zero at position 23
+[ERROR]: Final polynomial is not zero at position 23
+[ERROR]: Final polynomial is not zero at position 24
+[ERROR]: Final polynomial is not zero at position 24
+[ERROR]: Final polynomial is not zero at position 24
+[ERROR]: Final polynomial is not zero at position 25
+[ERROR]: Final polynomial is not zero at position 25
+[ERROR]: Final polynomial is not zero at position 25
+[ERROR]: Final polynomial is not zero at position 26
+[ERROR]: Final polynomial is not zero at position 26
+[ERROR]: Final polynomial is not zero at position 26
+[ERROR]: Final polynomial is not zero at position 27
+[ERROR]: Final polynomial is not zero at position 27
+[ERROR]: Final polynomial is not zero at position 27
+[ERROR]: Final polynomial is not zero at position 28
+[ERROR]: Final polynomial is not zero at position 28
+[ERROR]: Final polynomial is not zero at position 28
+[ERROR]: Final polynomial is not zero at position 29
+[ERROR]: Final polynomial is not zero at position 29
+[ERROR]: Final polynomial is not zero at position 29
+[ERROR]: Final polynomial is not zero at position 30
+[ERROR]: Final polynomial is not zero at position 30
+[ERROR]: Final polynomial is not zero at position 30
+[ERROR]: Final polynomial is not zero at position 31
+[ERROR]: Final polynomial is not zero at position 31
+[ERROR]: Final polynomial is not zero at position 31
+2026-05-05T08:33:39.650475Z INFO: ··· ✗ Proof of Mem: Instance #0 was not verified
+2026-05-05T08:33:39.650489Z INFO:     Verifying proof of InputData: Instance #0 with global index #5
+[ERROR]: Invalid evaluations
+2026-05-05T08:33:39.754943Z INFO: ··· ✗ Proof of InputData: Instance #0 was not verified
+2026-05-05T08:33:39.754959Z INFO:     Verifying proof of RomData: Instance #0 with global index #4
+[ERROR]: Invalid evaluations
+2026-05-05T08:33:39.859124Z INFO: ··· ✗ Proof of RomData: Instance #0 was not verified
+2026-05-05T08:33:39.859142Z INFO:     Verifying proof of SpecifiedRanges: Instance #0 with global index #19
+2026-05-05T08:33:39.963331Z INFO:     ✓ Proof of SpecifiedRanges: Instance #0 was verified
+2026-05-05T08:33:39.963349Z INFO:     Verifying proof of VirtualTable0: Instance #0 with global index #20
+2026-05-05T08:33:40.081588Z INFO:     ✓ Proof of VirtualTable0: Instance #0 was verified
+2026-05-05T08:33:40.081604Z INFO:     Verifying proof of VirtualTable1: Instance #0 with global index #21
+2026-05-05T08:33:40.201218Z INFO:     ✓ Proof of VirtualTable1: Instance #0 was verified
+2026-05-05T08:33:40.201236Z INFO: <<< VERIFYING_PROOFS (2898ms)
+2026-05-05T08:33:40.201251Z INFO: --> Checking global constraints
+2026-05-05T08:33:40.201454Z INFO: ··· ✓ All global constraints were successfully verified
+2026-05-05T08:33:40.652304Z INFO: >>> [0] Stopping ASM microservices.
+2026-05-05T08:33:40.652325Z INFO: Shutting down stdio service mo.
+2026-05-05T08:33:40.737381Z INFO: Shutting down stdio service mt.
+2026-05-05T08:33:40.821709Z INFO: Shutting down stdio service rh.
+Error: Error executing Prove command
+
+Caused by:
+    Error generating proof: Proof error: Basic proofs were not verified

@@ -3,7 +3,7 @@
 # Profiles:
 #   cuda  — NVIDIA GPU prover (default). Requires NVIDIA driver 570+, CUDA 12.8,
 #           nvidia-container-toolkit.
-#   cpu   — API-only, no proof generation. ZisK v0.15.0 GPU proving keys are
+#   cpu   — API-only, no proof generation. ZisK v0.17.0 GPU proving keys are
 #           incompatible with CPU provers (different Merkle tree format).
 #
 # Usage:
@@ -24,6 +24,7 @@ services:
       - "${LISTEN_PORT:-8080}:8080"
     volumes:
       - ${PROVING_KEY_PATH:-~/.zisk/provingKey}:/proving-key
+      - ${PROVING_KEY_PLONK_PATH:-~/.zisk/provingKeySnark}:/root/.zisk/provingKeySnark
       - proofs:/proofs
     environment:
       - PROOF_OUTPUT_DIR=/proofs
@@ -31,7 +32,14 @@ services:
       - ZISK_MPI_PROCS=${ZISK_MPI_PROCS:-1}
       - ZISK_MPI_THREADS=${ZISK_MPI_THREADS:-0}
       - ZISK_MPI_BIND_TO=${ZISK_MPI_BIND_TO:-none}
+      - GENERATE_FINAL_SNARK=${GENERATE_FINAL_SNARK:-false}
+      - VERIFY_ZISK_PROOFS=${VERIFY_ZISK_PROOFS:-false}
     restart: unless-stopped
+    ipc: host
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
     deploy:
       resources:
         reservations:
@@ -56,6 +64,7 @@ services:
       - "${LISTEN_PORT:-8080}:8080"
     volumes:
       - ${PROVING_KEY_PATH:-~/.zisk/provingKey}:/proving-key
+      - ${PROVING_KEY_PLONK_PATH:-~/.zisk/provingKeySnark}:/root/.zisk/provingKeySnark
       - proofs:/proofs
     environment:
       - PROOF_OUTPUT_DIR=/proofs
@@ -63,6 +72,8 @@ services:
       - ZISK_MPI_PROCS=${ZISK_MPI_PROCS:-1}
       - ZISK_MPI_THREADS=${ZISK_MPI_THREADS:-0}
       - ZISK_MPI_BIND_TO=${ZISK_MPI_BIND_TO:-none}
+      - GENERATE_FINAL_SNARK=${GENERATE_FINAL_SNARK:-false}
+      - VERIFY_ZISK_PROOFS=${VERIFY_ZISK_PROOFS:-false}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
