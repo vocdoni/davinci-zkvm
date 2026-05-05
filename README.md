@@ -63,7 +63,7 @@ cd davinci-zkvm
 # GPU prover (default)
 docker compose up -d
 
-# CPU-only (API only — ZisK v0.15 GPU keys are incompatible with CPU proving)
+# CPU-only (API only — ZisK v0.17 GPU keys are incompatible with CPU proving)
 COMPOSE_PROFILES=cpu docker compose up -d
 ```
 
@@ -83,7 +83,7 @@ make test
 Override defaults as needed:
 
 ```bash
-make setup PROVER_MODE=gpu ZISK_VERSION=v0.15.0 PROVING_KEY_PATH=/data/provingKey
+make setup PROVER_MODE=gpu ZISK_VERSION=v0.17.0 PROVING_KEY_PATH=/data/provingKey
 make run   ZISK_MPI_PROCS=4 ZISK_MPI_THREADS=8
 ```
 

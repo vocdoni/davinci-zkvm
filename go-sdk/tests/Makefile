@@ -15,7 +15,7 @@ REPO_ROOT        := $(realpath $(dir $(COMPOSE_FILE)))
 
 # Run ALL integration tests (requires GPU service with proving support)
 test:  ## Run all integration tests (CUDA GPU, requires running service)
-	DAVINCI_API_URL=$(API_URL) go test -v -timeout 30m ./...
+	PATH="$(HOME)/.zisk/bin:$$PATH" DAVINCI_API_URL=$(API_URL) go test -v -timeout 30m ./...
 
 # Run lightweight tests only (health, validation, 404 — no proving)
 test-unit:  ## Run lightweight tests (no proving required)
