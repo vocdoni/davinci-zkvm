@@ -166,18 +166,22 @@ async fn run_prove(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
     //   .arg("--final-snark")
     // and update the /proof download endpoint to serve the resulting JSON file
     // instead of vadcop_final_proof.bin.
+    // v0.18.0 flag changes:
+    // --input → --inputs, --output-dir → --output (file), --aggregation removed
+    // (aggregation is now the default), --gpu added explicitly.
+    let proof_output_path = task.output_dir.join("proof.bin");
     let zisk_args: Vec<String> = vec![
         "prove".to_string(),
         "--elf".to_string(),
         config.circuit_elf_path.display().to_string(),
-        "--input".to_string(),
+        "--inputs".to_string(),
         task.input_path.display().to_string(),
         "--proving-key".to_string(),
         config.proving_key_path.display().to_string(),
-        "--output-dir".to_string(),
-        task.output_dir.display().to_string(),
+        "--output".to_string(),
+        proof_output_path.display().to_string(),
         "--emulator".to_string(),
-        "--aggregation".to_string(),
+        "--gpu".to_string(),
         "--verify-proofs".to_string(),
     ];
 

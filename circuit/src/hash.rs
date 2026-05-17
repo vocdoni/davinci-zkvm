@@ -4,7 +4,8 @@
 //! - [`sha256_once`]: SHA-256 via `sha256f` (N = 2²² rows, 72 rows/block)
 //! - [`keccak256_short`]: Keccak-256 via `keccak_f` (N = 2¹⁷ rows, 25 rows/permutation)
 
-use ziskos::{syscalls::syscall_keccak_f, zisklib::sha256f_compress};
+use ziskos::syscalls::syscall_keccak_f;
+use ziskos::zisklib::sha256f_compress_c;
 
 /// Compute SHA-256 of `data` using the ZisK `sha256f` hardware precompile.
 ///
@@ -26,7 +27,8 @@ pub fn sha256_once(data: &[u8]) -> [u8; 32] {
     for i in 0..n_blocks {
         blocks.push(padded[i * 64..(i + 1) * 64].try_into().unwrap());
     }
-    sha256f_compress(&mut state, &blocks);
+    let flat: Vec<u8> = blocks.iter().flat_map(|b| b.iter().copied()).collect();
+    unsafe { sha256f_compress_c(state.as_mut_ptr(), flat.as_ptr(), blocks.len()) };
     let mut out = [0u8; 32];
     for i in 0..8 {
         out[i * 4..(i + 1) * 4].copy_from_slice(&state[i].to_be_bytes());
@@ -56,7 +58,7 @@ pub fn keccak256_short(data: &[u8]) -> [u8; 32] {
     let pad = data.len();
     state[pad / 8]   ^= 0x01u64 << ((pad % 8) * 8);
     state[135 / 8]   ^= 0x80u64 << ((135 % 8) * 8);
-    syscall_keccak_f(&mut state as *mut [u64; 25]);
+    unsafe { syscall_keccak_f(&mut state as *mut [u64; 25]) };
     // Extract first 32 bytes from the LE-lane state.
     let mut out = [0u8; 32];
     for i in 0..32usize {

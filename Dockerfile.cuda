@@ -1,50 +1,27 @@
-# ── Stage 1: Build cargo-zisk with CUDA GPU support ──────────────────────────
-# Uses CUDA 12.8 — required for RTX 5000 series (Blackwell sm_120, PTX 8.7)
-# Driver 570+ needed; CUDA 13.x is NOT compatible with driver 570
-FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04 AS cuda-builder
+# ── Stage 1: Download ZisK prebuilt GPU binary ───────────────────────────────
+# Uses the official prebuilt cargo-zisk-gpu for linux/amd64 from the ZisK release.
+# This avoids a multi-hour CUDA source build during docker image construction.
+FROM ubuntu:24.04 AS zisk-downloader
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    git \
-    build-essential \
-    pkg-config \
-    libssl-dev \
     ca-certificates \
-    cmake \
-    libgmp-dev \
-    nlohmann-json3-dev \
-    libsodium-dev \
-    libopenmpi-dev \
-    nasm \
-    libclang-dev \
-    clang \
-    protobuf-compiler \
-    libprotobuf-dev \
-    libomp-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rust toolchain
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
-    -y --default-toolchain stable --profile minimal
-ENV PATH="/root/.cargo/bin:$PATH"
+ARG ZISK_VERSION=v0.18.0
 
-ARG ZISK_VERSION=v0.15.0
-
-# Clone ZisK source at the pinned version and build with GPU support
-RUN git clone --depth 1 --branch ${ZISK_VERSION} \
-    https://github.com/0xPolygonHermez/zisk.git /src/zisk
-
-WORKDIR /src/zisk
-
-# Use CUDA 12.8 nvcc for building libstarksgpu.a
-ENV PATH="/usr/local/cuda-12.8/bin:$PATH"
-
-# Build libstarksgpu.a then cargo-zisk with GPU support
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    bash -c 'set -euo pipefail; cargo build --release --features gpu 2>&1 | tee /tmp/build.log'
+# Download and extract the prebuilt ZisK GPU bundle for linux/amd64.
+# The tarball layout: ./bin/{cargo-zisk-gpu,cargo-zisk-cpu,...} + ./zisk/emulator-asm/...
+RUN curl -fL \
+    "https://github.com/0xPolygonHermez/zisk/releases/download/${ZISK_VERSION}/cargo_zisk_linux_amd64.tar.gz" \
+    -o /tmp/cargo_zisk.tar.gz && \
+    mkdir -p /opt/zisk && \
+    tar --ignore-zeros -xzf /tmp/cargo_zisk.tar.gz -C /opt/zisk && \
+    rm /tmp/cargo_zisk.tar.gz && \
+    # Symlink cargo-zisk -> cargo-zisk-gpu for backward compatibility
+    ln -sf /opt/zisk/bin/cargo-zisk-gpu /opt/zisk/bin/cargo-zisk
 
 # ── Stage 2: Build the Rust service ───────────────────────────────────────────
 FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04 AS service-builder
@@ -98,19 +75,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openmpi-bin \
     openmpi-common \
     libomp5-18 \
+    build-essential \
+    nasm \
+    libgmp-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Create symlink for libzisk_witness.so at the default path cargo-zisk expects
-RUN mkdir -p /root/.zisk/bin && \
-    ln -s /usr/local/lib/libzisk_witness.so /root/.zisk/bin/libzisk_witness.so
+# Ensure ~/.zisk/bin exists for cargo-zisk support files
+RUN mkdir -p /root/.zisk/bin
 
-# Copy GPU-enabled cargo-zisk
-COPY --from=cuda-builder /src/zisk/target/release/cargo-zisk /usr/local/bin/cargo-zisk
-# libzisk_witness.so may not exist in all builds; copy if present
-RUN --mount=from=cuda-builder,source=/src/zisk/target/release,target=/zisk-build \
-    cp /zisk-build/libzisk_witness.so /usr/local/lib/libzisk_witness.so 2>/dev/null || true
+# Copy ZisK GPU binary and supporting files from the downloader stage.
+# v0.18.0 ships cargo-zisk-gpu; cargo-zisk symlink is set in the downloader stage.
+COPY --from=zisk-downloader /opt/zisk/bin/cargo-zisk-gpu /usr/local/bin/cargo-zisk-gpu
+COPY --from=zisk-downloader /opt/zisk/bin/cargo-zisk /usr/local/bin/cargo-zisk
+COPY --from=zisk-downloader /opt/zisk/bin/ziskemu /usr/local/bin/ziskemu
+# riscv2zisk converts RISC-V ELF to ZisK assembly during ROM setup (first prove)
+COPY --from=zisk-downloader /opt/zisk/bin/riscv2zisk /usr/local/bin/riscv2zisk
+# libziskclib.a is required at ~/.zisk/bin/ by cargo-zisk prove (pre-built C library)
+COPY --from=zisk-downloader /opt/zisk/bin/libziskclib.a /root/.zisk/bin/libziskclib.a
+# zisk support files needed by check-setup and proving (emulator-asm, lib-c)
+COPY --from=zisk-downloader /opt/zisk/zisk /root/.zisk/zisk
 
 # Copy service binary
 COPY --from=service-builder /build/target/release/davinci-zkvm /app/davinci-zkvm
@@ -140,18 +125,17 @@ COPY <<'EOF' /app/entrypoint.sh
 set -e
 
 # Build constant trees if not present (GPU-specific format: .consttree_gpu)
+# Note: in v0.18.0, -a means --no-aggregation; use --gpu for GPU trees.
 CONSTTREE_CHECK="${PROVING_KEY_PATH}/zisk/Zisk/airs/ArithEq/compressor/compressor.consttree_gpu"
 CONSTTREE_CHECK_CPU="${PROVING_KEY_PATH}/zisk/Zisk/airs/ArithEq/compressor/compressor.consttree"
 if [ ! -f "${CONSTTREE_CHECK}" ] && [ ! -f "${CONSTTREE_CHECK_CPU}" ]; then
     echo "=== Constant trees not found. Running check-setup (this may take a while) ==="
-    /usr/local/bin/cargo-zisk check-setup --proving-key "${PROVING_KEY_PATH}" -a
+    /usr/local/bin/cargo-zisk check-setup --proving-key "${PROVING_KEY_PATH}" --gpu
 fi
 
-# GPU warmup: run check-setup (basic, no -a) to initialize CUDA twiddle factors
-# and force the NVIDIA driver to create a stable device context before serving.
-# This prevents the "context is destroyed" cold-start race on the first prove call.
+# GPU warmup: initialize CUDA twiddle factors before serving the first request.
 echo "=== GPU warmup: initializing CUDA context ==="
-/usr/local/bin/cargo-zisk check-setup --proving-key "${PROVING_KEY_PATH}" 2>/dev/null || true
+/usr/local/bin/cargo-zisk check-setup --proving-key "${PROVING_KEY_PATH}" --gpu 2>/dev/null || true
 
 exec /app/davinci-zkvm "$@"
 EOF

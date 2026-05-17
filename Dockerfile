@@ -31,7 +31,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
     -y --default-toolchain stable --profile minimal
 ENV PATH="/root/.cargo/bin:$PATH"
 
-ARG ZISK_VERSION=v0.15.0
+ARG ZISK_VERSION=v0.18.0
 
 # Clone ZisK source at the pinned version
 RUN git clone --depth 1 --branch ${ZISK_VERSION} \

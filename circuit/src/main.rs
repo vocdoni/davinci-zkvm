@@ -19,7 +19,7 @@ mod smt;
 mod types;
 
 use crate::types::{FrRaw, ZERO_FR};
-use ziskos::{read_input_slice, set_output};
+use ziskos::io::{commit_slice, read_input_slice};
 
 /// Extract the Ethereum address (uint160) from a packed census leaf.
 /// Census leaves encode `PackAddressWeight(address, weight) = (address << 88) | weight`.
@@ -83,13 +83,12 @@ fn hash_enc_key(x: &FrRaw, y: &FrRaw) -> FrRaw {
 // [44] n_public    => number of public inputs per proof
 // [45] log_n       => log₂ of the aggregation tree depth
 
-/// Emit a 256-bit `FrRaw` (4 × u64 LE words) as 8 consecutive u32 output registers
-/// starting at `base`.  Each u64 word is split into lo (bits 0-31) and hi (bits 32-63).
+/// Write a 256-bit `FrRaw` into output register buffer at `base`.
 #[inline(always)]
-fn set_fr_output(base: usize, v: &FrRaw) {
+fn write_fr_output(out: &mut [u32; 46], base: usize, v: &FrRaw) {
     for i in 0..4 {
-        set_output(base + i * 2,     (v[i] & 0xFFFF_FFFF) as u32);
-        set_output(base + i * 2 + 1, (v[i] >> 32) as u32);
+        out[base + i * 2]     = (v[i] & 0xFFFF_FFFF) as u32;
+        out[base + i * 2 + 1] = (v[i] >> 32) as u32;
     }
 }
 
@@ -340,29 +339,40 @@ fn main() {
 
     // census_root is the Merkle root or CSP Ethereum address depending on censusOrigin.
 
+    // Build the 46 u32 output registers and emit as a byte slice.
+    // This is the v0.18.0 approach: set_output is private, use commit_slice instead.
+    let mut out = [0u32; 46];
+
     // Status
-    set_output(0, overall_ok as u32);
-    set_output(1, fail_mask);
+    out[0] = overall_ok as u32;
+    out[1] = fail_mask;
 
     // Public inputs (davinci-node StateTransitionCircuit)
-    set_fr_output( 2, &old_root);      // RootHashBefore
-    set_fr_output(10, &new_root);      // RootHashAfter
-    set_output(18, voters as u32);     // VotersCount
-    set_output(19, overwritten as u32);// OverwrittenVotesCount
-    set_fr_output(20, &census_root);   // CensusRoot
+    write_fr_output(&mut out,  2, &old_root);    // RootHashBefore
+    write_fr_output(&mut out, 10, &new_root);    // RootHashAfter
+    out[18] = voters as u32;                     // VotersCount
+    out[19] = overwritten as u32;                // OverwrittenVotesCount
+    write_fr_output(&mut out, 20, &census_root); // CensusRoot
 
     // BlobCommitmentLimbs: each 128-bit limb stored as 4 × u32 LE.
     let limb_u32s = kzg::commitment_to_limb_u32s(&kzg_commitment);
     for (l, limb) in limb_u32s.iter().enumerate() {
         for (w, &word) in limb.iter().enumerate() {
-            set_output(28 + l * 4 + w, word);
+            out[28 + l * 4 + w] = word;
         }
     }
 
     // Diagnostics
-    set_output(40, batch_ok as u32);
-    set_output(41, auth_ok as u32);
-    set_output(43, parsed.nproofs as u32);
-    set_output(44, parsed.n_public as u32);
-    set_output(45, parsed.log_n as u32);
+    out[40] = batch_ok as u32;
+    out[41] = auth_ok as u32;
+    out[43] = parsed.nproofs as u32;
+    out[44] = parsed.n_public as u32;
+    out[45] = parsed.log_n as u32;
+
+    // Emit all 46 registers as LE bytes
+    let mut out_bytes = [0u8; 46 * 4];
+    for (i, &reg) in out.iter().enumerate() {
+        out_bytes[i * 4..i * 4 + 4].copy_from_slice(&reg.to_le_bytes());
+    }
+    commit_slice(&out_bytes);
 }
