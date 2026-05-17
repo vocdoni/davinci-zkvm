@@ -5,4 +5,4 @@ edition = "2021"
 default-run = "davinci-zkvm-circuit"
 
 [dependencies]
-ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", tag = "v0.15.0" }
+ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", tag = "v0.18.0" }

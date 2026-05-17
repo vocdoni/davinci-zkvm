@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-ZISK_VERSION="${ZISK_VERSION:-v0.15.0}"
+ZISK_VERSION="${ZISK_VERSION:-v0.18.0}"
 ZISK_REPO="${ZISK_REPO:-https://github.com/0xPolygonHermez/zisk.git}"
 ZISK_SRC="${ZISK_SRC:-$HOME/zisk}"
 ZISK_HOME="${ZISK_HOME:-$HOME/.zisk}"
@@ -103,19 +103,33 @@ ensure_path() {
   export PATH="$ZISK_BIN_DIR:$PATH"
 }
 
-clone_or_update_zisk() {
-  if [[ -d "$ZISK_SRC/.git" ]]; then
-    log "Updating existing zisk repo at $ZISK_SRC"
-    git -C "$ZISK_SRC" fetch --tags --force
-    git -C "$ZISK_SRC" checkout "$ZISK_VERSION"
-  elif [[ -d "$ZISK_SRC" ]]; then
-    warn "Directory exists but is not a git repo: $ZISK_SRC"
-    warn "Remove it or set ZISK_SRC to a clean path."
-    exit 1
-  else
-    log "Cloning zisk $ZISK_VERSION into $ZISK_SRC"
-    git clone --depth 1 --branch "$ZISK_VERSION" "$ZISK_REPO" "$ZISK_SRC"
+download_zisk_prebuilt() {
+  local arch="amd64"
+  local platform="linux"
+  local tarball="cargo_zisk_${platform}_${arch}.tar.gz"
+  local url="https://github.com/0xPolygonHermez/zisk/releases/download/${ZISK_VERSION}/${tarball}"
+  local tmp_tar="/tmp/${tarball}"
+
+  log "Downloading ZisK ${ZISK_VERSION} prebuilt binaries from ${url}"
+  curl -fL "${url}" -o "${tmp_tar}"
+
+  log "Extracting ZisK binaries to ${ZISK_HOME}"
+  rm -rf "${ZISK_HOME}/bin" "${ZISK_HOME}/zisk"
+  mkdir -p "${ZISK_HOME}"
+  tar --ignore-zeros -xzf "${tmp_tar}" -C "${ZISK_HOME}"
+  rm -f "${tmp_tar}"
+
+  # v0.18.0+ ships cargo-zisk-gpu and cargo-zisk-cpu; create cargo-zisk symlink.
+  if [[ "$SELECTED_PROVER_MODE" == "gpu" ]] && [[ -f "${ZISK_BIN_DIR}/cargo-zisk-gpu" ]]; then
+    ln -sf "${ZISK_BIN_DIR}/cargo-zisk-gpu" "${ZISK_BIN_DIR}/cargo-zisk"
+    log "Symlinked cargo-zisk -> cargo-zisk-gpu"
+  elif [[ -f "${ZISK_BIN_DIR}/cargo-zisk-cpu" ]]; then
+    ln -sf "${ZISK_BIN_DIR}/cargo-zisk-cpu" "${ZISK_BIN_DIR}/cargo-zisk"
+    log "Symlinked cargo-zisk -> cargo-zisk-cpu"
   fi
+
+  log "Installed ZisK ${ZISK_VERSION} artifacts in ${ZISK_BIN_DIR}"
+  "${ZISK_BIN_DIR}/cargo-zisk" --version
 }
 
 detect_prover_mode() {
@@ -143,69 +157,9 @@ detect_prover_mode() {
   log "Selected prover mode: $SELECTED_PROVER_MODE (requested: $PROVER_MODE)"
 }
 
-build_zisk() {
-  if [[ "$SELECTED_PROVER_MODE" == "gpu" ]]; then
-    if [[ -d "$CUDA_BIN" ]]; then
-      export PATH="$CUDA_BIN:$PATH"
-      log "Using CUDA toolchain at $CUDA_BIN"
-    elif ! command -v nvcc >/dev/null 2>&1; then
-      echo "[install][error] GPU mode selected but CUDA toolchain not found." >&2
-      echo "[install][error] Set CUDA_BIN to your CUDA 12.8 bin dir or use PROVER_MODE=cpu." >&2
-      exit 1
-    fi
-
-    log "Building zisk with GPU support (--features gpu)"
-    (cd "$ZISK_SRC" && cargo build --release --features gpu)
-  else
-    log "Building zisk in CPU mode"
-    (cd "$ZISK_SRC" && cargo build --release)
-  fi
-}
-
-install_zisk_artifacts() {
-  mkdir -p "$ZISK_BIN_DIR"
-
-  local binaries=(
-    cargo-zisk
-    ziskemu
-    riscv2zisk
-    zisk-coordinator
-    zisk-worker
-  )
-
-  for f in "${binaries[@]}"; do
-    if [[ -f "$ZISK_SRC/target/release/$f" ]]; then
-      cp "$ZISK_SRC/target/release/$f" "$ZISK_BIN_DIR/$f"
-    fi
-  done
-
-  if [[ -f "$ZISK_SRC/target/release/libzisk_witness.so" ]]; then
-    cp "$ZISK_SRC/target/release/libzisk_witness.so" "$ZISK_BIN_DIR/libzisk_witness.so"
-  fi
-  if [[ -f "$ZISK_SRC/target/release/libziskclib.a" ]]; then
-    cp "$ZISK_SRC/target/release/libziskclib.a" "$ZISK_BIN_DIR/libziskclib.a"
-  fi
-
-  mkdir -p "$ZISK_HOME/zisk/emulator-asm"
-  if [[ -d "$ZISK_SRC/emulator-asm/src" ]]; then
-    rm -rf "$ZISK_HOME/zisk/emulator-asm/src"
-    cp -r "$ZISK_SRC/emulator-asm/src" "$ZISK_HOME/zisk/emulator-asm/src"
-  fi
-  if [[ -f "$ZISK_SRC/emulator-asm/Makefile" ]]; then
-    cp "$ZISK_SRC/emulator-asm/Makefile" "$ZISK_HOME/zisk/emulator-asm/Makefile"
-  fi
-  if [[ -d "$ZISK_SRC/lib-c" ]]; then
-    rm -rf "$ZISK_HOME/zisk/lib-c"
-    cp -r "$ZISK_SRC/lib-c" "$ZISK_HOME/zisk/lib-c"
-  fi
-
-  log "Installed zisk artifacts in $ZISK_BIN_DIR"
-  "$ZISK_BIN_DIR/cargo-zisk" --version
-}
-
 install_zisk_toolchain() {
-  log "Installing zisk Rust toolchain via cargo-zisk sdk install-toolchain"
-  "$ZISK_BIN_DIR/cargo-zisk" sdk install-toolchain
+  log "Installing ZisK Rust toolchain via cargo-zisk toolchain install"
+  "$ZISK_BIN_DIR/cargo-zisk" toolchain install
 }
 
 build_davinci_bins() {
@@ -257,7 +211,7 @@ setup_proving_key() {
   local zisk_home
   zisk_home="$(dirname "$PROVING_KEY_PATH")"
   rm -rf "$PROVING_KEY_PATH" "$zisk_home/verifyKey" "$zisk_home/cache"
-  tar --overwrite -xf "/tmp/${key_file}" -C "$zisk_home"
+  tar --ignore-zeros -xzf "/tmp/${key_file}" -C "$zisk_home"
   rm -f "/tmp/${key_file}" "/tmp/${key_file}.md5"
   log "Proving key installed."
 }
@@ -274,11 +228,10 @@ setup_const_trees() {
   fi
 
   log "Building constant trees (this can take a long time)"
-  "$ZISK_BIN_DIR/cargo-zisk" check-setup --proving-key "$PROVING_KEY_PATH" -a
-
   if [[ "$SELECTED_PROVER_MODE" == "gpu" ]]; then
-    log "GPU warmup check-setup"
-    "$ZISK_BIN_DIR/cargo-zisk" check-setup --proving-key "$PROVING_KEY_PATH" || true
+    "$ZISK_BIN_DIR/cargo-zisk" check-setup --proving-key "$PROVING_KEY_PATH" --gpu
+  else
+    "$ZISK_BIN_DIR/cargo-zisk" check-setup --proving-key "$PROVING_KEY_PATH"
   fi
 }
 
@@ -343,9 +296,7 @@ main() {
   install_system_deps
   ensure_path
   detect_prover_mode
-  clone_or_update_zisk
-  build_zisk
-  install_zisk_artifacts
+  download_zisk_prebuilt
   install_zisk_toolchain
   build_davinci_bins
   setup_proving_key

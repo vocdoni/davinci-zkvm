@@ -21,12 +21,11 @@
 use crate::hash::keccak256_short;
 use crate::io::ParsedInput;
 use crate::types::{FrRaw, FAIL_ECDSA};
-use ziskos::syscalls::SyscallPoint256;
-use ziskos::zisklib::secp256k1_ecdsa_verify;
+use ziskos::zisklib::ecdsa_verify_secp256k1;
 
 /// Compute the Ethereum signed-message hash of `vote_id` as a `[u64; 4]` LE scalar.
 ///
-/// The result is used as `z` in `secp256k1_ecdsa_verify(pk, z, r, s)`.
+/// The result is used as `z` in `ecdsa_verify_secp256k1(pk, z, r, s)`.
 fn eth_message_hash(vote_id: u64) -> [u64; 4] {
     // Prefix: "\x19Ethereum Signed Message:\n32" = 28 bytes
     const PREFIX: &[u8] = b"\x19Ethereum Signed Message:\n32";
@@ -101,10 +100,13 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
             return false;
         }
         let vote_id = pubs[1][0];
-        let pk      = SyscallPoint256 { x: sig.px, y: sig.py };
+        let pk: [u64; 8] = [
+            sig.px[0], sig.px[1], sig.px[2], sig.px[3],
+            sig.py[0], sig.py[1], sig.py[2], sig.py[3],
+        ];
         let z       = eth_message_hash(vote_id);
 
-        if !secp256k1_ecdsa_verify(&pk, &z, &sig.r, &sig.s) {
+        if !ecdsa_verify_secp256k1(&pk, &z, &sig.r, &sig.s) {
             *fail_mask |= FAIL_ECDSA;
             return false;
         }

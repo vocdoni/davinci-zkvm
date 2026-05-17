@@ -50,10 +50,11 @@ pub async fn get_job_proof(
         }
     }
 
-    // The proof binary is stored at: <proof_output_dir>/<job_id>/vadcop_final_proof.bin
+    // The proof binary is stored at: <proof_output_dir>/<job_id>/proof.bin
+    // (v0.18.0 uses --output <file> to specify the proof output path)
     let proof_path = state.config.proof_output_dir
         .join(id.to_string())
-        .join("vadcop_final_proof.bin");
+        .join("proof.bin");
 
     let file = match File::open(&proof_path).await {
         Ok(f) => f,

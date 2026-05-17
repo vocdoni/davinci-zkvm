@@ -3,7 +3,7 @@
 # Profiles:
 #   cuda  — NVIDIA GPU prover (default). Requires NVIDIA driver 570+, CUDA 12.8,
 #           nvidia-container-toolkit.
-#   cpu   — API-only, no proof generation. ZisK v0.15.0 GPU proving keys are
+#   cpu   — API-only, no proof generation. ZisK v0.18.0 GPU proving keys are
 #           incompatible with CPU provers (different Merkle tree format).
 #
 # Usage:
@@ -32,6 +32,10 @@ services:
       - ZISK_MPI_THREADS=${ZISK_MPI_THREADS:-0}
       - ZISK_MPI_BIND_TO=${ZISK_MPI_BIND_TO:-none}
     restart: unless-stopped
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
     deploy:
       resources:
         reservations:
