@@ -9,7 +9,7 @@ import "encoding/json"
 // MaxBatchSize is the maximum number of voter ballots per ProveBatch call.
 // Must be a power of two. Matches the MAX_BATCH_SIZE constant in the circuit
 // and input-gen crate. Change this value in both places when increasing the limit.
-const MaxBatchSize = 128
+const MaxBatchSize = 512
 
 // Output register layout for the ZisK circuit.
 // These constants identify the index of each u32 output register returned

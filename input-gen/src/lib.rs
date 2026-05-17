@@ -22,7 +22,7 @@ const STATE_MAGIC: u64 = u64::from_le_bytes(*b"STATETX!");
 
 /// Maximum number of ballot proofs per batch. Must match the circuit constant.
 /// Change this value to support larger or smaller batch sizes.
-pub const MAX_BATCH_SIZE: usize = 128;
+pub const MAX_BATCH_SIZE: usize = 512;
 
 /// One Arbo-compatible SMT state-transition entry for binary encoding.
 /// All `[u64; 4]` fields use little-endian word order (word[0] = least-significant 64 bits),
@@ -480,7 +480,7 @@ fn compute_r_shift(proofs: &[Proof<Bn254>], public_inputs: &[Vec<Fr>]) -> Fr {
 
 /// Generate ZisK binary input from a snarkjs VK and an array of proofs + public inputs.
 /// The `proofs` and `public_inputs` arrays must have the same length, which must be a
-/// power of two >= 2 up to MAX_BATCH_SIZE (128).
+/// power of two >= 2 up to MAX_BATCH_SIZE.
 /// Returns raw bytes suitable for writing to disk and passing to `cargo-zisk prove --input`.
 pub fn generate_input(vk: &SnarkJsVk, proofs_json: &[SnarkJsProof], public_inputs_json: &[Vec<String>], sigs: &[EcdsaSig]) -> Result<Vec<u8>> {
     let num_proofs = proofs_json.len();

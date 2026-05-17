@@ -10,11 +10,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"os"
 
 	"github.com/vocdoni/davinci-node/circuits/ballotproof"
 	ballotprooftest "github.com/vocdoni/davinci-node/circuits/test/ballotproof"
 	"github.com/vocdoni/davinci-node/crypto"
 	"github.com/vocdoni/davinci-node/crypto/ecc"
+	bjjgnark "github.com/vocdoni/davinci-node/crypto/ecc/bjj_gnark"
 	nodesig "github.com/vocdoni/davinci-node/crypto/signatures/ethereum"
 	"github.com/vocdoni/davinci-node/types"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
@@ -82,6 +84,13 @@ func GenerateBallotBatch(
 	voters []*Voter,
 	seedBase int64,
 ) (*BatchProveComponents, error) {
+	// Delegate to a subprocess so that all wasmer/rapidsnark CGO memory
+	// (~128 MB WASM linear memory per proof) is reclaimed by the OS on exit.
+	// Worker mode bypasses this to avoid infinite recursion.
+	if len(voters) > 16 && os.Getenv("BALLOT_WORKER_MODE") != "1" {
+		return generateBallotBatchViaSubprocess(processID, encKey.(*bjjgnark.BJJ), voters, seedBase)
+	}
+
 	n := len(voters)
 	vkBytes := ballotproof.CircomVerificationKey
 
@@ -149,6 +158,7 @@ func GenerateBallotBatch(
 			PublicInputs: pubSigs,
 			SigJSON:      sigBytes,
 		}
+
 	}
 
 	return &BatchProveComponents{
@@ -225,3 +235,4 @@ m["curve"] = json.RawMessage(curveJSON)
 out, err := json.Marshal(m)
 return string(out), err
 }
+
