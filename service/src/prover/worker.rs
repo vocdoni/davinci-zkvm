@@ -47,7 +47,16 @@ impl ProverHandle {
         let job_dir = proof_output_dir.join(job_id.to_string());
         tokio::fs::create_dir_all(&job_dir).await?;
         let input_path = job_dir.join("input.bin");
-        tokio::fs::write(&input_path, &input_bytes).await?;
+        // v0.18.0: ziskos read_slice_zerocopy() reads an 8-byte LE u64 length at
+        // INPUT_ADDR+8, then that many bytes of payload. Wrap input_bytes accordingly.
+        let payload_len = input_bytes.len() as u64;
+        let mut prefixed = Vec::with_capacity(8 + input_bytes.len());
+        prefixed.extend_from_slice(&payload_len.to_le_bytes());
+        prefixed.extend_from_slice(&input_bytes);
+        while prefixed.len() % 8 != 0 {
+            prefixed.push(0);
+        }
+        tokio::fs::write(&input_path, &prefixed).await?;
         let output_dir = job_dir.clone();
 
         let task = ProveTask { job_id, input_path, output_dir };
