@@ -39,12 +39,10 @@ RUN git clone --depth 1 --branch ${ZISK_VERSION} \
 
 WORKDIR /src/zisk
 
-# Build cargo-zisk with packed SIMD arithmetic (CPU only — no GPU feature)
-# The 'packed' feature enables AVX-optimized polynomial arithmetic needed for
-# correct STARK proof generation. It's included in 'gpu' but works CPU-only too.
+# Build cargo-zisk (CPU-only; 'packed' feature was removed in v0.18.0)
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
-    cargo build --release --features packed 2>&1 | tee /tmp/build.log
+    cargo build --release 2>&1 | tee /tmp/build.log
 
 # Bundle ALL shared lib dependencies so the runtime needs no extra apt packages.
 # Also bundle libgomp.so.1 explicitly — ZisK dlopen()s it at runtime via libloading
