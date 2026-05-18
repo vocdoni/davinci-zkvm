@@ -51,9 +51,52 @@ type workerBallotResult struct {
 
 // ---- parent side ----
 
-// generateBallotBatchViaSubprocess generates ballot proofs in a fresh subprocess
-// so that all WASM/JIT native memory is freed when the subprocess exits.
+// ballotWorkerChunkSize bounds how many ballot proofs a single subprocess
+// generates. Wasmer/rapidsnark accumulate native memory across iterations even
+// without an OS-level OOM, and the CGO runtime SIGABRTs above ~300–400 proofs.
+// Chunking forces a fresh subprocess (and thus fresh CGO heap) per chunk.
+const ballotWorkerChunkSize = 128
+
+// generateBallotBatchViaSubprocess generates ballot proofs in fresh subprocess(es)
+// so that all WASM/JIT native memory is freed when each subprocess exits.
+// For batches larger than ballotWorkerChunkSize it spawns multiple subprocesses
+// and concatenates the results.
 func generateBallotBatchViaSubprocess(
+	processID types.ProcessID,
+	encKey *bjjgnark.BJJ,
+	voters []*Voter,
+	seedBase int64,
+) (*BatchProveComponents, error) {
+	if len(voters) <= ballotWorkerChunkSize {
+		return generateBallotBatchSubprocessOne(processID, encKey, voters, seedBase)
+	}
+	// Chunk: each chunk's subprocess receives seedBase+offset so the per-voter
+	// seeds (seedBase+i in GenerateBallotBatch) line up with the original batch.
+	var combined *BatchProveComponents
+	for off := 0; off < len(voters); off += ballotWorkerChunkSize {
+		end := off + ballotWorkerChunkSize
+		if end > len(voters) {
+			end = len(voters)
+		}
+		part, err := generateBallotBatchSubprocessOne(
+			processID, encKey, voters[off:end], seedBase+int64(off),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("ballot chunk [%d,%d): %w", off, end, err)
+		}
+		if combined == nil {
+			combined = part
+		} else {
+			combined.Proofs = append(combined.Proofs, part.Proofs...)
+			combined.PublicInputs = append(combined.PublicInputs, part.PublicInputs...)
+			combined.Sigs = append(combined.Sigs, part.Sigs...)
+			combined.Results = append(combined.Results, part.Results...)
+		}
+	}
+	return combined, nil
+}
+
+func generateBallotBatchSubprocessOne(
 	processID types.ProcessID,
 	encKey *bjjgnark.BJJ,
 	voters []*Voter,

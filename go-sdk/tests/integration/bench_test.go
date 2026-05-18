@@ -22,7 +22,7 @@ func TestStarkBenchmark(t *testing.T) {
 		t.Skipf("davinci-zkvm service not available at %s: %v", apiURL, err)
 	}
 
-	sizes := []int{2, 4, 8, 16, 32, 64, 128, 256, 512, 1024}
+	sizes := []int{128, 256, 512}
 
 	type result struct {
 		size       int
