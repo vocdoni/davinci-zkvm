@@ -344,24 +344,24 @@ func (e *Election) BuildCspData(batchVoters []*Voter) (*davinci.CspData, error) 
 		if err != nil {
 			return nil, fmt.Errorf("CSP sign voter %d: %w", i, err)
 		}
-		// sig = [R(32) || S(32) || V(1)]
+		// sig = [R(32) || S(32) || V(1)] where V is 0/1 (geth's go-ethereum convention).
 		r := new(big.Int).SetBytes(sig[:32])
 		s := new(big.Int).SetBytes(sig[32:64])
+		recid := sig[64]
 
 		proofs[i] = davinci.CspProof{
 			R:            fmt.Sprintf("0x%064x", r),
 			S:            fmt.Sprintf("0x%064x", s),
+			Recid:        recid,
 			VoterAddress: fmt.Sprintf("0x%040x", new(big.Int).SetBytes(v.AddressBytes)),
 			Weight:       fmt.Sprintf("0x%064x", v.Weight),
 			Index:        uint64(v.CensusIdx),
 		}
 	}
 
-	return &davinci.CspData{
-		CspPubKeyX: fmt.Sprintf("0x%064x", e.CspKey.PublicKey.X),
-		CspPubKeyY: fmt.Sprintf("0x%064x", e.CspKey.PublicKey.Y),
-		Proofs:     proofs,
-	}, nil
+	// The CSP public key is recovered per-entry inside the circuit; no longer
+	// transmitted alongside the per-voter proofs.
+	return &davinci.CspData{Proofs: proofs}, nil
 }
 
 // processIDArboHex returns the processID as arbo-LE hex for the STATETX block.

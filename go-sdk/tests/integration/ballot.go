@@ -117,14 +117,19 @@ func GenerateBallotBatch(
 			return nil, fmt.Errorf("voter %d ecdsa sign: %w", i, err)
 		}
 
-		// Extract secp256k1 public key coordinates.
+		// Extract secp256k1 public key coordinates and the recovery bit. The
+		// circuit recovers the public key via `ecdsa_recover_secp256k1(r, s, z, recid)`,
+		// so SignatureV must be the real parity bit (0 or 1), not a placeholder.
+		// sig.Bytes() returns [r(32) || s(32) || v(1)] with v normalised to 0/1.
+		sigBytes65 := sig.Bytes()
+		recid := sigBytes65[64]
 		ecdsaKey := (*ecdsapkg.PrivateKey)(v.Signer)
 		sigData := sigJSON{
 			PublicKeyX: fmt.Sprintf("0x%064x", ecdsaKey.PublicKey.X),
 			PublicKeyY: fmt.Sprintf("0x%064x", ecdsaKey.PublicKey.Y),
 			SignatureR: fmt.Sprintf("0x%064x", sig.R),
 			SignatureS: fmt.Sprintf("0x%064x", sig.S),
-			SignatureV: 0,
+			SignatureV: recid,
 			VoteID:     voteID,
 			Address:    addrBig.String(),
 		}

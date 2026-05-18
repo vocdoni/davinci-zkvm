@@ -256,9 +256,11 @@ pub struct EcdsaSig {
     pub signature_s: String,   // 0x-prefixed 32-byte big-endian hex
     pub vote_id: u64,
     pub address: String,       // decimal uint160
-    // private_key and signature_v are not used by the circuit; present for debugging
+    // private_key is unused by the circuit (debug only).
     #[serde(default)]
     pub private_key: String,
+    /// y-coordinate parity bit (0 or 1) for `ecdsa_recover_secp256k1`.
+    /// Used by the circuit to recover the public key from (r, s, z).
     #[serde(default)]
     pub signature_v: u8,
 }
@@ -567,12 +569,13 @@ pub fn generate_input(vk: &SnarkJsVk, proofs_json: &[SnarkJsProof], public_input
     write_u64_slice(&mut buf, &g1_to_raw(&neg_g_ic));
     write_u64_slice(&mut buf, &g1_to_raw(&neg_acc_c));
 
-    // ECDSA signatures (one entry per proof): r[4] || s[4] || px[4] || py[4] (all [u64;4] LE)
+    // ECDSA signatures (one entry per proof): r[4] || s[4] || recid(u64 LE)
+    // The public key is no longer shipped; the circuit recovers it from
+    // (r, s, z, recid) via `ecdsa_recover_secp256k1`.
     for sig in sigs {
         write_u64_slice(&mut buf, &hex32_to_u64x4(&sig.signature_r)?);
         write_u64_slice(&mut buf, &hex32_to_u64x4(&sig.signature_s)?);
-        write_u64_slice(&mut buf, &hex32_to_u64x4(&sig.public_key_x)?);
-        write_u64_slice(&mut buf, &hex32_to_u64x4(&sig.public_key_y)?);
+        buf.extend_from_slice(&(sig.signature_v as u64).to_le_bytes());
     }
 
     Ok(buf)
@@ -819,6 +822,8 @@ pub struct CspEntryData {
     pub r: [u64; 4],
     /// ECDSA signature S component ([u64;4] LE limbs).
     pub s: [u64; 4],
+    /// y-coordinate parity bit used by `ecdsa_recover_secp256k1` (0 or 1).
+    pub recid: u8,
     /// Voter's Ethereum address as uint160 in [u64;4] LE limbs.
     pub voter_address: [u64; 4],
     /// Voter's census weight ([u64;4] LE limbs).
@@ -827,13 +832,11 @@ pub struct CspEntryData {
     pub index: u64,
 }
 
-/// CSP census block data.
+/// CSP census block data. The CSP public key is no longer carried: the circuit
+/// recovers it per-entry via `ecdsa_recover_secp256k1` and consistency-checks
+/// across entries.
 #[derive(Debug, Clone)]
 pub struct CspBlockData {
-    /// CSP public key X coordinate ([u64;4] LE limbs).
-    pub csp_pub_key_x: [u64; 4],
-    /// CSP public key Y coordinate ([u64;4] LE limbs).
-    pub csp_pub_key_y: [u64; 4],
     /// Per-voter CSP ECDSA attestations.
     pub entries: Vec<CspEntryData>,
 }
@@ -841,18 +844,17 @@ pub struct CspBlockData {
 /// Write the CSPBLK!! binary block.
 /// Format:
 /// ```text
-/// CSP_MAGIC(u64) | n_entries(u64) | csp_pub_key_x(FrRaw) | csp_pub_key_y(FrRaw)
-/// Per entry: r(FrRaw) | s(FrRaw) | voter_address(FrRaw) | weight(FrRaw) | index(u64)
+/// CSP_MAGIC(u64) | n_entries(u64)
+/// Per entry: r(FrRaw) | s(FrRaw) | recid(u64) | voter_address(FrRaw) | weight(FrRaw) | index(u64)
 /// ```
 pub fn write_csp_block(data: &CspBlockData) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
     buf.extend_from_slice(&CSP_MAGIC.to_le_bytes());
     buf.extend_from_slice(&(data.entries.len() as u64).to_le_bytes());
-    for &w in &data.csp_pub_key_x { buf.extend_from_slice(&w.to_le_bytes()); }
-    for &w in &data.csp_pub_key_y { buf.extend_from_slice(&w.to_le_bytes()); }
     for entry in &data.entries {
         for &w in &entry.r { buf.extend_from_slice(&w.to_le_bytes()); }
         for &w in &entry.s { buf.extend_from_slice(&w.to_le_bytes()); }
+        buf.extend_from_slice(&(entry.recid as u64).to_le_bytes());
         for &w in &entry.voter_address { buf.extend_from_slice(&w.to_le_bytes()); }
         for &w in &entry.weight { buf.extend_from_slice(&w.to_le_bytes()); }
         buf.extend_from_slice(&entry.index.to_le_bytes());

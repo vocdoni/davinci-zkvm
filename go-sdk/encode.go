@@ -501,35 +501,27 @@ var cspMagic = [8]byte{'C', 'S', 'P', 'B', 'L', 'K', '!', '!'}
 
 // EncodeCspBlock serializes CSP ECDSA census data into the CSPBLK binary block.
 //
+// The CSP public key is no longer transmitted: the circuit recovers it from
+// each (r, s, recid, z) tuple via `ecdsa_recover_secp256k1` and consistency-
+// checks that all entries recover to the same key.
+//
 // Format:
 //
-//	magic:         u64 = "CSPBLK!!"
-//	n_entries:     u64
-//	csp_pub_key_x: [u64; 4] (LE limbs)
-//	csp_pub_key_y: [u64; 4] (LE limbs)
+//	magic:        u64 = "CSPBLK!!"
+//	n_entries:    u64
 //	Per entry:
-//	  r:              [u64; 4] (LE limbs)
-//	  s:              [u64; 4] (LE limbs)
-//	  voter_address:  [u64; 4] (LE limbs, uint160 zero-padded)
-//	  weight:         [u64; 4] (LE limbs)
-//	  index:          u64
+//	  r:             [u64; 4] (LE limbs)
+//	  s:             [u64; 4] (LE limbs)
+//	  recid:         u64 (parity bit 0 or 1)
+//	  voter_address: [u64; 4] (LE limbs, uint160 zero-padded)
+//	  weight:        [u64; 4] (LE limbs)
+//	  index:         u64
 func EncodeCspBlock(data *CspData) ([]byte, error) {
 	if data == nil || len(data.Proofs) == 0 {
 		return nil, nil
 	}
-	pkX, err := beHexToFrLE(data.CspPubKeyX)
-	if err != nil {
-		return nil, fmt.Errorf("csp pub_key_x: %w", err)
-	}
-	pkY, err := beHexToFrLE(data.CspPubKeyY)
-	if err != nil {
-		return nil, fmt.Errorf("csp pub_key_y: %w", err)
-	}
-
 	buf := append([]byte{}, cspMagic[:]...)
 	buf = appendU64(buf, uint64(len(data.Proofs)))
-	buf = appendFr(buf, pkX)
-	buf = appendFr(buf, pkY)
 
 	for i, p := range data.Proofs {
 		r, err := beHexToFrLE(p.R)
@@ -551,6 +543,7 @@ func EncodeCspBlock(data *CspData) ([]byte, error) {
 		}
 		buf = appendFr(buf, r)
 		buf = appendFr(buf, s)
+		buf = appendU64(buf, uint64(p.Recid))
 		buf = appendFr(buf, addrFr)
 		buf = appendFr(buf, w)
 		buf = appendU64(buf, p.Index)

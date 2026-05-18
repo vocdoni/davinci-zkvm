@@ -10,7 +10,7 @@
 //!          gamma_abc_len(u64) gamma_abc[..](G1 each)
 //! Proofs : nproofs(u64) [a(G1) b(G2) c(G1) pubs[..](FrRaw each)] × nproofs
 //! Hints  : scaled_a[..](G1 each) neg_alpha_rsum(G1) neg_g_ic(G1) neg_acc_c(G1)
-//! ECDSA  : [r s px py](FrRaw each) × nproofs  (mandatory)
+//! ECDSA  : [r(FrRaw) s(FrRaw) recid(u64)] × nproofs  (mandatory)
 //! STATETX: STATE_MAGIC(u64) followed by full state-transition data
 //! CENSUS : CENSUS_MAGIC(u64) followed by lean-IMT proofs
 //! REENC  : REENC_MAGIC(u64) followed by re-encryption data
@@ -145,19 +145,19 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
     let neg_acc_c      = read_g1!(&mut off);
 
     // --- ECDSA block (mandatory) ---
-    // Must be present: exactly nproofs × (r + s + px + py) × 32 bytes follow.
-    let ecdsa_block_size = nproofs * 4 * 32;
+    // Must be present: exactly nproofs × (r + s + recid_u64) bytes follow.
+    // r,s are FrRaw (32 B each), recid is one u64 (8 B) → 72 B/voter.
+    let ecdsa_block_size = nproofs * (32 + 32 + 8);
     if *fail_mask == 0 && off + ecdsa_block_size > input.len() {
         *fail_mask |= 1 << 31;
     }
 
     let mut ecdsa = Vec::with_capacity(nproofs);
     for _ in 0..nproofs {
-        let r  = read_fr!(&mut off);
-        let s  = read_fr!(&mut off);
-        let px = read_fr!(&mut off);
-        let py = read_fr!(&mut off);
-        ecdsa.push(EcdsaEntry { r, s, px, py });
+        let r     = read_fr!(&mut off);
+        let s     = read_fr!(&mut off);
+        let recid = read1!(&mut off, 0) as u8;
+        ecdsa.push(EcdsaEntry { r, s, recid });
     }
 
     // --- State-transition block (STATETX!) ---
@@ -200,26 +200,27 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
     }
 
     // --- CSP block (optional, after census block) ---
-    // Format: CSPBLK!!(u64) | n_entries(u64) | csp_pub_key_x(FrRaw) | csp_pub_key_y(FrRaw)
-    //         Per entry: r(FrRaw) s(FrRaw) voter_address(FrRaw) weight(FrRaw) index(u64)
+    // Format: CSPBLK!!(u64) | n_entries(u64)
+    //         Per entry: r(FrRaw) s(FrRaw) recid(u64) voter_address(FrRaw) weight(FrRaw) index(u64)
+    // The CSP public key is no longer shipped; it is recovered per-entry via
+    // `ecdsa_recover_secp256k1` and consistency-checked across entries.
     if off + 8 <= input.len() {
         let maybe_magic = u64::from_le_bytes(input[off..off + 8].try_into().unwrap());
         if maybe_magic == CSP_MAGIC {
             off += 8;
             let n_entries = read1!(&mut off, 0) as usize;
             if n_entries > 4096 { *fail_mask |= 1 << 31; }
-            let csp_pub_key_x = read_fr!(&mut off);
-            let csp_pub_key_y = read_fr!(&mut off);
             let mut entries = Vec::with_capacity(n_entries);
             for _ in 0..n_entries {
                 let r = read_fr!(&mut off);
                 let s = read_fr!(&mut off);
+                let recid = read1!(&mut off, 0) as u8;
                 let voter_address = read_fr!(&mut off);
                 let weight = read_fr!(&mut off);
                 let index = read1!(&mut off, 0);
-                entries.push(CspEntry { r, s, voter_address, weight, index });
+                entries.push(CspEntry { r, s, recid, voter_address, weight, index });
             }
-            csp_block = Some(CspBlock { csp_pub_key_x, csp_pub_key_y, entries });
+            csp_block = Some(CspBlock { entries });
         }
     }
 

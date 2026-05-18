@@ -92,13 +92,14 @@ pub struct ProofRaw {
 }
 
 /// One secp256k1 ECDSA entry from the optional signature block.
-/// All fields are `[u64; 4]` little-endian scalars.
+/// `r` and `s` are `[u64; 4]` little-endian scalars; `recid` is the
+/// y-coordinate parity bit (0 or 1) used by `ecdsa_recover_secp256k1`
+/// to recover the public key without including it in the witness.
 #[derive(Clone)]
 pub struct EcdsaEntry {
     pub r: FrRaw,
     pub s: FrRaw,
-    pub px: FrRaw,
-    pub py: FrRaw,
+    pub recid: u8,
 }
 
 /// One Arbo-compatible SMT state-transition proof.
@@ -201,6 +202,8 @@ pub struct CspEntry {
     pub r: FrRaw,
     /// ECDSA signature S component (secp256k1 scalar, [u64;4] LE).
     pub s: FrRaw,
+    /// y-coordinate parity bit (0 or 1) used by `ecdsa_recover_secp256k1`.
+    pub recid: u8,
     /// Voter's Ethereum address as uint160 in FrRaw LE limbs.
     pub voter_address: FrRaw,
     /// Voter's census weight (BN254 Fr, [u64;4] LE).
@@ -209,12 +212,11 @@ pub struct CspEntry {
     pub index: u64,
 }
 
-/// CSP census block: one CSP public key and per-voter ECDSA proofs.
+/// CSP census block: per-voter ECDSA proofs. The CSP public key is recovered
+/// from each entry's signature (via `ecdsa_recover_secp256k1`) rather than
+/// shipped in the witness; the recovered key's Ethereum address becomes the
+/// census root, and all entries are checked to recover the same key.
 pub struct CspBlock {
-    /// CSP public key X coordinate (secp256k1 point, [u64;4] LE).
-    pub csp_pub_key_x: FrRaw,
-    /// CSP public key Y coordinate (secp256k1 point, [u64;4] LE).
-    pub csp_pub_key_y: FrRaw,
     /// Per-voter CSP ECDSA proofs.
     pub entries: Vec<CspEntry>,
 }

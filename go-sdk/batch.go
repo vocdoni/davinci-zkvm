@@ -94,9 +94,11 @@ type ProveBatch struct {
 	// big-endian hex strings.
 	EncryptionKey *BjjPoint
 
-	// CspPubKey holds the CSP's secp256k1 public key coordinates when using
-	// CSP census (censusOrigin == 4). Required when voters have Csp proofs.
-	// X and Y are 32-byte big-endian hex strings.
+	// CspPubKey is no longer used. The circuit recovers the CSP public key
+	// from each (r, s, recid, z) entry via `ecdsa_recover_secp256k1` and
+	// consistency-checks that all entries recover to the same key.
+	//
+	// Kept as a deprecated field for source compatibility; ignored if set.
 	CspPubKey *BjjPoint
 
 	// KZG is the data-availability blob proof. Nil when blobs are not used.
@@ -213,16 +215,10 @@ func (b *ProveBatch) toRequest() (*ProveRequest, error) {
 		req.CensusProofs = censusProofs
 	}
 
-	// CSP data: only when at least one voter uses CSP
+	// CSP data: only when at least one voter uses CSP. The CSP public key is
+	// recovered inside the circuit, so it is no longer carried in the payload.
 	if hasCsp {
-		if b.CspPubKey == nil {
-			return nil, fmt.Errorf("CspPubKey is required when voters have CSP proofs")
-		}
-		req.CspData = &CspData{
-			CspPubKeyX: b.CspPubKey.X,
-			CspPubKeyY: b.CspPubKey.Y,
-			Proofs:     cspProofs,
-		}
+		req.CspData = &CspData{Proofs: cspProofs}
 	}
 
 	if hasReenc {
