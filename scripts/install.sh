@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 ZISK_VERSION="${ZISK_VERSION:-v0.18.0}"
 ZISK_REPO="${ZISK_REPO:-https://github.com/0xPolygonHermez/zisk.git}"
@@ -216,6 +216,70 @@ setup_proving_key() {
   log "Proving key installed."
 }
 
+setup_plonk_key() {
+  local plonk_path="${PROVING_KEY_PLONK_PATH:-$(dirname "$PROVING_KEY_PATH")/provingKeySnark}"
+  local need_download=0
+  if [[ ! -d "$plonk_path" ]]; then
+    need_download=1
+  fi
+  if [[ "$FORCE_SETUP_DOWNLOAD" == "1" ]]; then
+    need_download=1
+  fi
+
+  if [[ "$RUN_SETUP" != "1" ]]; then
+    log "Skipping PLONK proving key download (RUN_SETUP=$RUN_SETUP)"
+    return 0
+  fi
+
+  if [[ "$need_download" -ne 1 ]]; then
+    log "PLONK proving key already present at $plonk_path (skip download)"
+    return 0
+  fi
+
+  local zisk_ver
+  zisk_ver="$("$ZISK_BIN_DIR/cargo-zisk" --version | awk '{print $2}')"
+  local major minor patch
+  IFS='.' read -r major minor patch <<< "$zisk_ver"
+  local setup_ver="${major}.${minor}.0"
+  local key_file="zisk-provingkey-plonk-${setup_ver}.tar.gz"
+
+  log "Downloading PLONK proving key ${key_file} (~22 GB) from ${SETUP_BUCKET}"
+  curl -L "${SETUP_BUCKET}/${key_file}" -o "/tmp/${key_file}"
+  curl -L "${SETUP_BUCKET}/${key_file}.md5" -o "/tmp/${key_file}.md5"
+  (cd /tmp && md5sum -c "${key_file}.md5")
+
+  log "Installing PLONK proving key to $(dirname "$plonk_path")"
+  rm -rf "$plonk_path"
+  tar --ignore-zeros -xzf "/tmp/${key_file}" -C "$(dirname "$plonk_path")"
+  rm -f "/tmp/${key_file}" "/tmp/${key_file}.md5"
+  log "PLONK proving key installed."
+
+  # ZisK ships a Circom-generated final.so that requests an executable stack.
+  # Modern Linux refuses to grant it at dlopen time, so flip the X bit off in
+  # the PT_GNU_STACK program header (idempotent — safe to re-run).
+  local final_so="$plonk_path/final/final.so"
+  if [[ -f "$final_so" ]] && readelf -lW "$final_so" 2>/dev/null | grep -q "GNU_STACK.* RWE"; then
+    log "Patching $final_so to drop executable stack flag"
+    python3 - "$final_so" <<'PYEOF'
+import struct, sys
+path = sys.argv[1]
+with open(path, "r+b") as f:
+    data = f.read()
+    e_phoff = struct.unpack("<Q", data[32:40])[0]
+    e_phentsize = struct.unpack("<H", data[54:56])[0]
+    e_phnum = struct.unpack("<H", data[56:58])[0]
+    PT_GNU_STACK = 0x6474e551
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        p_type, p_flags = struct.unpack("<II", data[off:off+8])
+        if p_type == PT_GNU_STACK:
+            f.seek(off + 4)
+            f.write(struct.pack("<I", p_flags & ~0x1))
+            break
+PYEOF
+  fi
+}
+
 setup_const_trees() {
   if [[ "$RUN_SETUP_TREES" != "1" ]]; then
     log "Skipping constant tree build (RUN_SETUP_TREES=$RUN_SETUP_TREES)"
@@ -227,19 +291,29 @@ setup_const_trees() {
     return 0
   fi
 
+  local plonk_path="${PROVING_KEY_PLONK_PATH:-$(dirname "$PROVING_KEY_PATH")/provingKeySnark}"
+
   log "Building constant trees (this can take a long time)"
   if [[ "$SELECTED_PROVER_MODE" == "gpu" ]]; then
-    "$ZISK_BIN_DIR/cargo-zisk" check-setup --proving-key "$PROVING_KEY_PATH" --gpu
+    "$ZISK_BIN_DIR/cargo-zisk" check-setup \
+      --proving-key "$PROVING_KEY_PATH" \
+      --proving-key-plonk "$plonk_path" \
+      --plonk --gpu
   else
-    "$ZISK_BIN_DIR/cargo-zisk" check-setup --proving-key "$PROVING_KEY_PATH"
+    "$ZISK_BIN_DIR/cargo-zisk" check-setup \
+      --proving-key "$PROVING_KEY_PATH" \
+      --proving-key-plonk "$plonk_path" \
+      --plonk
   fi
 }
 
 write_env_file() {
   local env_file="$REPO_ROOT/.env.local.nodocker"
+  local plonk_path="${PROVING_KEY_PLONK_PATH:-$(dirname "$PROVING_KEY_PATH")/provingKeySnark}"
   cat > "$env_file" <<ENVEOF
 export PATH="$ZISK_BIN_DIR:\$PATH"
 export PROVING_KEY_PATH="$PROVING_KEY_PATH"
+export PROVING_KEY_PLONK_PATH="$plonk_path"
 export CIRCUIT_ELF_PATH="$REPO_ROOT/circuit/elf/circuit.elf"
 export CARGO_ZISK_BIN="$ZISK_BIN_DIR/cargo-zisk"
 export PROOF_OUTPUT_DIR="$PROOF_OUTPUT_DIR"
@@ -300,6 +374,7 @@ main() {
   install_zisk_toolchain
   build_davinci_bins
   setup_proving_key
+  setup_plonk_key
   setup_const_trees
   mkdir -p "$PROOF_OUTPUT_DIR"
   write_env_file
