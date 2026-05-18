@@ -1,110 +1,150 @@
 SHELL := /bin/bash
 
 REPO_ROOT := $(CURDIR)
-ENV_FILE := $(REPO_ROOT)/.env.local.nodocker
-SERVICE_BIN := $(REPO_ROOT)/target/release/davinci-zkvm
 
-LISTEN_HOST ?= 127.0.0.1
-LISTEN_PORT ?= 8080
+# ── Docker-driven setup (default path for fresh installs) ─────────────────
+#
+# All Docker targets read the same env vars docker-compose does. Override
+# any of these on the command line or in a .env file at the repo root.
 
-# install.sh passthroughs (kept intentionally small)
+ZISK_TAG         ?= v0.18.0
+ZISK_VERSION     ?= 0.18.0
+ZISK_KEYS_DIR    ?= $(REPO_ROOT)/zisk-keys
+LISTEN_PORT      ?= 8080
+API_URL          ?= http://127.0.0.1:$(LISTEN_PORT)
+
+COMPOSE          := ZISK_TAG=$(ZISK_TAG) ZISK_VERSION=$(ZISK_VERSION) \
+                    ZISK_KEYS_DIR=$(ZISK_KEYS_DIR) LISTEN_PORT=$(LISTEN_PORT) \
+                    HOST_UID=$(shell id -u) HOST_GID=$(shell id -g) \
+                    docker compose
+
+# ── Local non-Docker passthroughs (for development on the build host) ─────
+
+LOCAL_ENV_FILE   := $(REPO_ROOT)/.env.local.nodocker
+LOCAL_BIN        := $(REPO_ROOT)/target/release/davinci-zkvm
+LOCAL_LISTEN_HOST ?= 127.0.0.1
 INSTALL_SYSTEM_DEPS ?= auto
-RUN_SETUP ?= 1
-RUN_SETUP_TREES ?= 1
-ADD_TO_SHELL_RC ?= 1
+RUN_SETUP        ?= 1
+RUN_SETUP_TREES  ?= 1
+ADD_TO_SHELL_RC  ?= 1
 PROVING_KEY_PATH ?= $(HOME)/.zisk/provingKey
-ZISK_VERSION ?= v0.18.0
-PROVER_MODE ?= auto
-ZISK_MPI_PROCS ?=
+PROVING_KEY_PLONK_PATH ?= $(HOME)/.zisk/provingKeySnark
+PROVER_MODE      ?= auto
+ZISK_MPI_PROCS   ?=
 ZISK_MPI_THREADS ?=
 ZISK_MPI_BIND_TO ?=
 
-.PHONY: all setup run test help
+.PHONY: help \
+        keys build up down restart logs status test shell clean install all \
+        local-setup local-run local-test
 
-all: setup test ## Full local setup + integration tests
+# ──────────────────────────────────────────────────────────────────────────
+# Default
+# ──────────────────────────────────────────────────────────────────────────
 
-setup: ## Install/build everything for non-Docker local runs
-	LISTEN_HOST=$(LISTEN_HOST) \
+help: ## Show available targets
+	@echo "davinci-zkvm — Docker-driven setup"
+	@echo ""
+	@echo "Quick start on a fresh CUDA host:"
+	@echo "  make install          → download proving keys + build runtime image"
+	@echo "  make up               → start the prover service"
+	@echo "  make test             → run the Go integration test suite"
+	@echo ""
+	@echo "Targets:"
+	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | \
+		awk 'BEGIN{FS=":.*##"}{ printf "  %-14s %s\n", $$1, $$2 }'
+
+# ──────────────────────────────────────────────────────────────────────────
+# Docker workflow (primary)
+# ──────────────────────────────────────────────────────────────────────────
+
+install: keys build ## Download keys + build the runtime image (one-shot setup)
+
+keys: ## Download both ZisK proving keys via ziskup into $(ZISK_KEYS_DIR)
+	@mkdir -p $(ZISK_KEYS_DIR)
+	@echo "=== Downloading ZisK proving keys into $(ZISK_KEYS_DIR) ==="
+	@echo "    This takes 10–30 min depending on bandwidth (~37 GB)."
+	$(COMPOSE) --profile setup build key-installer
+	$(COMPOSE) --profile setup run --rm key-installer
+
+build: ## Build the CUDA prover image
+	$(COMPOSE) --profile cuda build
+
+up: ## Start the prover service (first boot builds GPU consttrees, ~10 min)
+	@if [ ! -d $(ZISK_KEYS_DIR)/provingKey ] || [ ! -d $(ZISK_KEYS_DIR)/provingKeySnark ]; then \
+		echo "Proving keys missing at $(ZISK_KEYS_DIR). Run 'make keys' first."; \
+		exit 1; \
+	fi
+	$(COMPOSE) --profile cuda up -d
+	@echo "=== Service starting. Tail logs with 'make logs'. ==="
+
+down: ## Stop the prover service
+	$(COMPOSE) --profile cuda down
+
+restart: down up ## Restart the prover service
+
+logs: ## Tail the prover service logs
+	$(COMPOSE) --profile cuda logs -f --tail=100
+
+status: ## Show service container status
+	$(COMPOSE) --profile cuda ps
+
+shell: ## Open an interactive shell inside the running prover container
+	$(COMPOSE) --profile cuda exec davinci-zkvm bash
+
+test: ## Run the Go integration test suite against the running service
+	@if ! curl -sf $(API_URL)/health >/dev/null 2>&1; then \
+		echo "Service not reachable at $(API_URL). Run 'make up' first."; \
+		exit 1; \
+	fi
+	cd go-sdk/tests && DAVINCI_API_URL=$(API_URL) $(MAKE) test
+
+clean: ## Stop service and remove proofs volume (KEEPS proving keys)
+	$(COMPOSE) --profile cuda down -v
+
+all: install up test ## Full pipeline: install → up → test
+
+# ──────────────────────────────────────────────────────────────────────────
+# Local non-Docker workflow (for developers building from source)
+# ──────────────────────────────────────────────────────────────────────────
+
+local-setup: ## Install ZisK + build davinci-zkvm on the host (no Docker)
+	LISTEN_HOST=$(LOCAL_LISTEN_HOST) \
 	LISTEN_PORT=$(LISTEN_PORT) \
 	INSTALL_SYSTEM_DEPS=$(INSTALL_SYSTEM_DEPS) \
 	RUN_SETUP=$(RUN_SETUP) \
 	RUN_SETUP_TREES=$(RUN_SETUP_TREES) \
 	ADD_TO_SHELL_RC=$(ADD_TO_SHELL_RC) \
 	PROVING_KEY_PATH=$(PROVING_KEY_PATH) \
+	PROVING_KEY_PLONK_PATH=$(PROVING_KEY_PLONK_PATH) \
 	ZISK_VERSION=$(ZISK_VERSION) \
 	PROVER_MODE=$(PROVER_MODE) \
-	./install.sh
+	./scripts/install.sh
 
-run: ## Run the HTTP service locally
-	@if [ ! -f "$(ENV_FILE)" ]; then \
-		echo "Missing $(ENV_FILE). Run: make setup"; \
-		exit 1; \
-	fi
-	@if [ ! -x "$(SERVICE_BIN)" ]; then \
-		echo "Missing $(SERVICE_BIN). Run: make setup"; \
+local-run: ## Run the host-built service binary
+	@if [ ! -f "$(LOCAL_ENV_FILE)" ] || [ ! -x "$(LOCAL_BIN)" ]; then \
+		echo "Missing local setup artifacts. Run: make local-setup"; \
 		exit 1; \
 	fi
 	@bash -lc 'set -euo pipefail; \
-		source "$(ENV_FILE)"; \
-		export LISTEN_ADDR="$(LISTEN_HOST):$(LISTEN_PORT)"; \
-		export DAVINCI_API_URL="http://$(LISTEN_HOST):$(LISTEN_PORT)"; \
-		if [ -n "$(ZISK_MPI_PROCS)" ]; then export ZISK_MPI_PROCS="$(ZISK_MPI_PROCS)"; fi; \
-		if [ -n "$(ZISK_MPI_THREADS)" ]; then export ZISK_MPI_THREADS="$(ZISK_MPI_THREADS)"; fi; \
-		if [ -n "$(ZISK_MPI_BIND_TO)" ]; then export ZISK_MPI_BIND_TO="$(ZISK_MPI_BIND_TO)"; fi; \
-		exec "$(SERVICE_BIN)"'
+		source "$(LOCAL_ENV_FILE)"; \
+		export LISTEN_ADDR="$(LOCAL_LISTEN_HOST):$(LISTEN_PORT)"; \
+		export DAVINCI_API_URL="http://$(LOCAL_LISTEN_HOST):$(LISTEN_PORT)"; \
+		exec "$(LOCAL_BIN)"'
 
-test: ## Run integration tests locally (starts/stops service automatically)
+local-test: ## Run the integration tests against a host-built service
 	@bash -lc 'set -euo pipefail; \
 		cd "$(REPO_ROOT)"; \
-		if [ ! -f "$(ENV_FILE)" ] || [ ! -x "$(SERVICE_BIN)" ]; then \
-			echo "Setup artifacts missing. Running make setup..."; \
-			LISTEN_HOST=$(LISTEN_HOST) \
-			LISTEN_PORT=$(LISTEN_PORT) \
-			INSTALL_SYSTEM_DEPS=$(INSTALL_SYSTEM_DEPS) \
-			RUN_SETUP=$(RUN_SETUP) \
-			RUN_SETUP_TREES=$(RUN_SETUP_TREES) \
-			ADD_TO_SHELL_RC=$(ADD_TO_SHELL_RC) \
-			PROVING_KEY_PATH=$(PROVING_KEY_PATH) \
-			ZISK_VERSION=$(ZISK_VERSION) \
-			PROVER_MODE=$(PROVER_MODE) \
-			./install.sh; \
-		fi; \
-		source "$(ENV_FILE)"; \
-		export LISTEN_ADDR="$(LISTEN_HOST):$(LISTEN_PORT)"; \
-		export DAVINCI_API_URL="http://$(LISTEN_HOST):$(LISTEN_PORT)"; \
-		if [ -n "$(ZISK_MPI_PROCS)" ]; then export ZISK_MPI_PROCS="$(ZISK_MPI_PROCS)"; fi; \
-		if [ -n "$(ZISK_MPI_THREADS)" ]; then export ZISK_MPI_THREADS="$(ZISK_MPI_THREADS)"; fi; \
-		if [ -n "$(ZISK_MPI_BIND_TO)" ]; then export ZISK_MPI_BIND_TO="$(ZISK_MPI_BIND_TO)"; fi; \
-		LOG_FILE="$(REPO_ROOT)/.davinci-service.log"; \
-		"$(SERVICE_BIN)" >"$$LOG_FILE" 2>&1 & \
+		source "$(LOCAL_ENV_FILE)"; \
+		export LISTEN_ADDR="$(LOCAL_LISTEN_HOST):$(LISTEN_PORT)"; \
+		export DAVINCI_API_URL="http://$(LOCAL_LISTEN_HOST):$(LISTEN_PORT)"; \
+		"$(LOCAL_BIN)" >.davinci-service.log 2>&1 & \
 		SVC_PID=$$!; \
-		cleanup(){ \
-			if kill -0 "$$SVC_PID" 2>/dev/null; then \
-				kill "$$SVC_PID" 2>/dev/null || true; \
-				wait "$$SVC_PID" 2>/dev/null || true; \
-			fi; \
-		}; \
-		trap cleanup EXIT; \
+		trap "kill $$SVC_PID 2>/dev/null || true" EXIT; \
 		for i in $$(seq 1 120); do \
-			if curl -sf "$$DAVINCI_API_URL/health" >/dev/null 2>&1; then \
-				echo "Service ready at $$DAVINCI_API_URL"; \
-				break; \
-			fi; \
-			if [ "$$i" -eq 120 ]; then \
-				echo "Service did not become healthy in time. Last logs:"; \
-				tail -n 200 "$$LOG_FILE" || true; \
-				exit 1; \
-			fi; \
+			curl -sf "$$DAVINCI_API_URL/health" >/dev/null 2>&1 && break; \
 			sleep 1; \
 		done; \
-		cd go-sdk/tests; \
-		if [ "$${DAVINCI_PROVER_MODE:-gpu}" = "gpu" ]; then \
-			DAVINCI_API_URL="$$DAVINCI_API_URL" make test; \
-		else \
-			echo "CPU mode detected: running lightweight tests (no proving)."; \
-			DAVINCI_API_URL="$$DAVINCI_API_URL" make test-unit; \
-		fi'
+		cd go-sdk/tests && DAVINCI_API_URL="$$DAVINCI_API_URL" $(MAKE) test'
 
-help: ## Show available targets
-	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | \
-		awk 'BEGIN{FS=":.*##"}{ printf "  %-10s %s\n", $$1, $$2 }'
+.DEFAULT_GOAL := help

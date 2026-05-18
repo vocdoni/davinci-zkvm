@@ -16,8 +16,10 @@ data/
 go-sdk/data/
 proof_output/
 
-# ── Proving key ──────────────────────────────────────────────────────────────
-# Too large (~36 GB) to track; mounted as a volume at runtime.
+# ── Proving keys ─────────────────────────────────────────────────────────────
+# Too large (~37 GB) to track. The Docker-driven `make keys` target
+# downloads them into ./zisk-keys; bare-host installs land in ~/.zisk.
+zisk-keys/
 provingKey/
 *.consttree
 *.consttree_gpu
@@ -32,7 +34,7 @@ provingKey/
 # developer can choose their own profile (cuda / cpu) without affecting others.
 .env
 .env.local.nodocker
-.davinci-service.log
+*.log
 
 # ── Go test binaries ─────────────────────────────────────────────────────────
 go-sdk/tests/*.test
@@ -45,3 +47,6 @@ go-sdk/tests/*.test
 .DS_Store
 Thumbs.db
 
+
+# ── Local editor state ──────────────────────────────────────────────────────
+.claude/

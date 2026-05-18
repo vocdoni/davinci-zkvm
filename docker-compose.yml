@@ -1,19 +1,37 @@
-# davinci-zkvm Docker Compose
+# davinci-zkvm Docker Compose.
 #
 # Profiles:
-#   cuda  — NVIDIA GPU prover (default). Requires NVIDIA driver 570+, CUDA 12.8,
-#           nvidia-container-toolkit.
-#   cpu   — API-only, no proof generation. ZisK v0.18.0 GPU proving keys are
-#           incompatible with CPU provers (different Merkle tree format).
+#   setup — Run ziskup inside a container to download the two ZisK proving
+#           keys into ${ZISK_KEYS_DIR} (./zisk-keys by default). One-shot.
+#   cuda  — NVIDIA GPU prover. Requires driver 570+, CUDA 12.8, and
+#           nvidia-container-toolkit on the host.
 #
-# Usage:
-#   docker compose --profile cuda up -d   # GPU prover (default)
-#   docker compose --profile cpu  up -d   # CPU API-only
+# Typical workflow is driven by the top-level Makefile (`make help`):
+#   make keys     → docker compose --profile setup run --rm key-installer
+#   make up       → docker compose --profile cuda up -d
+#   make test     → run integration tests against the running service
 #
-# The default profile is set to 'cuda' via the .env file. Override with:
-#   COMPOSE_PROFILES=cpu docker compose up -d
+# The service always produces a PLONK SNARK ready for on-chain verification
+# via the `ZiskVerifier.verifySnarkProof` contract in `solidity/`.
 
 services:
+  key-installer:
+    profiles: [setup]
+    image: davinci-zkvm-setup:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.setup
+      args:
+        ZISK_TAG: ${ZISK_TAG:-v0.18.0}
+        ZISK_VERSION: ${ZISK_VERSION:-0.18.0}
+    volumes:
+      - ${ZISK_KEYS_DIR:-./zisk-keys}:/zisk
+    environment:
+      - ZISK_VERSION=${ZISK_VERSION:-0.18.0}
+      - ZISK_DIR=/zisk
+      - HOST_UID=${HOST_UID:-}
+      - HOST_GID=${HOST_GID:-}
+
   davinci-zkvm:
     profiles: [cuda]
     image: davinci-zkvm-cuda:latest
@@ -23,10 +41,13 @@ services:
     ports:
       - "${LISTEN_PORT:-8080}:8080"
     volumes:
-      - ${PROVING_KEY_PATH:-~/.zisk/provingKey}:/proving-key
+      - ${ZISK_KEYS_DIR:-./zisk-keys}/provingKey:/proving-key
+      - ${ZISK_KEYS_DIR:-./zisk-keys}/provingKeySnark:/proving-key-plonk
       - proofs:/proofs
     environment:
       - PROOF_OUTPUT_DIR=/proofs
+      - PROVING_KEY_PATH=/proving-key
+      - PROVING_KEY_PLONK_PATH=/proving-key-plonk
       - MAX_QUEUE_SIZE=${MAX_QUEUE_SIZE:-100}
       - ZISK_MPI_PROCS=${ZISK_MPI_PROCS:-1}
       - ZISK_MPI_THREADS=${ZISK_MPI_THREADS:-0}
@@ -49,31 +70,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 60s
-
-  davinci-zkvm-cpu:
-    profiles: [cpu]
-    image: davinci-zkvm:latest
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "${LISTEN_PORT:-8080}:8080"
-    volumes:
-      - ${PROVING_KEY_PATH:-~/.zisk/provingKey}:/proving-key
-      - proofs:/proofs
-    environment:
-      - PROOF_OUTPUT_DIR=/proofs
-      - MAX_QUEUE_SIZE=${MAX_QUEUE_SIZE:-100}
-      - ZISK_MPI_PROCS=${ZISK_MPI_PROCS:-1}
-      - ZISK_MPI_THREADS=${ZISK_MPI_THREADS:-0}
-      - ZISK_MPI_BIND_TO=${ZISK_MPI_BIND_TO:-none}
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
 
 volumes:
   proofs:

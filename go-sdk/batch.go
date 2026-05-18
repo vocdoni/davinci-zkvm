@@ -94,24 +94,20 @@ type ProveBatch struct {
 	// big-endian hex strings.
 	EncryptionKey *BjjPoint
 
-	// CspPubKey is no longer used. The circuit recovers the CSP public key
-	// from each (r, s, recid, z) entry via `ecdsa_recover_secp256k1` and
-	// consistency-checks that all entries recover to the same key.
-	//
-	// Kept as a deprecated field for source compatibility; ignored if set.
-	CspPubKey *BjjPoint
-
 	// KZG is the data-availability blob proof. Nil when blobs are not used.
 	KZG *KZGRequest
 }
 
-// ProveResult is the result of a successful DAVINCI proof generation.
+// ProveResult is what [Client.Prove] returns once the service has finished
+// generating an on-chain-ready PLONK SNARK for the batch.
 type ProveResult struct {
 	// JobID is the service-assigned job identifier.
 	JobID string
-	// Proof contains the raw ZisK STARK proof bytes.
-	Proof []byte
-	// Elapsed is the wall-clock time reported by the service.
+	// Snark is the on-chain-ready PLONK payload. Its four fields map
+	// one-to-one onto the arguments of `ZiskVerifier.verifySnarkProof`.
+	Snark *PlonkSnark
+	// Elapsed is the wall-clock time the service spent producing the proof
+	// (excludes queue wait and HTTP round-trips).
 	Elapsed time.Duration
 }
 
@@ -235,12 +231,11 @@ func (b *ProveBatch) toRequest() (*ProveRequest, error) {
 	return req, nil
 }
 
-// Prove submits a ProveBatch for proving and blocks until the proof is ready
-// or the context is cancelled.
+// Prove submits a [ProveBatch] and blocks until the service returns a PLONK
+// SNARK, the context is cancelled, or the job fails.
 //
-// The returned ProveResult contains the raw proof bytes and service metadata.
-// Use PublicOutputs for on-chain public inputs once the service supports
-// returning circuit outputs alongside the proof.
+// The returned [ProveResult] embeds a [PlonkSnark] whose four fields can be
+// fed straight to `ZiskVerifier.verifySnarkProof` on Ethereum.
 func (c *Client) Prove(ctx context.Context, batch *ProveBatch) (*ProveResult, error) {
 	req, err := batch.toRequest()
 	if err != nil {
@@ -252,7 +247,6 @@ func (c *Client) Prove(ctx context.Context, batch *ProveBatch) (*ProveResult, er
 		return nil, fmt.Errorf("submit: %w", err)
 	}
 
-	// Poll until done or context cancelled
 	for {
 		select {
 		case <-ctx.Done():
@@ -267,19 +261,15 @@ func (c *Client) Prove(ctx context.Context, batch *ProveBatch) (*ProveResult, er
 
 		switch job.Status {
 		case "done":
-			proof, err := c.GetProof(jobID)
+			snark, err := c.FetchSnark(jobID)
 			if err != nil {
-				return nil, fmt.Errorf("download proof %s: %w", jobID, err)
+				return nil, fmt.Errorf("fetch snark for job %s: %w", jobID, err)
 			}
 			var elapsed time.Duration
 			if job.ElapsedMs != nil {
 				elapsed = time.Duration(*job.ElapsedMs) * time.Millisecond
 			}
-			return &ProveResult{
-				JobID:   jobID,
-				Proof:   proof,
-				Elapsed: elapsed,
-			}, nil
+			return &ProveResult{JobID: jobID, Snark: snark, Elapsed: elapsed}, nil
 
 		case "failed":
 			errMsg := "unknown error"

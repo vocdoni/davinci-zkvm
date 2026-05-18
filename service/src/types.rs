@@ -212,21 +212,3 @@ impl Job {
     }
 }
 
-/// HTTP response for POST /prove
-#[derive(Serialize)]
-pub struct ProveResponse {
-    pub job_id: Uuid,
-    pub status: JobStatus,
-}
-
-/// HTTP error response
-#[derive(Serialize)]
-pub struct ErrorResponse {
-    pub error: String,
-}
-
-impl ErrorResponse {
-    pub fn new(msg: impl Into<String>) -> Self {
-        Self { error: msg.into() }
-    }
-}

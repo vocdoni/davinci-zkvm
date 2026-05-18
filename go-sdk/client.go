@@ -109,17 +109,38 @@ func (c *Client) WaitForJob(jobID string, timeout time.Duration) (*JobResponse, 
 	return nil, fmt.Errorf("job %s did not complete within %v", jobID, timeout)
 }
 
-// GetProof downloads the proof binary for a completed job.
-// Returns the raw proof bytes.
-func (c *Client) GetProof(jobID string) ([]byte, error) {
-	resp, err := c.httpClient.Get(fmt.Sprintf("%s/jobs/%s/proof", c.baseURL, jobID))
+// FetchSnark downloads the SNARK for a completed job as a typed
+// [PlonkSnark] ready to feed to the on-chain `ZiskVerifier.verifySnarkProof`
+// contract.
+func (c *Client) FetchSnark(jobID string) (*PlonkSnark, error) {
+	resp, err := c.httpClient.Get(fmt.Sprintf("%s/jobs/%s/snark", c.baseURL, jobID))
 	if err != nil {
-		return nil, fmt.Errorf("GET /jobs/%s/proof: %w", jobID, err)
+		return nil, fmt.Errorf("GET /jobs/%s/snark: %w", jobID, err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET /jobs/%s/proof: status %d: %s", jobID, resp.StatusCode, body)
+		return nil, fmt.Errorf("GET /jobs/%s/snark: status %d: %s", jobID, resp.StatusCode, body)
+	}
+	var p plonkSnarkJSON
+	if err := json.Unmarshal(body, &p); err != nil {
+		return nil, fmt.Errorf("decode snark response: %w", err)
+	}
+	return p.toPlonkSnark()
+}
+
+// FetchInputs downloads the raw `input.bin` blob the SNARK was generated
+// over. Useful for audit, re-proving, or off-chain bookkeeping; not
+// required for on-chain verification.
+func (c *Client) FetchInputs(jobID string) ([]byte, error) {
+	resp, err := c.httpClient.Get(fmt.Sprintf("%s/jobs/%s/inputs", c.baseURL, jobID))
+	if err != nil {
+		return nil, fmt.Errorf("GET /jobs/%s/inputs: %w", jobID, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET /jobs/%s/inputs: status %d: %s", jobID, resp.StatusCode, body)
 	}
 	return body, nil
 }
