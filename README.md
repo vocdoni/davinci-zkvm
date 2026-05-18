@@ -1,93 +1,94 @@
 # davinci-zkvm
 
-A [ZisK](https://github.com/0xPolygonHermez/zisk) zkVM service that verifies complete
-[DAVINCI](https://github.com/vocdoni/davinci-node) voting protocol state-transitions
-inside a single RISC-V circuit, producing a STARK (→ FFLONK) proof suitable for
-on-chain verification.
+A [ZisK](https://github.com/0xPolygonHermez/zisk) zkVM service for the
+[DAVINCI](https://github.com/vocdoni/davinci-node) voting protocol. Hand it a
+batch of voter ballots and the state-transition data; it runs the whole
+protocol inside one RISC-V circuit and returns a PLONK SNARK you can verify
+on Ethereum with the contracts in [`solidity/`](solidity/).
 
-## What it does
+The pipeline stays zero-knowledge throughout. Voters send Groth16 ballot
+proofs over ElGamal-encrypted votes. The service folds the batch through
+ZisK. The output is around 2.7 KB of proof, and Ethereum verifies it in
+roughly 300 ms.
 
-Each state-transition batch is verified end-to-end in a single ZisK circuit execution:
+## What the circuit checks
+
+In a single ZisK execution, the circuit verifies:
 
 | Step | Description |
-|------|-------------|
-| **Groth16 batch verify** | BN254 pairing-based verification of voter ballot proofs (snarkjs) |
-| **ECDSA batch verify** | secp256k1 signature verification (one per voter) |
-| **State SMT transitions** | Arbo SHA-256 sparse Merkle tree updates for vote-ID, ballot, results, and process chains |
-| **Census membership** | Lean-IMT Poseidon BN254 inclusion proofs (Merkle census) or ECDSA CSP authentication |
-| **ElGamal re-encryption** | BabyJubJub twisted-Edwards re-encryption verification |
-| **KZG blob evaluation** | EIP-4844 barycentric evaluation of encrypted ballot blobs |
-| **Result accumulation** | Homomorphic ballot tally verification with overwrite support |
-| **Cross-block binding** | Cryptographic binding between all protocol blocks |
+|---|---|
+| Groth16 batch verify | BN254 pairing check for every voter ballot proof. |
+| ECDSA batch verify | secp256k1 signature recovery for each voter (and for the CSP, in CSP mode). |
+| Census membership | Lean-IMT Poseidon BN254 inclusion proofs, or ECDSA CSP authentication. |
+| State SMT transitions | Arbo SHA-256 sparse Merkle tree updates for the vote-ID, ballot, results, and process chains. |
+| ElGamal re-encryption | BabyJubJub re-encryption verification. |
+| KZG blob evaluation | EIP-4844 barycentric evaluation of the encrypted ballot blob. |
+| Result accumulation | Homomorphic tally with overwrite support. |
+| Cross-block binding | Cryptographic glue between the protocol blocks. |
 
-The circuit produces public outputs matching
-[davinci-node](https://github.com/vocdoni/davinci-node)'s `StateTransitionCircuit`
-interface: root hashes, census root, voter counts, KZG blob commitment, and a
-diagnostic fail-mask.
+The circuit's public outputs match
+[davinci-node](https://github.com/vocdoni/davinci-node)'s
+`StateTransitionCircuit` interface: the two root hashes, the census root,
+the voter counts, the KZG blob commitment, and a diagnostic fail-mask.
 
-## Architecture
+## Layout
 
 ```
 davinci-zkvm/
-├── circuit/            ZisK RISC-V guest circuit (Rust, requires +zisk toolchain)
-│   ├── elf/            Pre-built circuit ELF (checked in)
-│   └── src/            Source: groth16, ecdsa, smt, census, csp, results, kzg, …
-├── input-gen/          Rust library: typed protocol blocks → ZisK binary input
-├── service/            HTTP API service (axum + tokio)
+├── circuit/        ZisK RISC-V guest circuit (Rust, +zisk toolchain)
+│   ├── elf/        Pre-built circuit ELF (tracked in git)
+│   └── src/        groth16, ecdsa, smt, census, csp, results, kzg, …
+├── input-gen/      Typed protocol blocks → ZisK binary input
+├── service/        HTTP API (axum + tokio)
 │   └── src/
-│       ├── api/        POST /prove, GET /jobs/*, GET /health
-│       ├── prover/     Background job queue and worker
-│       ├── config.rs   Environment variable configuration
-│       └── types.rs    Full typed request/response structures
-└── go-sdk/             Go client library with typed builder API
-    ├── *.go            Client, types, ProveBatch, PublicOutputs, converters
-    └── tests/
-        ├── integration/  Cheat tests (emulator), e2e + CSP integration tests
-        └── Makefile      Docker compose test orchestration
+│       ├── api/    POST /prove, GET /jobs/*, GET /health
+│       └── prover/ Background queue, worker, snark.json extractor
+├── solidity/       Vendored Solidity verifier (PlonkVerifier + ZiskVerifier)
+└── go-sdk/         Go client library, with an on-chain verification helper
+    ├── solidity/   simulated.NewBackend verification helper
+    └── tests/      Integration tests
 ```
 
 ## Quick start
 
-### Prerequisites
+### Requirements
 
-- Docker + Docker Compose
-- NVIDIA GPU with driver 570+, CUDA 12.8, nvidia-container-toolkit
-- ZisK proving key (~36 GB) — see [Proving key setup](#proving-key-setup)
+- Docker + Docker Compose (nothing else on the host)
+- NVIDIA GPU with **~30 GB VRAM** (RTX 5090 32 GB and A100 40 GB work;
+  RTX 4090 at 24 GB does not). The PLONK aggregation pass is what
+  pushes memory usage; first boot allocates the full working set.
+- NVIDIA driver 570+, CUDA 12.8, `nvidia-container-toolkit`
+- About 40 GB of free disk for the two ZisK proving keys.
 
-### Run with Docker
+### Install and run
+
+The Makefile drives Docker Compose end-to-end. A fresh clone goes from
+zero to a healthy service with three commands:
 
 ```bash
 git clone https://github.com/vocdoni/davinci-zkvm.git
 cd davinci-zkvm
-
-# GPU prover (default)
-docker compose up -d
-
-# CPU-only (API only — ZisK v0.15 GPU keys are incompatible with CPU proving)
-COMPOSE_PROFILES=cpu docker compose up -d
+make install    # downloads both proving keys via ziskup, builds the image
+make up         # starts the prover service
+make test       # runs the Go integration test suite
 ```
 
-### Run locally (non-Docker)
+`make install` runs `ziskup` inside a small container and writes both
+keys into `./zisk-keys/` on the host (~37 GB, 10–30 min depending on
+bandwidth). It also patches the PLONK `final.so` to drop its
+executable-stack flag, which modern Linux refuses to grant at dlopen
+time. The runtime container builds the GPU constant trees on first
+boot (~10 min) and skips that step on subsequent starts.
 
-```bash
-# Full install: clone + build ZisK, build service, download proving key
-make setup
+Other Make targets: `make logs`, `make status`, `make shell`,
+`make down`, `make restart`, `make clean`. Run `make help` for the
+full list.
 
-# Run the service (sources .env.local.nodocker automatically)
-make run
+To put the proving keys somewhere other than `./zisk-keys`, set
+`ZISK_KEYS_DIR=/path/to/keys` either in `.env` (copy from `.env.example`)
+or on the command line.
 
-# Run integration tests (starts/stops service automatically)
-make test
-```
-
-Override defaults as needed:
-
-```bash
-make setup PROVER_MODE=gpu ZISK_VERSION=v0.15.0 PROVING_KEY_PATH=/data/provingKey
-make run   ZISK_MPI_PROCS=4 ZISK_MPI_THREADS=8
-```
-
-### Submit a proof via the Go SDK
+### Submit a proof from Go
 
 ```go
 import davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
@@ -95,117 +96,115 @@ import davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 client := davinci.NewClient("http://localhost:8080")
 
 batch := &davinci.ProveBatch{
-    VK:     vk,
-    Voters: voters,       // []VoterBallot with Groth16 proofs + ECDSA sigs
-    State:  stateData,    // StateTransitionData (SMT transitions)
-    Census: censusProofs, // []CensusProof (Merkle) or CspData
-    Reenc:  reencData,    // ReencryptionData (ElGamal)
-    KZG:    kzgData,      // KZGRequest (blob evaluation)
+    VerificationKey: vk,       // Groth16 BN254 VK shared by all ballot proofs
+    Voters:          voters,   // []VoterBallot with proofs + ECDSA sigs
+    State:           state,    // SMT chain transitions
+    EncryptionKey:   encKey,   // ElGamal re-encryption key
+    KZG:             kzg,      // EIP-4844 blob evaluation
 }
 
 result, err := client.Prove(ctx, batch)
-// result.Outputs.OK, result.Outputs.RootHashAfter, ...
+// result.Snark holds the four byte strings you pass straight into
+// ZiskVerifier.verifySnarkProof on Ethereum.
 ```
 
-See [go-sdk/README.md](go-sdk/README.md) for full API documentation.
+See [go-sdk/README.md](go-sdk/README.md) for the full Go API.
 
-## API reference
+### Verify the SNARK in-process
+
+The repo vendors the Solidity verifier under
+[`solidity/`](solidity/README.md). The Go SDK ships a helper that compiles
+it (via local `solc` or `docker run ethereum/solc:stable`) and runs it on
+`go-ethereum/ethclient/simulated.NewBackend`:
+
+```go
+import davinciSolidity "github.com/vocdoni/davinci-zkvm/go-sdk/solidity"
+
+err := davinciSolidity.VerifyOnSimulated("./solidity", result.Snark)
+```
+
+No Anvil, ganache, or RPC endpoint needed.
+
+## HTTP API
 
 | Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/prove` | Submit a state-transition batch for proving |
-| `GET` | `/jobs/{id}` | Get job status |
-| `GET` | `/jobs/{id}/proof` | Download proof binary (once done) |
-| `GET` | `/health` | Service health check |
+|---|---|---|
+| `POST` | `/prove` | Submit a state-transition batch. Returns a job ID. |
+| `GET` | `/jobs/{id}` | Job status (queued / running / done / failed) and timing. |
+| `GET` | `/jobs/{id}/snark` | The Solidity-ready PLONK payload as JSON. |
+| `GET` | `/jobs/{id}/snark/raw` | The raw `proof.bin` (bincode), for `cargo-zisk verify`. |
+| `GET` | `/jobs/{id}/publics` | Just the 256-byte `publicValues` blob. |
+| `GET` | `/jobs/{id}/inputs` | The raw `input.bin` (audit / re-proving). |
+| `GET` | `/health` | Service liveness check. |
 
-### `POST /prove`
-
-Accepts a JSON body with typed protocol blocks. See `service/src/types.rs` for the
-full `ProveRequest` schema, or use the Go SDK's `ProveBatch` which handles serialization.
-
-### `GET /jobs/{id}`
+`/jobs/{id}/snark` payload:
 
 ```json
 {
-  "job_id": "...",
-  "status": "queued|running|done|failed",
-  "elapsed_ms": 35000,
-  "error": null
+  "program_vk":           "0x…32 bytes",
+  "root_c_vadcop_final":  "0x…32 bytes",
+  "public_values":        "0x…256 bytes",
+  "proof_bytes":          "0x…768 bytes (ABI-encoded uint256[24])"
 }
 ```
 
-## Proving key setup
-
-The proving key (~36 GB) is downloaded automatically by `make setup`.
-
-For Docker, mount it as a volume:
-
-```bash
-# Point PROVING_KEY_PATH to your existing key, or let install.sh download it first
-docker compose up -d
-```
-
-Or set `PROVING_KEY_PATH` in `.env` to point to an existing key directory.
+These four fields map straight onto the arguments of
+`ZiskVerifier.verifySnarkProof`.
 
 ## Configuration
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `LISTEN_ADDR` | `0.0.0.0:8080` | HTTP listen address |
-| `PROVING_KEY_PATH` | `/proving-key` | ZisK proving key directory |
-| `CIRCUIT_ELF_PATH` | `/app/circuit.elf` | Pre-built circuit ELF |
-| `CARGO_ZISK_BIN` | `cargo-zisk` | Path to cargo-zisk binary |
-| `PROOF_OUTPUT_DIR` | `/tmp/proofs` | Proof output directory |
-| `MAX_QUEUE_SIZE` | `100` | Maximum queued jobs |
-| `ZISK_MPI_PROCS` | `1` | MPI processes for proving (`>1` runs `mpirun`) |
-| `ZISK_MPI_THREADS` | `0` | Threads per MPI process (sets `OMP_NUM_THREADS` and `RAYON_NUM_THREADS`; `0` = unset) |
-| `ZISK_MPI_BIND_TO` | `none` | `mpirun --bind-to` policy |
+|---|---|---|
+| `LISTEN_ADDR` | `0.0.0.0:8080` | HTTP listen address. |
+| `PROVING_KEY_PATH` | `/proving-key` | ZisK STARK proving key directory. |
+| `PROVING_KEY_PLONK_PATH` | `/proving-key-plonk` | ZisK PLONK proving key directory. |
+| `CIRCUIT_ELF_PATH` | `/app/circuit.elf` | Pre-built circuit ELF. |
+| `CARGO_ZISK_BIN` | `cargo-zisk` | `cargo-zisk` binary to invoke. |
+| `PROOF_OUTPUT_DIR` | `/tmp/proofs` | Per-job artifact directory. |
+| `MAX_QUEUE_SIZE` | `100` | Maximum queued jobs. |
+| `ZISK_MPI_PROCS` | `1` | MPI processes for proving (`>1` runs `mpirun`). |
+| `ZISK_MPI_THREADS` | `0` | Threads per MPI process (`0` = let MPI decide). |
+| `ZISK_MPI_BIND_TO` | `none` | `mpirun --bind-to` policy. |
+
+## Performance
+
+All numbers below are from an NVIDIA RTX 5090 (driver 580, CUDA 12.8)
+running the [full pipeline](#what-the-circuit-checks). Ballot generation
+isn't counted; the time column is just SNARK generation.
+
+| batch | PLONK SNARK | votes/s | on-chain verify |
+|---:|---:|---:|---:|
+|  64 |    37 s |  1.7 |  350 ms |
+| 128 |    57 s |  2.2 |  340 ms |
+| 256 |    97 s |  2.6 |  340 ms |
+| 512 |   138 s |  3.7 |  480 ms |
+
+Scaling is sub-linear: per-vote cost roughly halves between batch 64 and
+batch 512. Proof size stays at 2.7 KB regardless of batch.
 
 ## Development
 
 ```bash
-# Build the circuit ELF (requires +zisk toolchain)
-cd circuit && cargo +zisk build --release --target riscv64ima-zisk-zkvm-elf
-cp circuit/target/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-circuit circuit/elf/circuit.elf
+# Rebuild the circuit ELF (needs the +zisk Rust toolchain)
+cd circuit && cargo-zisk build --release
+cp circuit/target/elf/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-circuit \
+   circuit/elf/circuit.elf
 
-# Build service binary only
+# Build the service binary
 cargo build --release -p davinci-zkvm-service
 
-# Run cheat tests (emulator, no service needed)
-cd go-sdk/tests && make test-unit
+# Rebuild the runtime Docker image
+make build
 
-# Run full integration tests (requires running service)
-cd go-sdk/tests && make test
+# Run the integration tests against a running service
+make test
 ```
 
-### Docker
-
-```bash
-# Build images
-docker compose build davinci-zkvm      # CUDA GPU image  (Dockerfile.cuda)
-docker compose build davinci-zkvm-cpu  # CPU-only image  (Dockerfile)
-
-# Run
-docker compose --profile cuda up -d    # Start CUDA GPU service
-docker compose --profile cpu  up -d    # Start CPU-only service
-```
+If you'd rather build and run the service directly on the host without
+Docker — useful when iterating on the Rust code — see `make local-setup`,
+`make local-run`, `make local-test`. Those drive `scripts/install.sh`.
 
 ## Circuit specification
 
-See [CIRCUIT.md](CIRCUIT.md) for a detailed formal specification of every constraint
-checked by the circuit, including input/output encoding, fail-mask bits, and
-cross-block binding rules.
-
-## Tests
-
-| Test suite | Command | Requirements |
-|------------|---------|--------------|
-| **Cheat tests** (7 tests) | `make test` | `ziskemu` in PATH |
-| **CSP integration** | `cd go-sdk/tests && make test` | Running service |
-| **Full E2E** (8 transitions) | `cd go-sdk/tests && make test` | Running service |
-| **Lightweight** | `make test-unit` | Running service |
-
-Cheat tests exercise the circuit in the ZisK emulator with deliberate protocol
-violations (wrong census root, wrong state root, mismatched vote IDs, wrong
-re-encryption key, wrong KZG data) and verify that the fail-mask correctly
-identifies each violation.
+[CIRCUIT.md](CIRCUIT.md) has the formal constraint spec, the public-output
+encoding, the fail-mask bits, and the cross-block binding rules.

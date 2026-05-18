@@ -105,6 +105,7 @@ COPY circuit/elf/circuit.elf /app/circuit.elf
 
 ENV LISTEN_ADDR=0.0.0.0:8080
 ENV PROVING_KEY_PATH=/proving-key
+ENV PROVING_KEY_PLONK_PATH=/proving-key-plonk
 ENV CIRCUIT_ELF_PATH=/app/circuit.elf
 ENV CARGO_ZISK_BIN=/usr/local/bin/cargo-zisk
 ENV PROOF_OUTPUT_DIR=/proofs
@@ -119,21 +120,67 @@ ENV OMPI_MCA_btl_smcuda_use_cuda_ipc=0
 ENV OMPI_ALLOW_RUN_AS_ROOT=1
 ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 
-# Check-setup entrypoint: build GPU constant trees if missing, warm up CUDA, then start service
+# Install python3 and binutils so the entrypoint can patch final.so's
+# executable-stack flag (see below) using stock tools.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Entrypoint:
+#   1. Patch the PLONK key's final.so to drop the executable-stack flag that
+#      modern Linux refuses to grant at dlopen time. Idempotent.
+#   2. Build STARK + PLONK constant trees if missing.
+#   3. Warm up the CUDA context so the first prove doesn't pay the
+#      cold-start penalty.
+#   4. Start the service.
 COPY <<'EOF' /app/entrypoint.sh
 #!/bin/bash
 set -e
 
-# Build constant trees if not present (GPU-specific format: .consttree_gpu)
-# Note: in v0.18.0, -a means --no-aggregation; use --gpu for GPU trees.
-CONSTTREE_CHECK="${PROVING_KEY_PATH}/zisk/Zisk/airs/ArithEq/compressor/compressor.consttree_gpu"
-CONSTTREE_CHECK_CPU="${PROVING_KEY_PATH}/zisk/Zisk/airs/ArithEq/compressor/compressor.consttree"
-if [ ! -f "${CONSTTREE_CHECK}" ] && [ ! -f "${CONSTTREE_CHECK_CPU}" ]; then
-    echo "=== Constant trees not found. Running check-setup (this may take a while) ==="
-    /usr/local/bin/cargo-zisk check-setup --proving-key "${PROVING_KEY_PATH}" --gpu
+FINAL_SO="${PROVING_KEY_PLONK_PATH}/final/final.so"
+if [ -f "${FINAL_SO}" ] && readelf -lW "${FINAL_SO}" 2>/dev/null | grep -q "GNU_STACK.* RWE"; then
+    echo "=== Patching ${FINAL_SO} to drop executable-stack flag ==="
+    if ! python3 - "${FINAL_SO}" <<'PYEOF' 2>&1
+import struct, sys
+path = sys.argv[1]
+with open(path, "r+b") as f:
+    data = f.read()
+    e_phoff = struct.unpack("<Q", data[32:40])[0]
+    e_phentsize = struct.unpack("<H", data[54:56])[0]
+    e_phnum = struct.unpack("<H", data[56:58])[0]
+    PT_GNU_STACK = 0x6474e551
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        p_type, p_flags = struct.unpack("<II", data[off:off+8])
+        if p_type == PT_GNU_STACK:
+            f.seek(off + 4)
+            f.write(struct.pack("<I", p_flags & ~0x1))
+            break
+PYEOF
+    then
+        # Read-only mount? Warn and continue — the service will surface
+        # the actual error on the first prove.
+        echo "  (could not patch; the proving-key mount may be read-only)"
+    fi
 fi
 
-# GPU warmup: initialize CUDA twiddle factors before serving the first request.
+STARK_TREE="${PROVING_KEY_PATH}/zisk/Zisk/airs/ArithEq/compressor/compressor.consttree_gpu"
+if [ ! -f "${STARK_TREE}" ]; then
+    echo "=== Building STARK constant trees (one-time, ~10 min) ==="
+    /usr/local/bin/cargo-zisk check-setup \
+        --proving-key "${PROVING_KEY_PATH}" \
+        --gpu
+fi
+
+PLONK_TREE="${PROVING_KEY_PLONK_PATH}/recursivef/recursivef.consttree_gpu"
+if [ -d "${PROVING_KEY_PLONK_PATH}" ] && [ ! -f "${PLONK_TREE}" ]; then
+    echo "=== Building PLONK constant trees (one-time, ~30 s) ==="
+    /usr/local/bin/cargo-zisk check-setup \
+        --proving-key "${PROVING_KEY_PATH}" \
+        --proving-key-plonk "${PROVING_KEY_PLONK_PATH}" \
+        --plonk --gpu
+fi
+
 echo "=== GPU warmup: initializing CUDA context ==="
 /usr/local/bin/cargo-zisk check-setup --proving-key "${PROVING_KEY_PATH}" --gpu 2>/dev/null || true
 

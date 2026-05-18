@@ -1,0 +1,48 @@
+# Thin image used by the `setup` Docker Compose profile to download the
+# ZisK proving keys into a host-mounted directory. It runs the official
+# `ziskup` script — same one a local dev would run on a bare host. No GPU
+# access required; the prover image (Dockerfile.cuda) carries its own
+# CUDA-capable cargo-zisk.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    python3 \
+    binutils \
+    xz-utils \
+    tar \
+    coreutils \
+    bash \
+    libssl3 \
+    libgomp1 \
+    libsodium23 \
+    libgmp10 \
+    libomp5-18 \
+    libopenmpi3 \
+    openmpi-bin \
+    openmpi-common \
+    && rm -rf /var/lib/apt/lists/*
+
+# ZISK_TAG is the upstream git tag ("v0.18.0"). ZISK_VERSION is the bare
+# semver ziskup wants on the CLI ("0.18.0" — ziskup prepends 'v' itself).
+ARG ZISK_TAG=v0.18.0
+ARG ZISK_VERSION=0.18.0
+
+# Bake the matching ziskup script into the image so the container is
+# pinned to the same ZisK version the prover image was built for. Sourced
+# straight from the upstream tag.
+RUN curl -fL \
+    "https://raw.githubusercontent.com/0xPolygonHermez/zisk/${ZISK_TAG}/ziskup/ziskup" \
+    -o /usr/local/bin/ziskup \
+ && chmod +x /usr/local/bin/ziskup
+
+COPY scripts/install-keys.sh /usr/local/bin/install-keys.sh
+RUN chmod +x /usr/local/bin/install-keys.sh
+
+ENV ZISK_VERSION=${ZISK_VERSION}
+ENV ZISK_DIR=/zisk
+
+ENTRYPOINT ["/usr/local/bin/install-keys.sh"]

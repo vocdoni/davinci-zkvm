@@ -1,7 +1,11 @@
 // Package davinci provides a Go client SDK for the davinci-zkvm service.
 //
-// It allows callers to submit batches of Groth16 BN254 ballot proofs
-// alongside Ethereum ECDSA signatures for ZisK STARK proving.
+// Callers submit batches of Groth16 BN254 ballot proofs alongside Ethereum
+// ECDSA signatures; the service returns a PLONK SNARK ready for on-chain
+// verification via the `ZiskVerifier.verifySnarkProof` contract shipped in
+// `solidity/` of this repo. The SDK never exposes intermediate STARK or
+// VADCOP artifacts — consumers only see the four byte strings the on-chain
+// verifier consumes. See [PlonkSnark] and [Client.FetchSnark].
 package davinci
 
 import "encoding/json"

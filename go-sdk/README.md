@@ -1,8 +1,9 @@
 # davinci-zkvm Go SDK
 
-Go client library for the [davinci-zkvm](https://github.com/vocdoni/davinci-zkvm)
-proving service. Provides typed data structures and a high-level `Prove()` API
-designed to integrate directly with the
+Go client for the [davinci-zkvm](https://github.com/vocdoni/davinci-zkvm)
+proving service. Typed structs for the request side, a one-call `Prove`
+for the happy path, and a helper that hands you a PLONK SNARK ready to
+feed to Ethereum. Built to slot directly into the
 [davinci-node](https://github.com/vocdoni/davinci-node) sequencer.
 
 ## Install
@@ -21,7 +22,7 @@ import (
 
 client := davinci.NewClient("http://localhost:8080")
 
-// Build a batch of voter ballots with all auxiliary data
+// Build a batch with all the auxiliary data a state transition needs.
 batch := &davinci.ProveBatch{
     VerificationKey: vk,       // *VerificationKey — shared Groth16 BN254 VK
     Voters:          voters,   // []VoterBallot — one per voter
@@ -30,20 +31,27 @@ batch := &davinci.ProveBatch{
     KZG:             kzgData,  // *KZGRequest — blob evaluation (optional)
 }
 
-// Submit, wait for proof, and download result
+// Block until the service returns a ready-to-verify PLONK SNARK.
 result, err := client.Prove(ctx, batch)
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("proof ready (job %s, %s)\n", result.JobID, result.Elapsed)
+fmt.Printf("snark ready (job %s, %s)\n", result.JobID, result.Elapsed)
+
+// Send these four arguments to ZiskVerifier.verifySnarkProof on Ethereum.
+snark := result.Snark
+_ = snark.ProgramVK        // bytes32 programVK
+_ = snark.RootCVadcopFinal // bytes32 rootCVadcopFinal
+_ = snark.PublicValues     // bytes publicValues (256 B)
+_ = snark.ProofBytes       // bytes proofBytes   (768 B = uint256[24])
 ```
 
 ## Core types
 
 ### `ProveBatch`
 
-The primary integration type. Contains everything needed for a single
-state-transition proof:
+The thing you assemble for one state-transition proof — voters, the SMT
+chain transitions, the ElGamal re-encryption key, the optional KZG blob:
 
 ```go
 type ProveBatch struct {
@@ -51,7 +59,6 @@ type ProveBatch struct {
     Voters              []VoterBallot       // Per-voter ballot proofs
     State               *StateTransitionData // SMT state transitions
     EncryptionKey       *BjjPoint           // ElGamal re-encryption public key
-    CspPubKey           *BjjPoint           // CSP secp256k1 public key (censusOrigin=4)
     KZG                 *KZGRequest         // EIP-4844 blob evaluation data
 }
 ```
@@ -122,14 +129,50 @@ type PublicOutputs struct {
 ## Client API
 
 | Method | Description |
-|--------|-------------|
-| `NewClient(url)` | Create a client pointing to the service |
-| `client.Prove(ctx, batch)` | Submit, wait, and return proof + outputs |
-| `client.Health()` | Service health check |
-| `client.SubmitProve(req)` | Low-level: submit a `ProveRequest` |
-| `client.GetJob(id)` | Low-level: poll job status |
-| `client.WaitForJob(id, timeout)` | Low-level: block until done/failed |
-| `client.GetProof(id)` | Low-level: download proof binary |
+|---|---|
+| `NewClient(url)` | Create a client pointing to the service. |
+| `client.Prove(ctx, batch)` | Submit a batch, wait, and return a ready-to-verify [`*PlonkSnark`](#plonksnark). |
+| `client.Health()` | Service health check. |
+| `client.SubmitProve(req)` | Low-level: submit a `ProveRequest` and get a job ID back. |
+| `client.GetJob(id)` | Low-level: snapshot of a job's status. |
+| `client.WaitForJob(id, timeout)` | Low-level: block until the job is done or failed. |
+| `client.FetchSnark(id)` | Download the Solidity-ready PLONK payload for a completed job. |
+| `client.FetchInputs(id)` | Download the raw `input.bin` for audit or re-proving. |
+
+### `PlonkSnark`
+
+`Client.FetchSnark` returns a typed payload ready to pass to
+[`ZiskVerifier.verifySnarkProof`](../solidity/ZiskVerifier.sol) on Ethereum:
+
+```go
+type PlonkSnark struct {
+    ProgramVK        [32]byte // bytes32 programVK
+    RootCVadcopFinal [32]byte // bytes32 rootCVadcopFinal
+    PublicValues     []byte   // bytes publicValues   (256 B)
+    ProofBytes       []byte   // bytes proofBytes     (768 B = uint256[24])
+}
+```
+
+On-chain, the verifier SHA-256s `programVK || publicValues ||
+rootCVadcopFinal`, reduces the digest modulo the BN254 scalar field, and
+hands the result to the bare PLONK verifier together with
+`abi.decode(proofBytes, (uint256[24]))`.
+
+### Off-chain verification
+
+If you want to verify in a test instead of on a real chain,
+[`go-sdk/solidity`](./solidity/solidity.go) has a one-call helper:
+
+```go
+import davinciSolidity "github.com/vocdoni/davinci-zkvm/go-sdk/solidity"
+
+snark, _ := client.FetchSnark(jobID)
+err := davinciSolidity.VerifyOnSimulated("./solidity", snark)
+```
+
+It compiles the verifier contracts with local `solc` (or `docker run
+ethereum/solc:stable`) and runs them on
+`go-ethereum/ethclient/simulated.NewBackend`.
 
 ### Environment variables
 

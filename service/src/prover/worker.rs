@@ -1,10 +1,14 @@
-//! Proof worker: background task that processes jobs sequentially.
+//! Background worker that runs ZisK proves one job at a time.
 //!
-//! Only one proof job runs at a time because the ZisK prover uses all available
-//! GPU/CPU resources. Jobs are held in a channel queue and processed in order.
+//! A single ZisK prove saturates the GPU (it allocates ~30 GB of VRAM and
+//! pins all available CUDA streams), so jobs are processed strictly in
+//! submission order from an in-memory MPSC channel. The HTTP layer never
+//! blocks on proving — it only enqueues — which keeps the API responsive
+//! even when a long batch is in flight.
 
 use crate::config::Config;
 use crate::types::{Job, JobStatus};
+use chrono::Utc;
 use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,8 +16,8 @@ use std::time::Instant;
 use tokio::process::Command;
 use tracing::{error, info, warn};
 use uuid::Uuid;
-use chrono::Utc;
 
+/// Handle held by the HTTP layer; submits new jobs and exposes their status.
 pub struct ProverHandle {
     pub jobs: Arc<DashMap<Uuid, Job>>,
     sender: tokio::sync::mpsc::Sender<ProveTask>,
@@ -26,10 +30,11 @@ struct ProveTask {
 }
 
 impl ProverHandle {
-    /// Create a new prover handle, spawning the background worker task.
+    /// Spawn the background prove worker and return a handle to it.
     pub fn new(config: Config) -> Self {
         let jobs: Arc<DashMap<Uuid, Job>> = Arc::new(DashMap::new());
-        let (sender, receiver) = tokio::sync::mpsc::channel::<ProveTask>(config.max_queue_size);
+        let (sender, receiver) =
+            tokio::sync::mpsc::channel::<ProveTask>(config.max_queue_size);
 
         let worker_jobs = jobs.clone();
         tokio::spawn(worker_loop(config, receiver, worker_jobs));
@@ -37,37 +42,52 @@ impl ProverHandle {
         Self { jobs, sender }
     }
 
-    /// Submit a new proof job. Returns the job ID, or an error if the queue is full.
-    pub async fn submit(&self, input_bytes: Vec<u8>, proof_output_dir: &PathBuf) -> anyhow::Result<Uuid> {
+    /// Queue a new proof job. The input payload is written to disk under a
+    /// per-job directory so the prover subprocess can mmap it directly.
+    ///
+    /// Returns the job ID once the request is accepted, or an error if the
+    /// in-memory queue is full.
+    pub async fn submit(
+        &self,
+        input_bytes: Vec<u8>,
+        proof_output_dir: &PathBuf,
+    ) -> anyhow::Result<Uuid> {
         let job_id = Uuid::new_v4();
-        let job = Job::new(job_id);
-        self.jobs.insert(job_id, job);
+        self.jobs.insert(job_id, Job::new(job_id));
 
-        // Write input bytes to a temp file for this job
         let job_dir = proof_output_dir.join(job_id.to_string());
         tokio::fs::create_dir_all(&job_dir).await?;
-        let input_path = job_dir.join("input.bin");
-        // v0.18.0: ziskos read_slice_zerocopy() reads an 8-byte LE u64 length at
-        // INPUT_ADDR+8, then that many bytes of payload. Wrap input_bytes accordingly.
-        let payload_len = input_bytes.len() as u64;
-        let mut prefixed = Vec::with_capacity(8 + input_bytes.len());
-        prefixed.extend_from_slice(&payload_len.to_le_bytes());
-        prefixed.extend_from_slice(&input_bytes);
-        while prefixed.len() % 8 != 0 {
-            prefixed.push(0);
-        }
-        tokio::fs::write(&input_path, &prefixed).await?;
-        let output_dir = job_dir.clone();
 
-        let task = ProveTask { job_id, input_path, output_dir };
-        self.sender.try_send(task).map_err(|e| anyhow::anyhow!("queue is full or closed: {}", e))?;
+        let input_path = job_dir.join("input.bin");
+        tokio::fs::write(&input_path, &encode_zisk_input(&input_bytes)).await?;
+
+        let task = ProveTask {
+            job_id,
+            input_path,
+            output_dir: job_dir,
+        };
+        self.sender
+            .try_send(task)
+            .map_err(|e| anyhow::anyhow!("queue is full or closed: {}", e))?;
         Ok(job_id)
     }
 
-    /// Return the number of jobs currently queued (not yet started).
+    /// Number of jobs currently waiting for the worker (not yet started).
     pub fn queue_len(&self) -> usize {
         self.jobs.iter().filter(|e| e.status == JobStatus::Queued).count()
     }
+}
+
+/// Wrap raw payload bytes in the framing `ziskos::io::read_input_slice()`
+/// expects: an 8-byte little-endian length prefix, then the payload, then
+/// zero-padding up to the next 8-byte boundary.
+fn encode_zisk_input(payload: &[u8]) -> Vec<u8> {
+    let aligned_len = (payload.len() + 7) & !7;
+    let mut out = Vec::with_capacity(8 + aligned_len);
+    out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    out.extend_from_slice(payload);
+    out.resize(8 + aligned_len, 0);
+    out
 }
 
 async fn worker_loop(
@@ -109,48 +129,55 @@ async fn worker_loop(
     info!("Prover worker stopped");
 }
 
-/// Detects transient CUDA cold-start failures.
+/// Maximum number of automatic retries when the prover hits a known
+/// transient failure.
+const MAX_PROVE_RETRIES: u32 = 3;
+/// Delay between retries.
+const PROVE_RETRY_DELAY_SECS: u64 = 5;
+
+/// Detects prover failures that are known to be transient — same input and
+/// the same machine, run it again and it succeeds — so the worker can absorb
+/// them without escalating to the API caller.
 ///
-/// # Background
+/// Two flavours are covered:
 ///
-/// ZisK uses OpenMPI internally. On container cold-start, OpenMPI's atexit
-/// handler calls `MPI_Finalize` (which destroys the CUDA context) before the
-/// NTT_Goldilocks_GPU destructor runs. This causes a `cudaGetLastError: context
-/// is destroyed (709)` abort on the **first** `cargo-zisk prove` invocation
-/// after the container starts. Subsequent invocations succeed normally.
+/// 1. **CUDA cold-start.** ZisK uses OpenMPI internally; on the very first
+///    `cargo-zisk prove` after the container starts, MPI's atexit handler
+///    sometimes tears the CUDA context down ahead of the GPU destructor and
+///    aborts with `cudaGetLastError: context is destroyed`. Subsequent
+///    invocations within the same container never hit it.
+/// 2. **Fiat–Shamir flake at large batch sizes.** Around 512 voters we have
+///    occasionally seen ZisK return `Proof contribution challenge does not
+///    match expected accumulated challenge` for an input that proves cleanly
+///    on retry. The exact text is what we match on.
 ///
-/// This is a ZisK/OpenMPI bug, not a problem with the input or the proving key.
-/// We handle it transparently with up to `MAX_CUDA_RETRIES` automatic retries,
-/// hiding the crash output from the API consumer.
-fn is_transient_cuda_error(msg: &str) -> bool {
+/// We deliberately do **not** match the bare `SIGABRT` keyword — it also
+/// fires for witness-generation assertions which are deterministic and
+/// retrying would just burn budget.
+fn is_transient_prover_error(msg: &str) -> bool {
     msg.contains("context is destroyed")
         || msg.contains("cudaGetLastError")
-        || msg.contains("SIGABRT")
         || msg.contains("MPI_ERRORS_ARE_FATAL")
+        || msg.contains("Proof contribution challenge does not match")
 }
 
-/// Maximum number of automatic retries for transient CUDA cold-start errors.
-const MAX_CUDA_RETRIES: u32 = 3;
-
-/// Retry delay between CUDA cold-start retries.
-const CUDA_RETRY_DELAY_SECS: u64 = 5;
-
-/// Run prove, automatically retrying up to [`MAX_CUDA_RETRIES`] times on
-/// transient CUDA cold-start errors. The crash output is suppressed on retried
-/// attempts and is only surfaced if all retries are exhausted.
+/// Run `cargo-zisk prove`, transparently retrying [`MAX_PROVE_RETRIES`] times
+/// on the transient prover errors listed in [`is_transient_prover_error`].
+/// Output from retried attempts is hidden from the caller; the final error
+/// is only surfaced if every attempt fails.
 async fn run_prove_with_retry(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
     let mut last_err = anyhow::anyhow!("prove never attempted");
-    for attempt in 1..=MAX_CUDA_RETRIES + 1 {
+    for attempt in 1..=MAX_PROVE_RETRIES + 1 {
         match run_prove(config, task).await {
             Ok(()) => return Ok(()),
-            Err(e) if is_transient_cuda_error(&e.to_string()) && attempt <= MAX_CUDA_RETRIES => {
+            Err(e) if attempt <= MAX_PROVE_RETRIES && is_transient_prover_error(&e.to_string()) => {
                 warn!(
-                    "Job {} hit transient CUDA cold-start error (attempt {}/{}), \
-                     retrying in {}s",
-                    task.job_id, attempt, MAX_CUDA_RETRIES, CUDA_RETRY_DELAY_SECS
+                    "Job {} hit a transient prover error (attempt {}/{}); retrying in {}s",
+                    task.job_id, attempt, MAX_PROVE_RETRIES, PROVE_RETRY_DELAY_SECS
                 );
                 last_err = e;
-                tokio::time::sleep(tokio::time::Duration::from_secs(CUDA_RETRY_DELAY_SECS)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(PROVE_RETRY_DELAY_SECS))
+                    .await;
             }
             Err(e) => return Err(e),
         }
@@ -159,25 +186,10 @@ async fn run_prove_with_retry(config: &Config, task: &ProveTask) -> anyhow::Resu
 }
 
 async fn run_prove(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
-    // Produces a ZisK STARK proof (vadcop_final_proof.bin).
-    //
-    // NOTE: --final-snark is intentionally NOT passed here.
-    //
-    // ZisK's full pipeline ends with an optional FFlonk BN254 zkSNARK stage
-    // ("recursivef" → final.zkey) that would produce a compact, on-chain-verifiable
-    // proof.  However, the distributed v0.15.0 proving key does not include the
-    // required `final/` artifacts (final.so, final.zkey, final.dat).  Passing
-    // --final-snark with the current proving key causes proofman to silently
-    // discard the error (the result of generate_fflonk_snark_proof is `let _`),
-    // so the flag has no effect: it only wastes initialisation time.
-    //
-    // When Polygon releases the final-snark proving key artifacts, re-add:
-    //   .arg("--final-snark")
-    // and update the /proof download endpoint to serve the resulting JSON file
-    // instead of vadcop_final_proof.bin.
-    // v0.18.0 flag changes:
-    // --input → --inputs, --output-dir → --output (file), --aggregation removed
-    // (aggregation is now the default), --gpu added explicitly.
+    // Run the full ZisK prove pipeline (STARK → recursive aggregation →
+    // recursivef → fflonk PLONK wrap). The output at `proof.bin` is a
+    // bincode-encoded ZisK `Proof` whose body is the PLONK SNARK; the
+    // intermediate VADCOP STARK is never written to disk.
     let proof_output_path = task.output_dir.join("proof.bin");
     let zisk_args: Vec<String> = vec![
         "prove".to_string(),
@@ -187,10 +199,13 @@ async fn run_prove(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
         task.input_path.display().to_string(),
         "--proving-key".to_string(),
         config.proving_key_path.display().to_string(),
+        "--proving-key-plonk".to_string(),
+        config.proving_key_plonk_path.display().to_string(),
         "--output".to_string(),
         proof_output_path.display().to_string(),
         "--emulator".to_string(),
         "--gpu".to_string(),
+        "--plonk".to_string(),
         "--verify-proofs".to_string(),
     ];
 
@@ -228,5 +243,38 @@ async fn run_prove(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
         let stdout = String::from_utf8_lossy(&output.stdout);
         anyhow::bail!("cargo-zisk prove failed (exit {}): {}\n{}", output.status, stderr, stdout);
     }
+
+    // The raw `proof.bin` is a bincode-encoded ZisK `Proof` struct that is
+    // not directly usable on-chain. Decode it once here, write the four
+    // Solidity-ready byte strings to `snark.json`, and split the
+    // `publicValues` blob out into `publics.bin` for callers that only want
+    // the program's `commit_slice` output. These post-processing steps are
+    // millisecond-scale; failing them does not invalidate the proof itself
+    // (consumers can always fall back to `cargo-zisk verify` against
+    // `proof.bin`), so we log and continue rather than failing the job.
+    let proof_path = task.output_dir.join("proof.bin");
+    match crate::prover::snark::parse_proof_bin(&proof_path) {
+        Ok(snark) => {
+            let snark_path = task.output_dir.join("snark.json");
+            match serde_json::to_vec_pretty(&snark) {
+                Ok(buf) => {
+                    if let Err(e) = tokio::fs::write(&snark_path, &buf).await {
+                        warn!("write snark.json: {}", e);
+                    }
+                }
+                Err(e) => warn!("serialize snark.json: {}", e),
+            }
+            if let Some(stripped) = snark.public_values.strip_prefix("0x") {
+                if let Ok(bytes) = hex::decode(stripped) {
+                    let publics_path = task.output_dir.join("publics.bin");
+                    if let Err(e) = tokio::fs::write(&publics_path, &bytes).await {
+                        warn!("write publics.bin: {}", e);
+                    }
+                }
+            }
+        }
+        Err(e) => warn!("parse proof.bin into SNARK payload: {}", e),
+    }
+
     Ok(())
 }
