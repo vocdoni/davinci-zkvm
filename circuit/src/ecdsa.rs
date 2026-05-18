@@ -1,4 +1,4 @@
-//! Ethereum secp256k1 ECDSA signature batch verification.
+//! Ethereum secp256k1 ECDSA signature batch verification via public-key recovery.
 //!
 //! Each ballot carries an ECDSA signature over its `vote_id`, produced with the
 //! standard Ethereum personal-sign scheme (matching `davinci-node/crypto/signatures/ethereum`):
@@ -10,8 +10,11 @@
 //! sig      = secp256k1.Sign(z, privKey)        // R[32] || S[32] || V[1]
 //! ```
 //!
-//! In addition to the signature check, we verify that the public key hashes to the
-//! Ethereum address declared as the first public input of the matching ballot proof:
+//! Rather than carrying the public key in the witness and running
+//! `ecdsa_verify_secp256k1(pk, z, r, s)`, we use the recovery form
+//! `ecdsa_recover_secp256k1(r, s, z, recid) -> pk`. The recovered point is
+//! guaranteed on-curve by the precompile; we then derive the Ethereum
+//! address and bind it to the matching ballot proof's `pubs[0]`:
 //!
 //! ```text
 //! address = keccak256(pk.x_BE32 || pk.y_BE32)[12..]   // 20-byte Ethereum address
@@ -21,11 +24,9 @@
 use crate::hash::keccak256_short;
 use crate::io::ParsedInput;
 use crate::types::{FrRaw, FAIL_ECDSA};
-use ziskos::zisklib::ecdsa_verify_secp256k1;
+use ziskos::zisklib::ecdsa_recover_secp256k1;
 
 /// Compute the Ethereum signed-message hash of `vote_id` as a `[u64; 4]` LE scalar.
-///
-/// The result is used as `z` in `ecdsa_verify_secp256k1(pk, z, r, s)`.
 fn eth_message_hash(vote_id: u64) -> [u64; 4] {
     // Prefix: "\x19Ethereum Signed Message:\n32" = 28 bytes
     const PREFIX: &[u8] = b"\x19Ethereum Signed Message:\n32";
@@ -43,16 +44,14 @@ fn eth_message_hash(vote_id: u64) -> [u64; 4] {
     ]
 }
 
-/// Derive the 20-byte big-endian Ethereum address from a secp256k1 public key.
-///
-/// `address = keccak256(px_BE32 || py_BE32)[12..]`
-///
-/// Inputs `px`/`py` are `[u64; 4]` little-endian (standard ZisK representation).
-fn eth_address_from_pk(px: &FrRaw, py: &FrRaw) -> [u8; 20] {
+/// Derive the 20-byte big-endian Ethereum address from a recovered secp256k1 pk.
+/// `pk_le[0..4]` is px LE limbs, `pk_le[4..8]` is py LE limbs (the layout
+/// returned by `ecdsa_recover_secp256k1`).
+fn eth_address_from_recovered_pk(pk_le: &[u64; 8]) -> [u8; 20] {
     let mut pubkey = [0u8; 64];
     for i in 0..4 {
-        pubkey[i * 8..i * 8 + 8].copy_from_slice(&px[3 - i].to_be_bytes());
-        pubkey[32 + i * 8..32 + i * 8 + 8].copy_from_slice(&py[3 - i].to_be_bytes());
+        pubkey[i * 8..i * 8 + 8].copy_from_slice(&pk_le[3 - i].to_be_bytes());
+        pubkey[32 + i * 8..32 + i * 8 + 8].copy_from_slice(&pk_le[4 + 3 - i].to_be_bytes());
     }
     keccak256_short(&pubkey)[12..].try_into().unwrap()
 }
@@ -68,12 +67,13 @@ fn address_matches(addr_bytes: &[u8; 20], pubs_addr: &FrRaw) -> bool {
     addr_bytes == &expected
 }
 
-/// Verify all ECDSA signatures in `parsed.ecdsa`.
+/// Verify all ECDSA signatures in `parsed.ecdsa` via public-key recovery.
 ///
 /// Returns `ecdsa_ok = false` when any signature or address binding check fails.
 ///
 /// # Fail-mask bits
-/// - `FAIL_ECDSA` (bit 3): signature or address-binding check failed, or block absent
+/// - `FAIL_ECDSA` (bit 3): signature recovery or address-binding check failed,
+///   or the ECDSA block is absent.
 pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     if parsed.ecdsa.is_empty() {
         // ECDSA block is mandatory; treat absence as failure.
@@ -100,17 +100,18 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
             return false;
         }
         let vote_id = pubs[1][0];
-        let pk: [u64; 8] = [
-            sig.px[0], sig.px[1], sig.px[2], sig.px[3],
-            sig.py[0], sig.py[1], sig.py[2], sig.py[3],
-        ];
-        let z       = eth_message_hash(vote_id);
+        let z = eth_message_hash(vote_id);
 
-        if !ecdsa_verify_secp256k1(&pk, &z, &sig.r, &sig.s) {
-            *fail_mask |= FAIL_ECDSA;
-            return false;
-        }
-        let addr = eth_address_from_pk(&sig.px, &sig.py);
+        // Recover the public key. ecdsa_recover_secp256k1 returns Err for invalid
+        // r/s/recid, point-not-on-curve, etc. — all collapse to FAIL_ECDSA.
+        let pk_le = match ecdsa_recover_secp256k1(&sig.r, &sig.s, &z, sig.recid) {
+            Ok(pk) => pk,
+            Err(_) => {
+                *fail_mask |= FAIL_ECDSA;
+                return false;
+            }
+        };
+        let addr = eth_address_from_recovered_pk(&pk_le);
         if !address_matches(&addr, &pubs[0]) {
             *fail_mask |= FAIL_ECDSA;
             return false;

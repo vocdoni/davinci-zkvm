@@ -38,13 +38,16 @@ const zeroHex64 = "0000000000000000000000000000000000000000000000000000000000000
 // EcdsaSignature holds the secp256k1 ECDSA signature components needed by the
 // ZisK circuit. This matches the Rust EcdsaSig struct in input-gen.
 // R, S are signature components. PubKeyX, PubKeyY are the uncompressed public
-// key coordinates. VoteID is the vote identifier. Address is the Ethereum
-// address as a decimal uint160 string.
+// key coordinates (kept for debugging; not consumed by the circuit anymore).
+// Recid is the y-coordinate parity bit (0 or 1) for `ecdsa_recover_secp256k1`.
+// VoteID is the vote identifier. Address is the Ethereum address as a decimal
+// uint160 string.
 type EcdsaSignature struct {
 	R       *big.Int
 	S       *big.Int
 	PubKeyX *big.Int
 	PubKeyY *big.Int
+	Recid   uint8
 	VoteID  uint64
 	Address *big.Int
 }
@@ -60,12 +63,14 @@ func (e *EcdsaSignature) MarshalJSON() ([]byte, error) {
 		`"public_key_y":%q,`+
 		`"signature_r":%q,`+
 		`"signature_s":%q,`+
+		`"signature_v":%d,`+
 		`"vote_id":%d,`+
 		`"address":%q}`,
 		bigIntToHex32BE(e.PubKeyX),
 		bigIntToHex32BE(e.PubKeyY),
 		bigIntToHex32BE(e.R),
 		bigIntToHex32BE(e.S),
+		e.Recid,
 		e.VoteID,
 		addr,
 	)), nil

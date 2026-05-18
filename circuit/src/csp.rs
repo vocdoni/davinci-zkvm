@@ -1,4 +1,4 @@
-//! CSP (Credential Service Provider) ECDSA census verification.
+//! CSP (Credential Service Provider) ECDSA census verification via key recovery.
 //!
 //! In CSP census mode (censusOrigin == 4), an authority (the CSP) signs each voter's
 //! eligibility using secp256k1 ECDSA. The census root is the CSP's Ethereum address.
@@ -13,29 +13,31 @@
 //!
 //! # Verification per voter
 //!
-//! 1. Reconstruct `z` from (processID, voter_address, weight, index)
-// ! 2. `ecdsa_verify_secp256k1(csp_pk, z, r, s)` => CSP signed this voter
-// ! 3. `eth_address_from_pk(csp_pk) == censusRoot` => CSP is the authorized authority
+//! 1. Reconstruct `z` from (processID, voter_address, weight, index).
+//! 2. `pk_i = ecdsa_recover_secp256k1(r, s, z, recid)` — recovers the signer.
+//! 3. First entry: `census_root = eth_address(pk_0)`.
+//! 4. Subsequent entries: assert `pk_i == pk_0` (8×u64 equality, no keccak needed).
+//!
+//! Saves N−1 keccak256 calls vs deriving address each entry, and removes the
+//! CSP pk from the witness entirely.
 //!
 //! # Security invariants
 //!
-//! - All entries share the same CSP public key (stored once in the block header)
+//! - All entries recover to the same secp256k1 public key (single authorised CSP)
 //! - No duplicate (voter_address, index) pairs
-//! - CSP address == census root from process config
-//! - voter_address in each CSP entry must match the ballot proof's address (pub_inputs[0])
+//! - The recovered CSP address is exported as the census root; the caller binds
+//!   it to the process-config census-root key.
 
 use crate::hash::keccak256_short;
 use crate::types::{CspBlock, FrRaw, FAIL_CSP, ZERO_FR};
-use ziskos::zisklib::ecdsa_verify_secp256k1;
+use ziskos::zisklib::ecdsa_recover_secp256k1;
 
 /// Compute the Ethereum signed-message hash for a CSP attestation.
-/// `z = keccak256("\x19Ethereum Signed Message:\n92" || processID_BE32 || address_BE20 || weight_BE32 || index_BE8)`
 fn csp_message_hash(process_id: &FrRaw, voter_address: &FrRaw, weight: &FrRaw, index: u64) -> [u64; 4] {
     // Prefix: "\x19Ethereum Signed Message:\n92" = 28 bytes
     const PREFIX: &[u8] = b"\x19Ethereum Signed Message:\n92";
     let mut envelope = [0u8; 120]; // 28 + 32 + 20 + 32 + 8
 
-    // Copy prefix
     envelope[..28].copy_from_slice(PREFIX);
 
     // processID: FrRaw [u64;4] LE → 32-byte big-endian
@@ -45,7 +47,6 @@ fn csp_message_hash(process_id: &FrRaw, voter_address: &FrRaw, weight: &FrRaw, i
     }
 
     // voter_address: uint160 in FrRaw LE → 20-byte big-endian
-    // addr is packed as: limb[0] = bits 0-63, limb[1] = bits 64-127, limb[2] = bits 128-159
     let addr_bytes = fr_to_address(voter_address);
     envelope[60..80].copy_from_slice(&addr_bytes);
 
@@ -59,7 +60,6 @@ fn csp_message_hash(process_id: &FrRaw, voter_address: &FrRaw, weight: &FrRaw, i
     envelope[112..120].copy_from_slice(&index.to_be_bytes());
 
     let h = keccak256_short(&envelope);
-    // Big-endian hash → [u64;4] LE scalar
     [
         u64::from_be_bytes(h[24..32].try_into().unwrap()),
         u64::from_be_bytes(h[16..24].try_into().unwrap()),
@@ -70,23 +70,20 @@ fn csp_message_hash(process_id: &FrRaw, voter_address: &FrRaw, weight: &FrRaw, i
 
 /// Convert a uint160 stored as FrRaw LE limbs to a 20-byte big-endian Ethereum address.
 fn fr_to_address(fr: &FrRaw) -> [u8; 20] {
-    // fr[0] = bits 0..63, fr[1] = bits 64..127, fr[2] = bits 128..159 (upper 32 bits only)
     let mut addr = [0u8; 20];
-    // Lower 32 bits of fr[2] → first 4 bytes (big-endian)
     addr[0..4].copy_from_slice(&(fr[2] as u32).to_be_bytes());
-    // fr[1] → next 8 bytes (big-endian)
     addr[4..12].copy_from_slice(&fr[1].to_be_bytes());
-    // fr[0] → last 8 bytes (big-endian)
     addr[12..20].copy_from_slice(&fr[0].to_be_bytes());
     addr
 }
 
-/// Derive the 20-byte Ethereum address from a secp256k1 public key.
-fn eth_address_from_pk(px: &FrRaw, py: &FrRaw) -> [u8; 20] {
+/// Derive the 20-byte Ethereum address from a recovered secp256k1 public key
+/// stored as `[u64; 8]` (px LE limbs, then py LE limbs).
+fn eth_address_from_recovered_pk(pk_le: &[u64; 8]) -> [u8; 20] {
     let mut pubkey = [0u8; 64];
     for i in 0..4 {
-        pubkey[i * 8..i * 8 + 8].copy_from_slice(&px[3 - i].to_be_bytes());
-        pubkey[32 + i * 8..32 + i * 8 + 8].copy_from_slice(&py[3 - i].to_be_bytes());
+        pubkey[i * 8..i * 8 + 8].copy_from_slice(&pk_le[3 - i].to_be_bytes());
+        pubkey[32 + i * 8..32 + i * 8 + 8].copy_from_slice(&pk_le[4 + 3 - i].to_be_bytes());
     }
     let hash = keccak256_short(&pubkey);
     hash[12..].try_into().unwrap()
@@ -102,11 +99,12 @@ fn address_to_fr(addr: &[u8; 20]) -> FrRaw {
     ]
 }
 
-/// Verify CSP ECDSA proofs for all voters.
-/// Returns `(ok, census_root_fr)` where `census_root_fr` is the CSP's Ethereum address
-/// as an FrRaw (used as the census root output).
+/// Verify CSP ECDSA proofs for all voters via public-key recovery.
+/// Returns `(ok, census_root_fr)` where `census_root_fr` is the recovered CSP's
+/// Ethereum address as an FrRaw (used as the census root output).
+///
 /// # Fail-mask bits
-/// - `FAIL_CSP` (bit 23) => CSP signature verification or address check failed
+/// - `FAIL_CSP` (bit 23): signature recovery, key-mismatch, or duplicate check failed
 pub fn verify_csp(
     csp: &CspBlock,
     process_id: &FrRaw,
@@ -117,34 +115,41 @@ pub fn verify_csp(
         return (false, ZERO_FR);
     }
 
-    // Derive the CSP's Ethereum address (this IS the census root).
-    let csp_addr = eth_address_from_pk(&csp.csp_pub_key_x, &csp.csp_pub_key_y);
-    let census_root = address_to_fr(&csp_addr);
-
-    let pk: [u64; 8] = [
-        csp.csp_pub_key_x[0], csp.csp_pub_key_x[1], csp.csp_pub_key_x[2], csp.csp_pub_key_x[3],
-        csp.csp_pub_key_y[0], csp.csp_pub_key_y[1], csp.csp_pub_key_y[2], csp.csp_pub_key_y[3],
-    ];
-
-    // Invariant 1: no duplicate (voter_address, index) pairs
     let n = csp.entries.len();
+
+    // Invariant 1: no duplicate (voter_address, index) pairs.
     for i in 0..n {
         for j in (i + 1)..n {
             if csp.entries[i].voter_address == csp.entries[j].voter_address
                 && csp.entries[i].index == csp.entries[j].index
             {
                 *fail_mask |= FAIL_CSP;
-                return (false, census_root);
+                return (false, ZERO_FR);
             }
         }
     }
 
-    // Invariant 2: each CSP signature is valid
-    for entry in &csp.entries {
-        let z = csp_message_hash(process_id, &entry.voter_address, &entry.weight, entry.index);
-        if !ecdsa_verify_secp256k1(&pk, &z, &entry.r, &entry.s) {
+    // Recover pk from the first entry → census_root = eth_address(pk_0).
+    let first = &csp.entries[0];
+    let z0 = csp_message_hash(process_id, &first.voter_address, &first.weight, first.index);
+    let pk0 = match ecdsa_recover_secp256k1(&first.r, &first.s, &z0, first.recid) {
+        Ok(pk) => pk,
+        Err(_) => {
             *fail_mask |= FAIL_CSP;
-            return (false, census_root);
+            return (false, ZERO_FR);
+        }
+    };
+    let census_root = address_to_fr(&eth_address_from_recovered_pk(&pk0));
+
+    // Invariant 2: every remaining entry recovers to the same public key.
+    for entry in &csp.entries[1..] {
+        let z = csp_message_hash(process_id, &entry.voter_address, &entry.weight, entry.index);
+        match ecdsa_recover_secp256k1(&entry.r, &entry.s, &z, entry.recid) {
+            Ok(pk) if pk == pk0 => {}
+            _ => {
+                *fail_mask |= FAIL_CSP;
+                return (false, census_root);
+            }
         }
     }
 

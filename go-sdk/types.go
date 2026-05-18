@@ -171,11 +171,15 @@ func (co CensusOrigin) IsMerkle() bool { return co >= 1 && co <= 3 }
 
 // CspProof represents a CSP ECDSA attestation for a single voter.
 // The CSP signs: keccak256(EthPersonalSignPrefix || processID || address || weight || index).
+// The circuit recovers the CSP public key via `ecdsa_recover_secp256k1`; Recid
+// is the y-coordinate parity bit (0 or 1) needed by recovery.
 type CspProof struct {
 	// R is the ECDSA signature R component (32-byte big-endian hex).
 	R string `json:"r"`
 	// S is the ECDSA signature S component (32-byte big-endian hex).
 	S string `json:"s"`
+	// Recid is the y-coordinate parity bit (0 or 1) used by ecdsa_recover.
+	Recid uint8 `json:"recid"`
 	// VoterAddress is the voter's Ethereum address (20-byte hex, 0x-prefixed).
 	VoterAddress string `json:"voter_address"`
 	// Weight is the voter's census weight (32-byte big-endian hex).
@@ -184,12 +188,10 @@ type CspProof struct {
 	Index uint64 `json:"index"`
 }
 
-// CspData holds all CSP ECDSA census data for a batch of voters.
+// CspData holds all CSP ECDSA census data for a batch of voters. The CSP public
+// key is no longer transmitted; the circuit recovers it per-entry and binds the
+// recovered Ethereum address to the census root.
 type CspData struct {
-	// CspPubKeyX is the x-coordinate of the CSP's secp256k1 public key (32-byte BE hex).
-	CspPubKeyX string `json:"csp_pub_key_x"`
-	// CspPubKeyY is the y-coordinate of the CSP's secp256k1 public key (32-byte BE hex).
-	CspPubKeyY string `json:"csp_pub_key_y"`
 	// Proofs holds one CSP attestation per real voter.
 	Proofs []CspProof `json:"proofs"`
 }

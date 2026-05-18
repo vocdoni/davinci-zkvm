@@ -124,6 +124,8 @@ pub struct CspProofJson {
     pub r: String,
     /// ECDSA signature S component, 32-byte big-endian hex.
     pub s: String,
+    /// y-coordinate parity bit (0 or 1) used by `ecdsa_recover_secp256k1`.
+    pub recid: u8,
     /// Voter's Ethereum address, 20-byte hex (0x-prefixed).
     pub voter_address: String,
     /// Voter's census weight, 32-byte big-endian hex.
@@ -132,13 +134,11 @@ pub struct CspProofJson {
     pub index: u64,
 }
 
-/// CSP ECDSA census data for the full batch in JSON format.
+/// CSP ECDSA census data for the full batch in JSON format. The CSP public key
+/// is no longer carried in the payload; the circuit recovers it per-entry via
+/// `ecdsa_recover_secp256k1`.
 #[derive(Debug, Deserialize, Clone)]
 pub struct CspDataJson {
-    /// CSP public key X coordinate, 32-byte big-endian hex.
-    pub csp_pub_key_x: String,
-    /// CSP public key Y coordinate, 32-byte big-endian hex.
-    pub csp_pub_key_y: String,
     /// Per-voter CSP ECDSA attestations.
     pub proofs: Vec<CspProofJson>,
 }
