@@ -3,9 +3,11 @@ members = [
     "input-gen",
     "service",
 ]
-# circuit/ is a ZisK RISC-V guest program — build with: make build-circuit
-# It requires the +zisk toolchain and cannot be compiled with standard cargo.
-exclude = ["circuit"]
+# circuit/ and circuit-aggregator/ are ZisK RISC-V guest programs — build with
+# cargo-zisk from inside each directory. circuit-primitives/ is their shared
+# library. All require the +zisk toolchain and cannot be compiled with
+# standard cargo.
+exclude = ["circuit", "circuit-primitives", "circuit-aggregator"]
 resolver = "2"
 
 [workspace.package]

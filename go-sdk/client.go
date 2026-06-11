@@ -129,6 +129,102 @@ func (c *Client) FetchSnark(jobID string) (*PlonkSnark, error) {
 	return p.toPlonkSnark()
 }
 
+// SubmitFold posts a FoldRequest to POST /fold and returns the job ID.
+// All referenced jobs must already be done; the service assembles the
+// aggregator input from their on-disk proofs.
+func (c *Client) SubmitFold(req *FoldRequest) (string, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+	resp, err := c.httpClient.Post(c.baseURL+"/fold", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("POST /fold: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusAccepted {
+		return "", fmt.Errorf("POST /fold: status %d: %s", resp.StatusCode, respBody)
+	}
+	var result ProveResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("decode /fold response: %w", err)
+	}
+	return result.JobID, nil
+}
+
+// SubmitFinalize posts a FinalizeRequest to POST /finalize and returns the
+// job ID. The referenced fold job must already be done; the resulting job
+// produces the final PLONK SNARK.
+func (c *Client) SubmitFinalize(req *FinalizeRequest) (string, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+	resp, err := c.httpClient.Post(c.baseURL+"/finalize", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("POST /finalize: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusAccepted {
+		return "", fmt.Errorf("POST /finalize: status %d: %s", resp.StatusCode, respBody)
+	}
+	var result ProveResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("decode /finalize response: %w", err)
+	}
+	return result.JobID, nil
+}
+
+// FetchStarkInfo returns the program_vk / zisk_vk of a completed STARK job.
+func (c *Client) FetchStarkInfo(jobID string) (*StarkInfo, error) {
+	resp, err := c.httpClient.Get(fmt.Sprintf("%s/jobs/%s/stark", c.baseURL, jobID))
+	if err != nil {
+		return nil, fmt.Errorf("GET /jobs/%s/stark: %w", jobID, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET /jobs/%s/stark: status %d: %s", jobID, resp.StatusCode, body)
+	}
+	var info StarkInfo
+	if err := json.Unmarshal(body, &info); err != nil {
+		return nil, fmt.Errorf("decode stark response: %w", err)
+	}
+	return &info, nil
+}
+
+// FetchStarkProof downloads the raw vadcop-final STARK blob of a completed
+// STARK job (debug / archival; folding happens server-side from job IDs).
+func (c *Client) FetchStarkProof(jobID string) ([]byte, error) {
+	resp, err := c.httpClient.Get(fmt.Sprintf("%s/jobs/%s/proof/stark", c.baseURL, jobID))
+	if err != nil {
+		return nil, fmt.Errorf("GET /jobs/%s/proof/stark: %w", jobID, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET /jobs/%s/proof/stark: status %d: %s", jobID, resp.StatusCode, body)
+	}
+	return body, nil
+}
+
+// FetchPublics downloads the raw committed publics of a completed job
+// (256 bytes: the guest's u32 output registers, little-endian).
+func (c *Client) FetchPublics(jobID string) ([]byte, error) {
+	resp, err := c.httpClient.Get(fmt.Sprintf("%s/jobs/%s/publics", c.baseURL, jobID))
+	if err != nil {
+		return nil, fmt.Errorf("GET /jobs/%s/publics: %w", jobID, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET /jobs/%s/publics: status %d: %s", jobID, resp.StatusCode, body)
+	}
+	return body, nil
+}
+
 // FetchInputs downloads the raw `input.bin` blob the SNARK was generated
 // over. Useful for audit, re-proving, or off-chain bookkeeping; not
 // required for on-chain verification.

@@ -1,22 +1,18 @@
 #![no_main]
 ziskos::entrypoint!(main);
 
-mod babyjubjub;
-mod bls_fr;
-mod bn254;
-mod bn254_fr;
 mod census;
 mod consistency;
 mod csp;
 mod ecdsa;
 mod groth16;
-mod hash;
 mod io;
 mod kzg;
-mod poseidon;
-mod results;
-mod smt;
-mod types;
+
+
+// Shared primitives re-exported at the crate root so `crate::types::…`
+// paths keep working in the modules above.
+pub use circuit_primitives::{babyjubjub, bn254, bn254_fr, bls_fr, hash, poseidon, results, smt, types};
 
 use crate::types::{FrRaw, ZERO_FR};
 use ziskos::io::{commit_slice, read_input_slice};
@@ -35,31 +31,7 @@ fn extract_address_from_census_leaf(leaf: &FrRaw) -> FrRaw {
     ]
 }
 
-/// Compute the arbo leaf value for the encryption key: SHA-256(X_BE32 || Y_BE32) → FrRaw.
-/// This encoding matches the sequencer's convention for storing a BabyJubJub public key
-/// as a single 256-bit value in the arbo SHA-256 state tree (config key 0x03).
-fn hash_enc_key(x: &FrRaw, y: &FrRaw) -> FrRaw {
-    let mut buf = [0u8; 64];
-    // FrRaw [u64;4] LE limbs → 32-byte big-endian (arbo convention for hash inputs)
-    for (i, &limb) in x.iter().enumerate() {
-        let bytes = limb.to_be_bytes();
-        let dst = (3 - i) * 8;
-        buf[dst..dst + 8].copy_from_slice(&bytes);
-    }
-    for (i, &limb) in y.iter().enumerate() {
-        let bytes = limb.to_be_bytes();
-        let dst = 32 + (3 - i) * 8;
-        buf[dst..dst + 8].copy_from_slice(&bytes);
-    }
-    let digest = hash::sha256_once(&buf);
-    // 32-byte hash (big-endian) → FrRaw [u64;4] LE limbs
-    let mut fr = ZERO_FR;
-    for i in 0..4 {
-        let off = (3 - i) * 8;
-        fr[i] = u64::from_be_bytes(digest[off..off + 8].try_into().unwrap());
-    }
-    fr
-}
+use crate::hash::hash_enc_key;
 
 // Output register layout
 // Indices 0-1: circuit status
@@ -182,7 +154,7 @@ fn main() {
     // SMT chain verification: the full state-transition integrity check.
     //     Returns the old/new state roots and vote counts.
     let (state_ok, old_root, new_root, voters, overwritten) =
-        smt::verify_state(&parsed, &mut fail_mask);
+        smt::verify_state(parsed.state.as_ref(), &mut fail_mask);
 
     // Re-encryption: verify that each stored ballot is the original
     //     ballot re-encrypted with a deterministic key derived from k_seed.

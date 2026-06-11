@@ -33,7 +33,7 @@
 
 use crate::bls_fr::{self, BlsFrRaw, ONE, ZERO};
 use crate::hash::sha256_once;
-use crate::types::{FrRaw, KZGBlock, FAIL_KZG, FAIL_MISSING_BLOCK};
+use crate::types::{FrRaw, KZGBlock, FAIL_KZG};
 
 /// Number of cells in an EIP-4844 blob.
 const N: usize = 4096;
@@ -213,10 +213,11 @@ fn batch_inverse(v: &[BlsFrRaw; N]) -> [BlsFrRaw; N] {
 /// - `commitment` is the 48-byte KZG commitment (zero-padded when absent).
 pub fn verify_kzg(kzg: &Option<KZGBlock>, fail_mask: &mut u32) -> (bool, [u8; 48]) {
     let block = match kzg {
-        None => {
-            *fail_mask |= FAIL_MISSING_BLOCK;
-            return (false, [0u8; 48]);
-        }
+        // Absent block → zero commitment limbs in the publics. Ethereum-mode
+        // consumers compare the limbs against the blob's versioned hash, so
+        // an omitted blob can never pass there; chained mode (single
+        // sequencer, no DA blob) runs without a KZG block.
+        None => return (true, [0u8; 48]),
         Some(b) => b,
     };
 

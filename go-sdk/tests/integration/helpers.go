@@ -12,6 +12,7 @@ package integration
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -345,26 +346,57 @@ func poseidonHasher(a, b *big.Int) *big.Int {
 // bigIntEq compares two *big.Int values.
 func bigIntEq(a, b *big.Int) bool { return a.Cmp(b) == 0 }
 
-// Fr-wise ballot accumulator
-// The circuit accumulates ResultsAdd / ResultsSub using coordinate-wise
-// Fr addition (not EC point addition).  This type mirrors that behaviour
-// so the Go-side leaf hashes match what the circuit computes.
+// Ballot accumulator
+// The circuit accumulates ResultsAdd / ResultsSub homomorphically: BabyJubJub
+// point addition per ciphertext component, like davinci-node's Ballot.Add.
+// The accumulator holds 32 TE coordinates (8 ciphertexts x [c1x c1y c2x c2y]).
 
 // bn254ScalarField is the BN254 scalar field order (Fr).
 var bn254ScalarField, _ = new(big.Int).SetString(
 	"21888242871839275222246405745257275088548364400416034343698204186575808495617", 10)
 
-// frAccumBallot represents a ballot as 32 big.Int Fr elements (TE coordinates).
-// This is used for the result accumulator, not for EC point operations.
+// Twisted Edwards parameters for BabyJubJub (standard form).
+var (
+	bjjTEA = big.NewInt(168700)
+	bjjTED = big.NewInt(168696)
+)
+
+// frAccumBallot represents a ballot as 32 big.Int TE coordinates.
 type frAccumBallot [32]*big.Int
 
-// newZeroFrAccum returns the zero accumulator (all fields = 0).
+// newZeroFrAccum returns the identity accumulator: every point is the TE
+// identity (0, 1), matching davinci-node elgamal.NewBallot.
 func newZeroFrAccum() frAccumBallot {
 	var b frAccumBallot
 	for i := range b {
-		b[i] = new(big.Int)
+		if i%2 == 1 {
+			b[i] = big.NewInt(1)
+		} else {
+			b[i] = new(big.Int)
+		}
 	}
 	return b
+}
+
+// teAdd adds two BabyJubJub points in standard Twisted Edwards affine form:
+//
+//	x3 = (x1*y2 + y1*x2) / (1 + d*x1*x2*y1*y2)
+//	y3 = (y1*y2 - a*x1*x2) / (1 - d*x1*x2*y1*y2)
+func teAdd(x1, y1, x2, y2 *big.Int) (*big.Int, *big.Int) {
+	p := bn254ScalarField
+	x1y2 := new(big.Int).Mul(x1, y2)
+	y1x2 := new(big.Int).Mul(y1, x2)
+	y1y2 := new(big.Int).Mul(y1, y2)
+	x1x2 := new(big.Int).Mul(x1, x2)
+	dxy := new(big.Int).Mul(bjjTED, new(big.Int).Mul(x1x2, new(big.Int).Mul(y1, y2)))
+	dxy.Mod(dxy, p)
+	num3 := new(big.Int).Add(x1y2, y1x2)
+	den3 := new(big.Int).Add(big.NewInt(1), dxy)
+	num4 := new(big.Int).Sub(y1y2, new(big.Int).Mul(bjjTEA, x1x2))
+	den4 := new(big.Int).Sub(big.NewInt(1), dxy)
+	x3 := new(big.Int).Mul(num3, new(big.Int).ModInverse(den3.Mod(den3, p), p))
+	y3 := new(big.Int).Mul(num4, new(big.Int).ModInverse(den4.Mod(den4, p), p))
+	return x3.Mod(x3, p), y3.Mod(y3, p)
 }
 
 // frAccumFromBallot converts an elgamal.Ballot to frAccumBallot (TE coordinates).
@@ -383,12 +415,12 @@ func frAccumFromBallot(ballot *elgamal.Ballot) frAccumBallot {
 	return acc
 }
 
-// frAccumAdd performs coordinate-wise Fr addition: out[i] = (a[i] + b[i]) mod p.
+// frAccumAdd adds two ballots homomorphically: BabyJubJub point addition of
+// each of the 16 (x, y) coordinate pairs.
 func frAccumAdd(a, b frAccumBallot) frAccumBallot {
 	var out frAccumBallot
-	for i := 0; i < 32; i++ {
-		out[i] = new(big.Int).Add(a[i], b[i])
-		out[i].Mod(out[i], bn254ScalarField)
+	for i := 0; i < 16; i++ {
+		out[i*2], out[i*2+1] = teAdd(a[i*2], a[i*2+1], b[i*2], b[i*2+1])
 	}
 	return out
 }
@@ -477,22 +509,33 @@ func runZiskEmu(inputBytes []byte) ([]uint32, error) {
 		return nil, err
 	}
 	defer os.Remove(tmp.Name())
+	// The guest reads its input via read_input_slice(), which expects a
+	// u64 LE length prefix before the data (the service adds the same
+	// frame when writing job input.bin files).
+	var lenPrefix [8]byte
+	binary.LittleEndian.PutUint64(lenPrefix[:], uint64(len(inputBytes)))
+	if _, err := tmp.Write(lenPrefix[:]); err != nil {
+		return nil, err
+	}
 	if _, err := tmp.Write(inputBytes); err != nil {
 		return nil, err
 	}
 	tmp.Close()
 
-	cmd := exec.Command(ziskemuBin, "-e", elfPath, "-i", tmp.Name())
-	out, err := cmd.Output()
+	outFile := tmp.Name() + ".out"
+	defer os.Remove(outFile)
+	cmd := exec.Command(ziskemuBin, "-e", elfPath, "-i", tmp.Name(), "-o", outFile)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("ziskemu failed: %w\noutput: %s", err, out)
 	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	var outputs []uint32
-	for _, l := range lines {
-		var v uint32
-		fmt.Sscanf(strings.TrimSpace(l), "%x", &v)
-		outputs = append(outputs, v)
+	raw, err := os.ReadFile(outFile)
+	if err != nil {
+		return nil, fmt.Errorf("read ziskemu output: %w", err)
+	}
+	outputs := make([]uint32, len(raw)/4)
+	for i := range outputs {
+		outputs[i] = binary.LittleEndian.Uint32(raw[i*4 : i*4+4])
 	}
 	return outputs, nil
 }

@@ -7,7 +7,7 @@
 //! even when a long batch is in flight.
 
 use crate::config::Config;
-use crate::types::{Job, JobStatus};
+use crate::types::{Job, JobKind, JobStatus};
 use chrono::Utc;
 use dashmap::DashMap;
 use std::path::PathBuf;
@@ -27,6 +27,8 @@ struct ProveTask {
     job_id: Uuid,
     input_path: PathBuf,
     output_dir: PathBuf,
+    elf_path: PathBuf,
+    plonk: bool,
 }
 
 impl ProverHandle {
@@ -51,20 +53,32 @@ impl ProverHandle {
         &self,
         input_bytes: Vec<u8>,
         proof_output_dir: &PathBuf,
+        kind: JobKind,
+        elf_path: PathBuf,
+        parent_job_ids: Vec<Uuid>,
     ) -> anyhow::Result<Uuid> {
         let job_id = Uuid::new_v4();
-        self.jobs.insert(job_id, Job::new(job_id));
+        self.jobs.insert(job_id, Job::new(job_id, kind, parent_job_ids));
 
         let job_dir = proof_output_dir.join(job_id.to_string());
         tokio::fs::create_dir_all(&job_dir).await?;
 
+        // The batch circuit reads its input through read_input_slice and
+        // needs the u64 length prefix; the aggregator guest parses
+        // self-delimiting frames and takes the payload raw.
         let input_path = job_dir.join("input.bin");
-        tokio::fs::write(&input_path, &encode_zisk_input(&input_bytes)).await?;
+        let encoded = match kind {
+            JobKind::Batch | JobKind::BatchStark => encode_zisk_input(&input_bytes),
+            JobKind::Fold | JobKind::Finalize => input_bytes,
+        };
+        tokio::fs::write(&input_path, &encoded).await?;
 
         let task = ProveTask {
             job_id,
             input_path,
             output_dir: job_dir,
+            elf_path,
+            plonk: kind.is_plonk(),
         };
         self.sender
             .try_send(task)
@@ -151,14 +165,34 @@ const PROVE_RETRY_DELAY_SECS: u64 = 5;
 ///    match expected accumulated challenge` for an input that proves cleanly
 ///    on retry. The exact text is what we match on.
 ///
-/// We deliberately do **not** match the bare `SIGABRT` keyword — it also
-/// fires for witness-generation assertions which are deterministic and
-/// retrying would just burn budget.
+/// 3. **Recursion-stage witness flakes.** Rarely, the recursive stages
+///    abort with `Failed assert in …` inside a circom verifier template
+///    (`VerifyGlobalConstraints`, `VerifyFinalPol0`, `VerifyEvaluations0`)
+///    or `Error generating witness for instance … of type VadcopFinal`.
+///    Their input is ZisK's own freshly generated inner proofs, not user
+///    data, and the same job proves cleanly on retry. (A *persistently*
+///    failing `VerifyEvaluations0`/`VerifyFinalPol0` means a stale
+///    proving key — retries will burn out and surface the error.)
+/// 4. **Counter timeout.** `Counter timeout after 10 minutes … Cancelling`
+///    is an internal ZisK synchronization stall, not an input problem.
+/// 5. **OOM kill (`signal: 9`).** Large batches can be reaped by the
+///    kernel under transient memory pressure; retrying when the pressure
+///    has passed succeeds.
+///
+/// We deliberately do **not** match the bare `SIGABRT` keyword or generic
+/// witness-generation failures — those also fire for deterministic guest
+/// assertions where retrying would just burn budget.
 fn is_transient_prover_error(msg: &str) -> bool {
     msg.contains("context is destroyed")
         || msg.contains("cudaGetLastError")
         || msg.contains("MPI_ERRORS_ARE_FATAL")
         || msg.contains("Proof contribution challenge does not match")
+        || (msg.contains("Error generating witness") && msg.contains("VadcopFinal"))
+        || msg.contains("Failed assert in template/function VerifyGlobalConstraints")
+        || msg.contains("Failed assert in template/function VerifyFinalPol")
+        || msg.contains("Failed assert in template/function VerifyEvaluations")
+        || msg.contains("Counter timeout after")
+        || msg.contains("signal: 9")
 }
 
 /// Run `cargo-zisk prove`, transparently retrying [`MAX_PROVE_RETRIES`] times
@@ -186,28 +220,30 @@ async fn run_prove_with_retry(config: &Config, task: &ProveTask) -> anyhow::Resu
 }
 
 async fn run_prove(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
-    // Run the full ZisK prove pipeline (STARK → recursive aggregation →
-    // recursivef → fflonk PLONK wrap). The output at `proof.bin` is a
-    // bincode-encoded ZisK `Proof` whose body is the PLONK SNARK; the
-    // intermediate VADCOP STARK is never written to disk.
+    // Run the ZisK prove pipeline. With `plonk` set the output at
+    // `proof.bin` is a bincode-encoded ZisK `Proof` whose body is the
+    // fflonk PLONK SNARK; without it the body is the vadcop-final STARK,
+    // which the aggregator guest can verify recursively.
     let proof_output_path = task.output_dir.join("proof.bin");
-    let zisk_args: Vec<String> = vec![
+    let mut zisk_args: Vec<String> = vec![
         "prove".to_string(),
         "--elf".to_string(),
-        config.circuit_elf_path.display().to_string(),
+        task.elf_path.display().to_string(),
         "--inputs".to_string(),
         task.input_path.display().to_string(),
         "--proving-key".to_string(),
         config.proving_key_path.display().to_string(),
-        "--proving-key-plonk".to_string(),
-        config.proving_key_plonk_path.display().to_string(),
         "--output".to_string(),
         proof_output_path.display().to_string(),
         "--emulator".to_string(),
         "--gpu".to_string(),
-        "--plonk".to_string(),
         "--verify-proofs".to_string(),
     ];
+    if task.plonk {
+        zisk_args.push("--proving-key-plonk".to_string());
+        zisk_args.push(config.proving_key_plonk_path.display().to_string());
+        zisk_args.push("--plonk".to_string());
+    }
 
     let output = if config.zisk_mpi_procs > 1 {
         // Parallel proving mode as documented by ZisK:
@@ -253,6 +289,15 @@ async fn run_prove(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
     // (consumers can always fall back to `cargo-zisk verify` against
     // `proof.bin`), so we log and continue rather than failing the job.
     let proof_path = task.output_dir.join("proof.bin");
+    if !task.plonk {
+        // STARK job: decode the vadcop blob to surface program_vk/zisk_vk
+        // (stark.json) and the 256-byte publics (publics.bin).
+        match crate::prover::recursion::write_stark_artifacts(&task.output_dir).await {
+            Ok(()) => {}
+            Err(e) => warn!("write stark artifacts: {}", e),
+        }
+        return Ok(());
+    }
     match crate::prover::snark::parse_proof_bin(&proof_path) {
         Ok(snark) => {
             let snark_path = task.output_dir.join("snark.json");

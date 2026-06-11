@@ -1,0 +1,9 @@
+[package]
+name = "davinci-zkvm-aggregator"
+version = "0.1.0"
+edition = "2021"
+default-run = "davinci-zkvm-aggregator"
+
+[dependencies]
+ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", tag = "v0.18.0" }
+circuit-primitives = { path = "../circuit-primitives" }

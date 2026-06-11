@@ -21,6 +21,9 @@ pub struct Config {
     pub proving_key_plonk_path: PathBuf,
     /// Path to the compiled circuit ELF (default `/app/circuit.elf`).
     pub circuit_elf_path: PathBuf,
+    /// Path to the compiled aggregator ELF used by /fold and /finalize
+    /// (default `/app/aggregator.elf`).
+    pub aggregator_elf_path: PathBuf,
     /// `cargo-zisk` binary to invoke (default `cargo-zisk`).
     pub cargo_zisk_bin: String,
     /// Directory for per-job proof output (default `/tmp/proofs`).
@@ -48,6 +51,9 @@ impl Config {
             circuit_elf_path: env::var("CIRCUIT_ELF_PATH")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("/app/circuit.elf")),
+            aggregator_elf_path: env::var("AGGREGATOR_ELF_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("/app/aggregator.elf")),
             cargo_zisk_bin: env::var("CARGO_ZISK_BIN").unwrap_or_else(|_| "cargo-zisk".to_string()),
             proof_output_dir: env::var("PROOF_OUTPUT_DIR")
                 .map(PathBuf::from)

@@ -835,6 +835,13 @@ version = "0.18.0"
 source = "git+https://github.com/0xPolygonHermez/zisk.git?tag=v0.18.0#790f9e28a6d1d8575e38dc77f2af4966b8659722"
 
 [[package]]
+name = "circuit-primitives"
+version = "0.1.0"
+dependencies = [
+ "ziskos",
+]
+
+[[package]]
 name = "clang-sys"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1107,6 +1114,7 @@ checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 name = "davinci-zkvm-circuit"
 version = "0.1.0"
 dependencies = [
+ "circuit-primitives",
  "ziskos",
 ]
 

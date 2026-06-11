@@ -36,7 +36,7 @@ ZISK_MPI_BIND_TO ?=
 
 .PHONY: help \
         keys build up down restart logs status test shell clean install all \
-        local-setup local-run local-test
+        local-setup local-run local-test benchmark benchmark-report
 
 # ──────────────────────────────────────────────────────────────────────────
 # Default
@@ -98,6 +98,16 @@ test: ## Run the Go integration test suite against the running service
 		exit 1; \
 	fi
 	cd go-sdk/tests && DAVINCI_API_URL=$(API_URL) $(MAKE) test
+
+benchmark: ## Run the chained-mode benchmark sweep (see benchmark/README.md)
+	@if ! curl -sf $(API_URL)/health >/dev/null 2>&1; then \
+		echo "Service not reachable at $(API_URL). Run 'make up' first."; \
+		exit 1; \
+	fi
+	DAVINCI_API_URL=$(API_URL) ./benchmark/run.sh
+
+benchmark-report: ## Regenerate benchmark/results/RESULTS.md from existing logs
+	./benchmark/run.sh report
 
 clean: ## Stop service and remove proofs volume (KEEPS proving keys)
 	$(COMPOSE) --profile cuda down -v

@@ -1,7 +1,7 @@
 // ! POST /prove => submit a batch of Groth16 proofs for ZisK proving
 
 use crate::api::AppState;
-use crate::types::{ProveRequest, SmtEntryJson};
+use crate::types::{JobKind, ProveRequest, SmtEntryJson};
 use anyhow::{bail, Context};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use davinci_zkvm_input_gen::{census_proof_from_hex, generate_input, write_census_block, write_csp_block, write_kzg_block, write_reenc_block, write_state_block, be_hex32_to_fr_le, address_hex_to_fr_le, BjjCiphertextData, CspBlockData, CspEntryData, KzgData, ReencEntryData, SmtEntry, StateData};
@@ -23,8 +23,19 @@ pub async fn submit_prove(
         ).into_response();
     }
 
+    let kind = match req.output.as_deref() {
+        None | Some("plonk") => JobKind::Batch,
+        Some("stark") => JobKind::BatchStark,
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("unknown output kind {:?}, expected \"plonk\" or \"stark\"", other)})),
+            ).into_response()
+        }
+    };
+
     // Log request summary
-    info!("Received prove request: {} ballot proof(s)", num_proofs);
+    info!("Received prove request: {} ballot proof(s), output={:?}", num_proofs, kind);
 
     if let Some(st) = &req.state {
         info!(
@@ -100,7 +111,7 @@ pub async fn submit_prove(
                 results_add: st.results_add_smt.as_ref().map(|e| smt_entry_from_json(e)).transpose()?,
                 results_sub: st.results_sub_smt.as_ref().map(|e| smt_entry_from_json(e)).transpose()?,
                 process_proofs: smt_entries_from_json(&st.process_smt)?,
-                ballot_proof_data: None, // TODO: populate from request when ballot proof data is included
+                ballot_proof_data: st.ballot_proofs.as_ref().map(ballot_proof_data_from_json).transpose()?,
             };
             bytes.extend(write_state_block(&sd)?);
         }
@@ -132,17 +143,17 @@ pub async fn submit_prove(
 
         // Append re-encryption block.
         if let Some(r) = reenc_json {
-            let pub_key_x = davinci_zkvm_input_gen::hex32_to_smt_fr(&r.encryption_key_x)?;
-            let pub_key_y = davinci_zkvm_input_gen::hex32_to_smt_fr(&r.encryption_key_y)?;
+            let pub_key_x = be_hex32_to_fr_le(&r.encryption_key_x)?;
+            let pub_key_y = be_hex32_to_fr_le(&r.encryption_key_y)?;
             let mut entries = Vec::with_capacity(r.entries.len());
             for e in &r.entries {
-                let k = davinci_zkvm_input_gen::hex32_to_smt_fr(&e.k)?;
+                let k = be_hex32_to_fr_le(&e.k)?;
                 let parse_ct = |ct: &crate::types::BjjCiphertextJson| -> anyhow::Result<BjjCiphertextData> {
                     Ok(BjjCiphertextData {
-                        c1x: davinci_zkvm_input_gen::hex32_to_smt_fr(&ct.c1.x)?,
-                        c1y: davinci_zkvm_input_gen::hex32_to_smt_fr(&ct.c1.y)?,
-                        c2x: davinci_zkvm_input_gen::hex32_to_smt_fr(&ct.c2.x)?,
-                        c2y: davinci_zkvm_input_gen::hex32_to_smt_fr(&ct.c2.y)?,
+                        c1x: be_hex32_to_fr_le(&ct.c1.x)?,
+                        c1y: be_hex32_to_fr_le(&ct.c1.y)?,
+                        c2x: be_hex32_to_fr_le(&ct.c2.x)?,
+                        c2y: be_hex32_to_fr_le(&ct.c2.y)?,
                     })
                 };
                 let mut original_arr = Vec::with_capacity(8);
@@ -215,7 +226,8 @@ pub async fn submit_prove(
 
     // Submit to prover queue
     let proof_output_dir = state.config.proof_output_dir.clone();
-    match state.prover.submit(input_bytes, &proof_output_dir).await {
+    let elf = state.config.circuit_elf_path.clone();
+    match state.prover.submit(input_bytes, &proof_output_dir, kind, elf, Vec::new()).await {
         Ok(job_id) => {
             info!("Job {} queued: {} ballot proof(s), queue_position={}", job_id, num_proofs, state.prover.queue_len());
             (
@@ -234,6 +246,20 @@ pub async fn submit_prove(
             ).into_response()
         }
     }
+}
+
+fn ballot_proof_data_from_json(
+    bp: &crate::types::BallotProofsJson,
+) -> anyhow::Result<davinci_zkvm_input_gen::BallotProofData> {
+    let frs = |v: &[String]| -> anyhow::Result<Vec<[u64; 4]>> {
+        v.iter().map(|s| be_hex32_to_fr_le(s)).collect()
+    };
+    Ok(davinci_zkvm_input_gen::BallotProofData {
+        old_results_add: frs(&bp.old_results_add)?,
+        old_results_sub: frs(&bp.old_results_sub)?,
+        voter_ballots: bp.voter_ballots.iter().map(|b| frs(b)).collect::<anyhow::Result<_>>()?,
+        overwritten_ballots: bp.overwritten_ballots.iter().map(|b| frs(b)).collect::<anyhow::Result<_>>()?,
+    })
 }
 
 fn smt_entry_from_json(e: &SmtEntryJson) -> anyhow::Result<SmtEntry> {

@@ -206,3 +206,76 @@ pub async fn get_job_inputs(
         Err(resp) => resp,
     }
 }
+
+/// `GET /jobs/:id/stark` — program_vk / zisk_vk of a STARK job as JSON
+/// (contents of `stark.json`, written by the worker for non-PLONK jobs).
+pub async fn get_job_stark(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let path = match job_artifact_path(&state, id, "stark.json", "stark metadata").await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    match tokio::fs::read(&path).await {
+        Ok(buf) => match serde_json::from_slice::<serde_json::Value>(&buf) {
+            Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("malformed stark.json: {}", e)})),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("read stark.json: {}", e)})),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /jobs/:id/proof/stark` — download the raw vadcop-final STARK blob
+/// (the exact byte layout the aggregator guest verifies). Converted lazily
+/// from `proof.bin` and cached as `vadcop.bin`.
+pub async fn get_job_proof_stark(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let proof_path = match job_artifact_path(&state, id, "proof.bin", "proof").await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let vadcop_path = proof_path.with_file_name("vadcop.bin");
+    if !vadcop_path.exists() {
+        let job_dir = proof_path.parent().unwrap().to_path_buf();
+        let blob = match tokio::task::spawn_blocking(move || {
+            crate::prover::recursion::load_job_blob(&job_dir)
+        })
+        .await
+        {
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({"error": format!("not a STARK proof: {}", e)})),
+                )
+                    .into_response()
+            }
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "internal error"})),
+                )
+                    .into_response()
+            }
+        };
+        if let Err(e) = tokio::fs::write(&vadcop_path, &blob.bytes).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("write vadcop.bin: {}", e)})),
+            )
+                .into_response();
+        }
+    }
+    stream_file(vadcop_path, format!("vadcop_{}.bin", id)).await
+}

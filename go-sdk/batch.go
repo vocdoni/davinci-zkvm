@@ -96,6 +96,10 @@ type ProveBatch struct {
 
 	// KZG is the data-availability blob proof. Nil when blobs are not used.
 	KZG *KZGRequest
+
+	// Output selects the proof kind: "" or "plonk" for an on-chain PLONK
+	// SNARK, "stark" for a foldable vadcop-final STARK (chained mode).
+	Output string
 }
 
 // ProveResult is what [Client.Prove] returns once the service has finished
@@ -204,6 +208,7 @@ func (b *ProveBatch) toRequest() (*ProveRequest, error) {
 		Sigs:         sigs,
 		State:        b.State,
 		KZG:          b.KZG,
+		Output:       b.Output,
 	}
 
 	// Census proofs (Merkle): only when not using CSP
