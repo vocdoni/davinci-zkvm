@@ -100,13 +100,15 @@ COPY --from=zisk-downloader /opt/zisk/zisk /root/.zisk/zisk
 # Copy service binary
 COPY --from=service-builder /build/target/release/davinci-zkvm /app/davinci-zkvm
 
-# Copy pre-built circuit ELF
+# Copy pre-built circuit ELFs
 COPY circuit/elf/circuit.elf /app/circuit.elf
+COPY circuit-aggregator/elf/aggregator.elf /app/aggregator.elf
 
 ENV LISTEN_ADDR=0.0.0.0:8080
 ENV PROVING_KEY_PATH=/proving-key
 ENV PROVING_KEY_PLONK_PATH=/proving-key-plonk
 ENV CIRCUIT_ELF_PATH=/app/circuit.elf
+ENV AGGREGATOR_ELF_PATH=/app/aggregator.elf
 ENV CARGO_ZISK_BIN=/usr/local/bin/cargo-zisk
 ENV PROOF_OUTPUT_DIR=/proofs
 ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH

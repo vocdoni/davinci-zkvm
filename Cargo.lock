@@ -437,6 +437,7 @@ dependencies = [
  "ark-serialize",
  "ark-snark",
  "ark-std",
+ "bincode",
  "hex",
  "num-bigint",
  "serde",

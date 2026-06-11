@@ -52,3 +52,12 @@ plan.md
 
 # ── Claude Code session state ────────────────────────────────────────────────
 .claude/
+
+# ── Reference checkouts / prototypes (not part of this repo) ────────────────
+davinci-node/
+recursion-experiment/
+
+# ── Benchmark artifacts ──────────────────────────────────────────────────────
+# Logs, generated reports and the cached pre-generated ballots.
+benchmark/results/
+benchmark/cache/

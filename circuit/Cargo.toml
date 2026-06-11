@@ -6,3 +6,4 @@ default-run = "davinci-zkvm-circuit"
 
 [dependencies]
 ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", tag = "v0.18.0" }
+circuit-primitives = { path = "../circuit-primitives" }

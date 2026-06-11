@@ -52,6 +52,19 @@ pub struct StateTransitionJson {
     pub results_sub_smt: Option<SmtEntryJson>,
     #[serde(default)]
     pub process_smt: Vec<SmtEntryJson>,
+    #[serde(default)]
+    pub ballot_proofs: Option<BallotProofsJson>,
+}
+
+/// Result accumulator ballot data: old results plus per-voter ballots
+/// (32 big-endian hex Fr elements each) for the homomorphic tally check.
+#[derive(Debug, Deserialize, Clone)]
+pub struct BallotProofsJson {
+    pub old_results_add: Vec<String>,
+    pub old_results_sub: Vec<String>,
+    pub voter_ballots: Vec<Vec<String>>,
+    #[serde(default)]
+    pub overwritten_ballots: Vec<Vec<String>>,
 }
 
 /// One lean-IMT Poseidon census membership proof in JSON format.
@@ -170,6 +183,51 @@ pub struct ProveRequest {
     /// KZG EIP-4844 blob barycentric evaluation data.
     #[serde(default)]
     pub kzg: Option<KzgEvalJson>,
+    /// Proof output kind: "plonk" (default, on-chain SNARK) or "stark"
+    /// (vadcop-final STARK only, foldable by the aggregator).
+    #[serde(default)]
+    pub output: Option<String>,
+}
+
+/// HTTP request body for POST /fold.
+///
+/// Folds one or more completed STARK batch jobs (and optionally a previous
+/// fold job) into a single aggregator STARK proof. All proof blobs are read
+/// from the referenced jobs' on-disk artifacts; nothing is shipped by the
+/// client.
+#[derive(Debug, Deserialize)]
+pub struct FoldRequest {
+    /// Immutable election chain config (all 32-byte fields LE hex).
+    pub config: davinci_zkvm_input_gen::aggregator::ChainConfig,
+    /// Previous fold job to chain from. None = genesis fold.
+    #[serde(default)]
+    pub prev_fold_job: Option<Uuid>,
+    /// Completed batch jobs (proven with output=stark), in chain order.
+    pub batch_jobs: Vec<Uuid>,
+    /// Aggregator program_vk to bind (0x-prefixed BE hex, 32 bytes).
+    /// Defaults to the previous fold proof's program_vk, or zero for the
+    /// genesis bootstrap pass.
+    #[serde(default)]
+    pub fold_vk: Option<String>,
+}
+
+/// HTTP request body for POST /finalize.
+///
+/// Verifies the last fold proof, the Results-leaf inclusions, and the
+/// trustees' decryption proofs, then wraps everything in one PLONK.
+#[derive(Debug, Deserialize)]
+pub struct FinalizeRequest {
+    /// Immutable election chain config (all 32-byte fields LE hex).
+    pub config: davinci_zkvm_input_gen::aggregator::ChainConfig,
+    /// Completed fold job whose proof to finalize.
+    pub fold_job: Uuid,
+    /// Aggregator program_vk to bind (0x-prefixed BE hex, 32 bytes).
+    /// Defaults to the fold proof's own program_vk.
+    #[serde(default)]
+    pub fold_vk: Option<String>,
+    /// Decrypted results payload: accumulator ballots, plaintext results,
+    /// Chaum-Pedersen proofs and SMT siblings.
+    pub results: davinci_zkvm_input_gen::aggregator::ResultsPayload,
 }
 
 /// Job status enum
@@ -182,11 +240,34 @@ pub enum JobStatus {
     Failed,
 }
 
+/// What a job proves and which ELF/pipeline it uses.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum JobKind {
+    /// Vote batch, PLONK wrap (on-chain SNARK).
+    Batch,
+    /// Vote batch, vadcop-final STARK only (foldable).
+    BatchStark,
+    /// Aggregator fold step, STARK only.
+    Fold,
+    /// Aggregator finalize step, PLONK wrap.
+    Finalize,
+}
+
+impl JobKind {
+    pub fn is_plonk(self) -> bool {
+        matches!(self, JobKind::Batch | JobKind::Finalize)
+    }
+}
+
 /// A proof job tracked in the service
 #[derive(Debug, Clone, Serialize)]
 pub struct Job {
     pub job_id: Uuid,
     pub status: JobStatus,
+    pub kind: JobKind,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub parent_job_ids: Vec<Uuid>,
     pub created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
@@ -199,10 +280,12 @@ pub struct Job {
 }
 
 impl Job {
-    pub fn new(id: Uuid) -> Self {
+    pub fn new(id: Uuid, kind: JobKind, parent_job_ids: Vec<Uuid>) -> Self {
         Self {
             job_id: id,
             status: JobStatus::Queued,
+            kind,
+            parent_job_ids,
             created_at: Utc::now(),
             started_at: None,
             finished_at: None,

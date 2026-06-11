@@ -13,15 +13,14 @@
 // ! **Path bits**: LSB-first => `bit[level] = key_u256_le[level/64] >> (level%64) & 1`.
 
 use crate::hash::sha256_once;
-use crate::io::ParsedInput;
-use crate::types::{FrRaw, SmtTransition, ZERO_FR,
+use crate::types::{FrRaw, SmtTransition, StateBlock, ZERO_FR,
     FAIL_SMT_VOTEID, FAIL_SMT_BALLOT, FAIL_SMT_RESULTS, FAIL_SMT_PROCESS};
 
 // Byte-order helpers
 
 /// FrRaw (LE word order) → little-endian 32 bytes (Arbo's byte format).
 /// Arbo stores all values (keys, values, hashes) in little-endian byte order.
-fn fr_to_le(v: &FrRaw) -> [u8; 32] {
+pub fn fr_to_le(v: &FrRaw) -> [u8; 32] {
     let mut out = [0u8; 32];
     out[0..8].copy_from_slice(&v[0].to_le_bytes());
     out[8..16].copy_from_slice(&v[1].to_le_bytes());
@@ -31,7 +30,7 @@ fn fr_to_le(v: &FrRaw) -> [u8; 32] {
 }
 
 /// Little-endian 32 bytes → FrRaw (LE word order).
-fn le_to_fr(b: &[u8; 32]) -> FrRaw {
+pub fn le_to_fr(b: &[u8; 32]) -> FrRaw {
     [
         u64::from_le_bytes(b[0..8].try_into().unwrap()),
         u64::from_le_bytes(b[8..16].try_into().unwrap()),
@@ -43,7 +42,7 @@ fn le_to_fr(b: &[u8; 32]) -> FrRaw {
 // Arbo-compatible hash functions
 
 /// Arbo leaf hash: `SHA256(key_le32 || value_le32 || 0x01)` => 65 bytes.
-fn leaf_hash(key: &FrRaw, value: &FrRaw) -> FrRaw {
+pub fn leaf_hash(key: &FrRaw, value: &FrRaw) -> FrRaw {
     let mut input = [0u8; 65];
     input[0..32].copy_from_slice(&fr_to_le(key));
     input[32..64].copy_from_slice(&fr_to_le(value));
@@ -52,7 +51,7 @@ fn leaf_hash(key: &FrRaw, value: &FrRaw) -> FrRaw {
 }
 
 /// Arbo internal node hash: `SHA256(left_le32 || right_le32)` => 64 bytes.
-fn node_hash(left: &FrRaw, right: &FrRaw) -> FrRaw {
+pub fn node_hash(left: &FrRaw, right: &FrRaw) -> FrRaw {
     let mut input = [0u8; 64];
     input[0..32].copy_from_slice(&fr_to_le(left));
     input[32..64].copy_from_slice(&fr_to_le(right));
@@ -68,7 +67,7 @@ fn switcher(sel: bool, l: FrRaw, r: FrRaw) -> (FrRaw, FrRaw) {
 
 /// Get path bit `level` from key (LSB-first, LE word order).
 /// `bit[level] = key[level/64] >> (level%64) & 1`
-fn get_bit(key: &FrRaw, level: usize) -> bool {
+pub fn get_bit(key: &FrRaw, level: usize) -> bool {
     let word_idx = level / 64;
     let bit_idx = level % 64;
     if word_idx >= 4 { return false; }
@@ -379,10 +378,10 @@ pub fn verify_chain(
 /// `old_root` and `new_root` are the full 256-bit Arbo SHA-256 roots as `FrRaw`.
 /// When no state block is present, returns `(true, ZERO, ZERO, 0, 0)` => absence is not a failure.
 pub fn verify_state(
-    parsed: &ParsedInput,
+    state: Option<&StateBlock>,
     fail_mask: &mut u32,
 ) -> (bool, FrRaw, FrRaw, u64, u64) {
-    let state = match &parsed.state {
+    let state = match state {
         None => {
             *fail_mask |= crate::types::FAIL_MISSING_BLOCK;
             return (false, ZERO_FR, ZERO_FR, 0, 0);

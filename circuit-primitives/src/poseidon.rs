@@ -822,3 +822,74 @@ pub fn poseidon1(a: &FrRaw) -> FrRaw {
 
     state[0]
 }
+
+// t=13 (12 inputs): nRoundsF=8, nRoundsP=65. Used by the Chaum-Pedersen
+// Fiat-Shamir challenge, which hashes 6 points (12 coordinates) exactly as
+// davinci-node's poseidon.MultiPoseidon does for <=16 inputs.
+
+use crate::poseidon13_constants::{POSEIDON13_C, POSEIDON13_M, POSEIDON13_P, POSEIDON13_S};
+
+const T13: usize = 13;
+const N_ROUNDS_P13: usize = 65;
+
+fn ark13(state: &mut [BnFr; T13], it: usize) {
+    for i in 0..T13 {
+        state[i] = bn254_fr::add(&state[i], &POSEIDON13_C[it + i]);
+    }
+}
+
+fn mix13(state: &mut [BnFr; T13], m: &[[[u64; 4]; T13]; T13]) {
+    let mut ns = [bn254_fr::ZERO; T13];
+    for i in 0..T13 {
+        for j in 0..T13 {
+            ns[i] = bn254_fr::muladd(&m[j][i], &state[j], &ns[i]);
+        }
+    }
+    *state = ns;
+}
+
+/// iden3 Poseidon hash of 12 BN254 Fr elements (t=13, nRoundsF=8, nRoundsP=65).
+///
+/// Compatible with `go-iden3-crypto/poseidon.Hash` on 12 inputs. `initState = 0`.
+pub fn poseidon12(inputs: &[FrRaw; 12]) -> FrRaw {
+    let mut state = [bn254_fr::ZERO; T13];
+    state[1..].copy_from_slice(inputs);
+
+    ark13(&mut state, 0);
+
+    for i in 0..(N_ROUNDS_F / 2 - 1) {
+        for j in 0..T13 { state[j] = exp5(&state[j]); }
+        ark13(&mut state, (i + 1) * T13);
+        mix13(&mut state, &POSEIDON13_M);
+    }
+
+    for j in 0..T13 { state[j] = exp5(&state[j]); }
+    ark13(&mut state, (N_ROUNDS_F / 2) * T13);
+    mix13(&mut state, &POSEIDON13_P);
+
+    for i in 0..N_ROUNDS_P13 {
+        state[0] = exp5(&state[0]);
+        state[0] = bn254_fr::add(&state[0], &POSEIDON13_C[(N_ROUNDS_F / 2 + 1) * T13 + i]);
+
+        let base = (T13 * 2 - 1) * i;
+        let mut new0 = bn254_fr::ZERO;
+        for j in 0..T13 {
+            new0 = bn254_fr::muladd(&POSEIDON13_S[base + j], &state[j], &new0);
+        }
+        for k in 1..T13 {
+            state[k] = bn254_fr::muladd(&POSEIDON13_S[base + T13 + k - 1], &state[0], &state[k]);
+        }
+        state[0] = new0;
+    }
+
+    for i in 0..(N_ROUNDS_F / 2 - 1) {
+        for j in 0..T13 { state[j] = exp5(&state[j]); }
+        ark13(&mut state, (N_ROUNDS_F / 2 + 1) * T13 + N_ROUNDS_P13 + i * T13);
+        mix13(&mut state, &POSEIDON13_M);
+    }
+
+    for j in 0..T13 { state[j] = exp5(&state[j]); }
+    mix13(&mut state, &POSEIDON13_M);
+
+    state[0]
+}

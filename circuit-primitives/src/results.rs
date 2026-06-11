@@ -4,31 +4,49 @@
 //!   NewResultsAdd = OldResultsAdd + Σ(all voter ballots)
 //!   NewResultsSub = OldResultsSub + Σ(overwritten ballots)
 //!
-//! Each ballot is 32 BN254 Fr field elements (8 ElGamal ciphertexts × 4 coordinates).
-//! Addition is performed element-wise using the `bn254_fr::add` precompile.
+//! Each ballot is 32 BN254 Fr field elements (8 ElGamal ciphertexts × 4 TE
+//! coordinates). Addition is homomorphic: BabyJubJub point addition per
+//! ciphertext component, matching davinci-node's `Ballot.Add`, so the final
+//! accumulator stays a decryptable ElGamal ciphertext.
 //!
 //! Additionally verifies that each ballot SMT leaf value equals SHA-256 of the
 //! serialized ballot data, binding the re-encrypted ballot to the state tree.
 
-use crate::bn254_fr;
+use crate::babyjubjub::bjj_add;
 use crate::hash;
 use crate::types::{BallotData, FrRaw, StateBlock, ZERO_FR, FAIL_RESULT_ACCUM, FAIL_LEAF_HASH};
+use crate::bn254_fr::ONE;
 
 /// Number of Fr elements per ballot (8 ciphertexts × 4 coordinates).
 const BALLOT_FIELDS: usize = 32;
 
-/// Element-wise field addition of two ballots: out[i] = a[i] + b[i].
-fn ballot_add(a: &BallotData, b: &BallotData) -> BallotData {
+/// The identity ballot: every point is the TE identity (0, 1). Matches
+/// davinci-node `elgamal.NewBallot` and is the genesis Results leaf value.
+pub fn zero_ballot() -> BallotData {
+    let mut b = [ZERO_FR; BALLOT_FIELDS];
+    let mut i = 1;
+    while i < BALLOT_FIELDS {
+        b[i] = ONE;
+        i += 2;
+    }
+    b
+}
+
+/// Homomorphic ballot addition: BabyJubJub point addition of each of the
+/// 16 (x, y) coordinate pairs.
+pub fn ballot_add(a: &BallotData, b: &BallotData) -> BallotData {
     let mut out = [ZERO_FR; BALLOT_FIELDS];
-    for i in 0..BALLOT_FIELDS {
-        out[i] = bn254_fr::add(&a[i], &b[i]);
+    for i in 0..BALLOT_FIELDS / 2 {
+        let p = bjj_add(&(a[i * 2], a[i * 2 + 1]), &(b[i * 2], b[i * 2 + 1]));
+        out[i * 2] = p.0;
+        out[i * 2 + 1] = p.1;
     }
     out
 }
 
 /// Serialize a ballot into bytes for hashing: each Fr element is written as 32 bytes
 /// big-endian (matching arbo's SHA-256 leaf hash convention).
-fn serialize_ballot(b: &BallotData) -> Vec<u8> {
+pub fn serialize_ballot(b: &BallotData) -> Vec<u8> {
     let mut buf = Vec::with_capacity(BALLOT_FIELDS * 32);
     for fr in b.iter() {
         // FrRaw is [u64; 4] LE limbs → convert to 32-byte big-endian
@@ -46,7 +64,7 @@ fn serialize_ballot(b: &BallotData) -> Vec<u8> {
 
 /// Compute SHA-256 of the serialized ballot → FrRaw (LE limbs).
 /// This hash should match the SMT leaf `new_value` for ballot insertions.
-fn ballot_leaf_hash(b: &BallotData) -> FrRaw {
+pub fn ballot_leaf_hash(b: &BallotData) -> FrRaw {
     let serialized = serialize_ballot(b);
     let digest = hash::sha256_once(&serialized);
     // Convert 32-byte hash (big-endian) to FrRaw [u64; 4] LE limbs (arbo convention)

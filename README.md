@@ -11,6 +11,16 @@ proofs over ElGamal-encrypted votes. The service folds the batch through
 ZisK. The output is around 2.7 KB of proof, and Ethereum verifies it in
 roughly 300 ms.
 
+The service supports two operating modes:
+
+- **Per-batch mode** — every batch gets its own PLONK SNARK, and an
+  external verifier (e.g. an Ethereum contract following the davinci-node
+  model) checks each state transition.
+- **Chained mode** — batches are proven as STARKs and recursively folded
+  inside ZisK; the whole election (genesis state, every transition, and
+  the decrypted results) collapses into **one final PLONK**. See
+  [Chained mode](#chained-mode-one-proof-per-election).
+
 ## What the circuit checks
 
 In a single ZisK execution, the circuit verifies:
@@ -31,22 +41,106 @@ The circuit's public outputs match
 `StateTransitionCircuit` interface: the two root hashes, the census root,
 the voter counts, the KZG blob commitment, and a diagnostic fail-mask.
 
+## Chained mode: one proof per election
+
+Chained mode targets single-sequencer deployments that rely entirely on
+ZisK: instead of verifying one PLONK per batch on-chain, the election
+produces **one final PLONK** that attests to everything. A second guest,
+the aggregator (`circuit-aggregator/`), verifies vadcop-final STARK
+proofs *inside* ZisK and runs in three modes:
+
+1. **Genesis + fold** — recomputes the genesis state root in-circuit from
+   the immutable election config (process ID, ballot mode, encryption
+   key, census origin/root) and folds the first batch proofs from it.
+2. **Fold** — verifies the previous fold proof plus K new batch STARKs,
+   enforcing state-root continuity, the census root, and per-batch
+   success flags. Voter counts accumulate in the public digest.
+3. **Finalize** — verifies the last fold, proves the Results leaves'
+   SMT inclusion under the final root, checks the trustees' Chaum-Pedersen
+   decryption proofs, and commits the plaintext results. Only this proof
+   gets the PLONK wrap.
+
+The final PLONK's public digest exposes the plaintext results, the vote
+count, the config commitment, the final state root, and the two program
+verification keys (`batch_vk`, `fold_vk`). KZG blob evaluation is omitted
+in this mode (there is no per-batch on-chain data availability step).
+
+**Verification key binding.** A guest cannot know its own verification
+key, so the chain commits both vks in every digest and the verifier
+closes the loop externally with two equality checks after verifying the
+PLONK: `digest.fold_vk == proof.program_vk` and `digest.batch_vk ==
+<known vote-batch vk>`. `chain.Digest.VerifyBinding` in the Go SDK
+implements exactly this; on-chain it is two 32-byte comparisons.
+
+The flow over HTTP (the Go `chain.Sequencer` automates all of it):
+
+```
+POST /prove  (output=stark)   per batch → vadcop-final STARK
+POST /fold   (genesis)        config + first batch jobs
+POST /fold   (chained)        prev fold job + next batch jobs
+POST /finalize                last fold + decrypted results + CP proofs → PLONK
+```
+
+The first fold is submitted once without `fold_vk` as a *bootstrap*: its
+own `program_vk` (returned by `GET /jobs/{id}/stark`) is the aggregator
+vk, which the real genesis fold then binds.
+
+### Driving it from Go
+
+```go
+import "github.com/vocdoni/davinci-zkvm/go-sdk/chain"
+
+seq, _ := chain.NewSequencer(client, chain.Config{
+    ProcessID:    processID,   // *big.Int
+    BallotMode:   ballotMode,  // *big.Int
+    EncKey:       encKey,      // *bjj_gnark.BJJ ElGamal public key
+    CensusOrigin: 1,           // 1 = lean-IMT, 4 = CSP
+    CensusRoot:   censusRoot,  // *big.Int
+}, foldEvery, timeout)
+
+// Per batch: votes carry the ballot key parts + ciphertexts; req carries
+// the Groth16 proofs, signatures and census material. The sequencer owns
+// the state tree, re-encrypts ballots, proves the batch as a STARK and
+// folds automatically every foldEvery batches.
+jobID, err := seq.ProveBatch(votes, req)
+
+// After the DKG reveals the decryption key: decrypts the accumulators,
+// builds the Chaum-Pedersen proofs, proves the results in-guest, wraps
+// the chain in the final PLONK and runs all consistency + vk-binding
+// checks.
+final, err := seq.Finalize(encPrivKey)
+// final.Snark is the on-chain payload; final.Results the plaintext tally.
+```
+
+The Solidity side is unchanged: the final PLONK verifies with the same
+`ZiskVerifier.verifySnarkProof`, just with the aggregator's `program_vk`
+and the digest as public values.
+
+See [BENCHMARK.md](BENCHMARK.md) for chained-mode throughput numbers;
+`make benchmark` reproduces them (see [benchmark/](benchmark/README.md)).
+
 ## Layout
 
 ```
 davinci-zkvm/
-├── circuit/        ZisK RISC-V guest circuit (Rust, +zisk toolchain)
-│   ├── elf/        Pre-built circuit ELF (tracked in git)
-│   └── src/        groth16, ecdsa, smt, census, csp, results, kzg, …
-├── input-gen/      Typed protocol blocks → ZisK binary input
-├── service/        HTTP API (axum + tokio)
+├── circuit/             ZisK RISC-V guest: the vote-batch circuit
+│   ├── elf/             Pre-built circuit ELF (tracked in git)
+│   └── src/             groth16, ecdsa, census, csp, kzg, …
+├── circuit-aggregator/  ZisK RISC-V guest: recursive aggregator (chained mode)
+│   ├── elf/             Pre-built aggregator ELF (tracked in git)
+│   └── src/             in-guest STARK verification, genesis, fold, finalize
+├── circuit-primitives/  no_std crate shared by both guests
+│   └── src/             smt, babyjubjub, poseidon, chaum_pedersen, hash, …
+├── input-gen/           Typed protocol blocks → ZisK binary input
+├── service/             HTTP API (axum + tokio)
 │   └── src/
-│       ├── api/    POST /prove, GET /jobs/*, GET /health
-│       └── prover/ Background queue, worker, snark.json extractor
-├── solidity/       Vendored Solidity verifier (PlonkVerifier + ZiskVerifier)
-└── go-sdk/         Go client library, with an on-chain verification helper
-    ├── solidity/   simulated.NewBackend verification helper
-    └── tests/      Integration tests
+│       ├── api/         POST /prove, /fold, /finalize, GET /jobs/*, /health
+│       └── prover/      Background queue, worker, snark/recursion extractors
+├── solidity/            Vendored Solidity verifier (PlonkVerifier + ZiskVerifier)
+└── go-sdk/              Go client library, with an on-chain verification helper
+    ├── chain/           Chained-mode sequencer: state tree, folds, finalize
+    ├── solidity/        simulated.NewBackend verification helper
+    └── tests/           Integration tests
 ```
 
 ## Quick start
@@ -129,11 +223,14 @@ No Anvil, ganache, or RPC endpoint needed.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/prove` | Submit a state-transition batch. Returns a job ID. |
+| `POST` | `/prove` | Submit a state-transition batch. `output: "plonk"` (default) or `"stark"` (foldable). Returns a job ID. |
+| `POST` | `/fold` | Chained mode: fold batch STARKs into the chain (genesis when `prev_fold_job` is absent). |
+| `POST` | `/finalize` | Chained mode: verify the decrypted results and wrap the chain in the final PLONK. |
 | `GET` | `/jobs/{id}` | Job status (queued / running / done / failed) and timing. |
 | `GET` | `/jobs/{id}/snark` | The Solidity-ready PLONK payload as JSON. |
 | `GET` | `/jobs/{id}/snark/raw` | The raw `proof.bin` (bincode), for `cargo-zisk verify`. |
-| `GET` | `/jobs/{id}/publics` | Just the 256-byte `publicValues` blob. |
+| `GET` | `/jobs/{id}/stark` | The `program_vk` / `zisk_vk` of a STARK job (vk binding). |
+| `GET` | `/jobs/{id}/publics` | Just the `publicValues` blob (the digest, for fold/finalize jobs). |
 | `GET` | `/jobs/{id}/inputs` | The raw `input.bin` (audit / re-proving). |
 | `GET` | `/health` | Service liveness check. |
 
@@ -158,7 +255,8 @@ These four fields map straight onto the arguments of
 | `LISTEN_ADDR` | `0.0.0.0:8080` | HTTP listen address. |
 | `PROVING_KEY_PATH` | `/proving-key` | ZisK STARK proving key directory. |
 | `PROVING_KEY_PLONK_PATH` | `/proving-key-plonk` | ZisK PLONK proving key directory. |
-| `CIRCUIT_ELF_PATH` | `/app/circuit.elf` | Pre-built circuit ELF. |
+| `CIRCUIT_ELF_PATH` | `/app/circuit.elf` | Pre-built vote-batch circuit ELF. |
+| `AGGREGATOR_ELF_PATH` | `/app/aggregator.elf` | Pre-built aggregator ELF (chained mode). |
 | `CARGO_ZISK_BIN` | `cargo-zisk` | `cargo-zisk` binary to invoke. |
 | `PROOF_OUTPUT_DIR` | `/tmp/proofs` | Per-job artifact directory. |
 | `MAX_QUEUE_SIZE` | `100` | Maximum queued jobs. |
@@ -189,6 +287,13 @@ batch 512. Proof size stays at 2.7 KB regardless of batch.
 cd circuit && cargo-zisk build --release
 cp circuit/target/elf/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-circuit \
    circuit/elf/circuit.elf
+
+# Rebuild the aggregator ELF (chained mode). Rebuilding either guest
+# changes its program_vk; clients read vks from the running service,
+# never hardcode them.
+cd circuit-aggregator && cargo-zisk build --release
+cp circuit-aggregator/target/elf/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-aggregator \
+   circuit-aggregator/elf/aggregator.elf
 
 # Build the service binary
 cargo build --release -p davinci-zkvm-service

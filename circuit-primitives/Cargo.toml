@@ -1,0 +1,12 @@
+[package]
+name = "circuit-primitives"
+version = "0.1.0"
+edition = "2021"
+
+# Shared crypto primitives for the ZisK guests (vote-batch circuit and
+# aggregator). Depends on ziskos precompile wrappers, so it only builds
+# for the zisk target — kept out of the root workspace like the guests.
+[workspace]
+
+[dependencies]
+ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", tag = "v0.18.0" }

@@ -215,3 +215,38 @@ pub fn verify_batch_from_parsed(
     }
     true
 }
+
+// Affine point API (TE coordinates) for the Chaum-Pedersen verifier.
+
+/// Affine BabyJubJub point in standard Twisted Edwards coordinates.
+pub type BjjAffine = (FrRaw, FrRaw);
+
+/// The identity point (0, 1).
+pub fn bjj_identity() -> BjjAffine {
+    (bn254_fr::ZERO, bn254_fr::ONE)
+}
+
+/// The iden3 generator B8.
+pub fn bjj_generator() -> BjjAffine {
+    (B8X_LE, B8Y_LE)
+}
+
+/// `a + b` in affine TE coordinates.
+pub fn bjj_add(a: &BjjAffine, b: &BjjAffine) -> BjjAffine {
+    BJJProj::from_affine(a.0, a.1).add(&BJJProj::from_affine(b.0, b.1)).to_affine()
+}
+
+/// `scalar * p`, scalar as raw 256-bit LE limbs (not reduced).
+pub fn bjj_mul(p: &BjjAffine, scalar: &FrRaw) -> BjjAffine {
+    scalar_mult(&BJJProj::from_affine(p.0, p.1), scalar).to_affine()
+}
+
+/// `-p` = (-x, y) in twisted Edwards form.
+pub fn bjj_neg(p: &BjjAffine) -> BjjAffine {
+    (bn254_fr::neg(&p.0), p.1)
+}
+
+/// Curve membership check for an affine TE point.
+pub fn bjj_on_curve(p: &BjjAffine) -> bool {
+    is_on_bjj_curve(&p.0, &p.1)
+}

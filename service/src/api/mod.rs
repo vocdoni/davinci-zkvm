@@ -1,5 +1,6 @@
 //! API router and shared state
 
+pub mod fold;
 pub mod jobs;
 pub mod prove;
 
@@ -23,7 +24,11 @@ pub fn router(state: AppState) -> Router {
     const MAX_BODY: usize = 512 * 1024 * 1024;
     Router::new()
         .route("/prove", post(prove::submit_prove))
+        .route("/fold", post(fold::submit_fold))
+        .route("/finalize", post(fold::submit_finalize))
         .route("/jobs/:id", get(jobs::get_job_status))
+        .route("/jobs/:id/stark", get(jobs::get_job_stark))
+        .route("/jobs/:id/proof/stark", get(jobs::get_job_proof_stark))
         .route("/jobs/:id/snark", get(jobs::get_job_snark))
         .route("/jobs/:id/snark/raw", get(jobs::get_job_snark_raw))
         .route("/jobs/:id/publics", get(jobs::get_job_publics))

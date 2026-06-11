@@ -259,6 +259,81 @@ type ProveRequest struct {
 	// KZG contains the EIP-4844 blob barycentric evaluation data.
 	// When non-nil, the circuit verifies the KZG commitment and evaluation.
 	KZG *KZGRequest `json:"kzg,omitempty"`
+	// Output selects the proof kind: "plonk" (default, on-chain SNARK) or
+	// "stark" (vadcop-final STARK, foldable by the chained-mode aggregator).
+	Output string `json:"output,omitempty"`
+}
+
+// ChainConfig is the immutable election config for the chained (aggregator)
+// mode. All 32-byte fields are arbo little-endian hex without 0x prefix,
+// matching the aggregator guest's config frame.
+type ChainConfig struct {
+	ProcessID    string `json:"process_id"`
+	BallotMode   string `json:"ballot_mode"`
+	EncX         string `json:"enc_x"`
+	EncY         string `json:"enc_y"`
+	CensusOrigin uint64 `json:"census_origin"`
+	CensusRoot   string `json:"census_root"`
+}
+
+// FoldRequest is the HTTP request body for POST /fold.
+type FoldRequest struct {
+	Config ChainConfig `json:"config"`
+	// PrevFoldJob chains from a previous fold job. Empty = genesis fold.
+	PrevFoldJob string `json:"prev_fold_job,omitempty"`
+	// BatchJobs are completed batch jobs proven with Output == "stark".
+	BatchJobs []string `json:"batch_jobs"`
+	// FoldVK is the aggregator program_vk to bind (0x-prefixed BE hex).
+	// Defaults to the previous fold proof's program_vk, or zero for the
+	// genesis bootstrap pass.
+	FoldVK string `json:"fold_vk,omitempty"`
+}
+
+// FinalizeRequest is the HTTP request body for POST /finalize.
+type FinalizeRequest struct {
+	Config ChainConfig `json:"config"`
+	// FoldJob is the completed fold job whose proof to finalize.
+	FoldJob string `json:"fold_job"`
+	// FoldVK is the aggregator program_vk to bind (0x-prefixed BE hex).
+	// Defaults to the fold proof's own program_vk.
+	FoldVK string `json:"fold_vk,omitempty"`
+	// Results is the decrypted-results payload.
+	Results ResultsPayload `json:"results"`
+}
+
+// ResultsPayload carries the decrypted results for the finalize step. All
+// 32-byte fields are arbo little-endian hex; ballot coordinates are Twisted
+// Edwards, ciphertext order [c1x, c1y, c2x, c2y] x 8.
+type ResultsPayload struct {
+	// AddBallot is the ResultsAdd accumulator (state key 0x04): 32 coords.
+	AddBallot []string `json:"add_ballot"`
+	// SubBallot is the ResultsSub accumulator (state key 0x05): 32 coords.
+	SubBallot []string `json:"sub_ballot"`
+	// AddResults / SubResults are the claimed plaintexts (8 each).
+	AddResults []uint64 `json:"add_results"`
+	SubResults []uint64 `json:"sub_results"`
+	// CpProofs are 16 Chaum-Pedersen proofs: first 8 add, last 8 sub.
+	CpProofs []CpProof `json:"cp_proofs"`
+	// AddSiblings / SubSiblings are inclusion siblings root→leaf,
+	// zero-padded to the same length.
+	AddSiblings []string `json:"add_siblings"`
+	SubSiblings []string `json:"sub_siblings"`
+}
+
+// CpProof is one Chaum-Pedersen decryption proof (TE coordinates, LE hex).
+type CpProof struct {
+	A1X string `json:"a1x"`
+	A1Y string `json:"a1y"`
+	A2X string `json:"a2x"`
+	A2Y string `json:"a2y"`
+	Z   string `json:"z"`
+}
+
+// StarkInfo is the response of GET /jobs/{id}/stark: the program_vk and
+// zisk_vk of a STARK job, needed for the external vk-binding checks.
+type StarkInfo struct {
+	ProgramVK string `json:"program_vk"`
+	ZiskVK    string `json:"zisk_vk"`
 }
 
 // KZGRequest holds the KZG blob barycentric evaluation inputs for the API.

@@ -138,6 +138,9 @@ type PublicOutputs struct {
 | `client.WaitForJob(id, timeout)` | Low-level: block until the job is done or failed. |
 | `client.FetchSnark(id)` | Download the Solidity-ready PLONK payload for a completed job. |
 | `client.FetchInputs(id)` | Download the raw `input.bin` for audit or re-proving. |
+| `client.SubmitFold(req)` | Chained mode: fold completed batch jobs into a chain proof. |
+| `client.SubmitFinalize(req)` | Chained mode: results payload → final PLONK. |
+| `client.FetchStarkInfo(id)` | Chained mode: program_vk + publics of a STARK job. |
 
 ### `PlonkSnark`
 
@@ -173,6 +176,43 @@ err := davinciSolidity.VerifyOnSimulated("./solidity", snark)
 It compiles the verifier contracts with local `solc` (or `docker run
 ethereum/solc:stable`) and runs them on
 `go-ethereum/ethclient/simulated.NewBackend`.
+
+## Chained mode: `go-sdk/chain`
+
+For single-sequencer deployments the `chain` package drives the whole
+election to one final PLONK: batches are proved STARK-only, recursively
+folded server-side, and finalize wraps the last fold (plus the decrypted
+results with Chaum-Pedersen proofs) into a single SNARK.
+
+```go
+import "github.com/vocdoni/davinci-zkvm/go-sdk/chain"
+
+seq, err := chain.NewSequencer(client, chain.Config{
+    ProcessID:    processID,  // *big.Int
+    BallotMode:   ballotMode, // *big.Int
+    EncKey:       encKey,     // *bjj.BJJ ElGamal pubkey from the DKG
+    CensusOrigin: 1,
+    CensusRoot:   censusRoot, // *big.Int
+}, 4 /* fold every 4 batches */, 30*time.Minute)
+
+// For each batch of incoming votes:
+//  - votes: []chain.Vote (census index, voteID, address, ElGamal ballot)
+//  - req:   *ProveRequest with the voters' ballot proofs + census proofs
+//    (the sequencer fills in State, Reencryption and Output itself)
+jobID, err := seq.ProveBatch(votes, req)
+
+// When the election ends and the DKG releases the private key:
+final, err := seq.Finalize(encPrivKey)
+_ = final.Snark   // the single PLONK for the whole election
+_ = final.Results // plaintext results, also committed in the proof publics
+```
+
+The `Sequencer` owns the process state tree (genesis matches the
+in-circuit genesis), the fold cadence, and the finalize checks: digest
+continuity, results match, and the external vk binding
+(`digest.fold_vk == snark.ProgramVK`, `digest.batch_vk` == the known
+vote-batch vk). See the repository README for the protocol design and
+the raw HTTP flow.
 
 ### Environment variables
 

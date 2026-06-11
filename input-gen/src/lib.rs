@@ -16,6 +16,8 @@ use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub mod aggregator;
+
 // "GROTH16B" in little-endian ASCII => matches guest magic constant
 const MAGIC: u64 = 0x423631484f545247u64;
 const STATE_MAGIC: u64 = u64::from_le_bytes(*b"STATETX!");
