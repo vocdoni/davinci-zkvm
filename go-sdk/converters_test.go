@@ -484,12 +484,12 @@ func TestNewStateTransitionData(t *testing.T) {
 	voteIDSmt := []SmtEntry{{NewKey: "0x01"}}
 	ballotSmt := []SmtEntry{{NewKey: "0x02"}}
 	processSmt := []SmtEntry{{NewKey: "0x03"}}
-	resultsAdd := &SmtEntry{NewKey: "0x04"}
+	results := &SmtEntry{NewKey: "0x04"}
 
 	st := NewStateTransitionData(
 		5, 1,
 		big.NewInt(42), big.NewInt(100), big.NewInt(200),
-		voteIDSmt, ballotSmt, processSmt, resultsAdd, nil,
+		voteIDSmt, ballotSmt, processSmt, results,
 	)
 
 	if st.VotersCount != 5 {
@@ -501,11 +501,8 @@ func TestNewStateTransitionData(t *testing.T) {
 	if st.ProcessID != bigIntToHex32BE(big.NewInt(42)) {
 		t.Errorf("ProcessID = %s", st.ProcessID)
 	}
-	if st.ResultsAddSmt == nil {
-		t.Error("ResultsAddSmt should not be nil")
-	}
-	if st.ResultsSubSmt != nil {
-		t.Error("ResultsSubSmt should be nil")
+	if st.ResultsSmt == nil {
+		t.Error("ResultsSmt should not be nil")
 	}
 }
 

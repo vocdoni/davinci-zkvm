@@ -47,9 +47,7 @@ pub struct StateTransitionJson {
     #[serde(default)]
     pub ballot_smt: Vec<SmtEntryJson>,
     #[serde(default)]
-    pub results_add_smt: Option<SmtEntryJson>,
-    #[serde(default)]
-    pub results_sub_smt: Option<SmtEntryJson>,
+    pub results_smt: Option<SmtEntryJson>,
     #[serde(default)]
     pub process_smt: Vec<SmtEntryJson>,
     #[serde(default)]
@@ -60,8 +58,7 @@ pub struct StateTransitionJson {
 /// (32 big-endian hex Fr elements each) for the homomorphic tally check.
 #[derive(Debug, Deserialize, Clone)]
 pub struct BallotProofsJson {
-    pub old_results_add: Vec<String>,
-    pub old_results_sub: Vec<String>,
+    pub old_results: Vec<String>,
     pub voter_ballots: Vec<Vec<String>>,
     #[serde(default)]
     pub overwritten_ballots: Vec<Vec<String>>,

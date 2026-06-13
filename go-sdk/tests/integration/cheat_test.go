@@ -152,13 +152,13 @@ func buildCheatInput(t *testing.T) (*cheatElectionInput, *Election, []*BallotRes
 	}
 
 	// Build re-encryption block before the state block so that re-encrypted
-	// ballots are available for ResultsAdd accumulation.
+	// ballots are available for net Results accumulation.
 	reencData, reencBallots, err := election.BuildReencBlock(batch.Results)
 	if err != nil {
 		t.Fatalf("BuildReencBlock: %v", err)
 	}
 
-	// Build state block (advances election.OldRoot, accumulates ResultsAdd).
+	// Build state block (advances election.OldRoot, accumulates net Results).
 	stateData, _, err := election.BuildStateBlock(election.Voters, batch.Results, reencBallots)
 	if err != nil {
 		t.Fatalf("BuildStateBlock: %v", err)

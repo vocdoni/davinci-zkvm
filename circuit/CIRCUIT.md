@@ -100,8 +100,7 @@ offset  size   field
 96      32     new_state_root (FrRaw LE)
 128     ...    VoteID chain (n_voters entries)
 ...     ...    Ballot chain (n_voters entries)
-...     ...    ResultsAdd transition (optional)
-...     ...    ResultsSub transition (optional)
+...     ...    Results transition (optional, single net leaf)
 ...     ...    Process config proofs (4 entries)
 ...     ...    Ballot proof data (voter ballots, overwritten ballots, old results)
 ```
@@ -393,11 +392,8 @@ OldStateRoot ─────→ │ VoteID Chain │ ────→ (intermedia
                     └──────────────┘
                            │
                     ┌──────────────┐
-                    │ ResultsAdd   │ ────→ (intermediate root)
-                    └──────────────┘
-                           │
-                    ┌──────────────┐
-                    │ ResultsSub   │ ────→ NewStateRoot
+                    │   Results    │ ────→ NewStateRoot
+                    │  (net leaf)  │
                     └──────────────┘
 ```
 
@@ -415,8 +411,7 @@ OldStateRoot ─────→ │ VoteID Chain │ ────→ (intermedia
 | 4.2.8 | VoteID chain: last `new_root == ballot_chain[0].old_root` | FAIL_SMT_VOTEID |
 | 4.2.9 | Ballot chain chaining (same as VoteID) | FAIL_SMT_BALLOT |
 | 4.2.10 | Each SMT transition is valid (Merkle proof against old root, new root recomputation) | Various |
-| 4.2.11 | ResultsAdd transition valid and chains from end of ballot chain | FAIL_SMT_RESULTS |
-| 4.2.12 | ResultsSub transition valid and chains to NewStateRoot | FAIL_SMT_RESULTS |
+| 4.2.11 | Results transition valid, chains from end of ballot chain, and `new_root == NewStateRoot` | FAIL_SMT_RESULTS |
 
 #### SMT Transition Verification (Circomlib SMT Processor)
 
@@ -540,27 +535,35 @@ the state tree.
 | 4.4.2 | For each voter: `SHA-256(serialize(voter_ballots[i])) == ballot_chain[i].new_value` | FAIL_LEAF_HASH |
 | 4.4.3 | For each UPDATE: `SHA-256(serialize(overwritten_ballots[j])) == ballot_chain[k].old_value` | FAIL_LEAF_HASH |
 | 4.4.4 | `overwritten_ballots.len() == count of UPDATE entries in ballot_chain` | FAIL_LEAF_HASH |
-| 4.4.5 | ResultsAdd: `SHA-256(serialize(OldResultsAdd + Σ voter_ballots)) == results_add.new_value` | FAIL_RESULT_ACCUM |
-| 4.4.6 | ResultsAdd: `SHA-256(serialize(OldResultsAdd)) == results_add.old_value` | FAIL_RESULT_ACCUM |
-| 4.4.7 | ResultsSub: `SHA-256(serialize(OldResultsSub + Σ overwritten_ballots)) == results_sub.new_value` | FAIL_RESULT_ACCUM |
-| 4.4.8 | ResultsSub: `SHA-256(serialize(OldResultsSub)) == results_sub.old_value` | FAIL_RESULT_ACCUM |
-| 4.4.9 | If `voter_ballots` is non-empty, ResultsAdd transition must be present | FAIL_RESULT_ACCUM |
-| 4.4.10 | If `overwritten_ballots` is non-empty, ResultsSub transition must be present | FAIL_RESULT_ACCUM |
-| 4.4.11 | If `n_voters > 0`, voter ballot data must be present | FAIL_RESULT_ACCUM |
-| 4.4.12 | If no ballots at all (`voter_ballots` and `overwritten_ballots` both empty), no Results transition may be present | FAIL_RESULT_ACCUM |
+| 4.4.5 | Results (net): `SHA-256(serialize(OldResults + Σ voter_ballots − Σ overwritten_ballots)) == results.new_value` | FAIL_RESULT_ACCUM |
+| 4.4.6 | Results (net): `SHA-256(serialize(OldResults)) == results.old_value` | FAIL_RESULT_ACCUM |
+| 4.4.7 | If `n_voters > 0`, voter ballot data must be present | FAIL_RESULT_ACCUM |
+| 4.4.8 | If no ballots at all (`voter_ballots` and `overwritten_ballots` both empty), no Results transition may be present | FAIL_RESULT_ACCUM |
 
-> **4.4.12 — empty-batch Results lock.** With no ballots there is nothing to
-> accumulate, so the Results leaves must not change. Without this check a
-> prover could ship a valid stand-alone SMT update of a Results leaf to an
+> **4.4.8 — empty-batch Results lock.** With no ballots there is nothing to
+> accumulate, so the net Results leaf must not change. Without this check a
+> prover could ship a valid stand-alone SMT update of the Results leaf to an
 > arbitrary value and chain it into `NewStateRoot`, injecting a forged tally
-> that no accumulation check binds. The guard rejects any `results_add` /
-> `results_sub` transition on an empty batch.
+> that no accumulation check binds. The guard rejects any `results`
+> transition on an empty batch.
+
+**Net accumulation:** the circuit verifies a single net Results leaf,
+`NewResults = OldResults + Σ(voter_ballots) − Σ(overwritten_ballots)`, mirroring
+davinci-node's `Ballot.Add(sumAll, Neg(sumOverwritten))`. Subtraction is the
+exact BabyJubJub group inverse (`bjj_neg`, TE inverse `(−x, y)`). Both ballot
+sets stay pinned by the leaf-hash checks 4.4.2/4.4.3, so folding them into one
+net leaf changes which value the result commits to, not what the prover may
+choose. Non-negativity is inherent: finalize recovers plaintext by bounded
+discrete-log search over the decrypted net ciphertext, so a negative net is
+unrepresentable — no per-field `add ≥ sub` guard is needed.
 
 **Ballot serialization:** Each ballot is 32 BN254 Fr elements (8 ElGamal ciphertexts × 4
 coordinates). Each Fr element is serialized as 32 big-endian bytes. The full serialization
 is `32 × 32 = 1024 bytes`.
 
-**Homomorphic addition:** `(a + b)[i] = bn254_fr::add(a[i], b[i])` for all 32 elements.
+**Homomorphic op:** add is `(a + b)[i]` BabyJubJub point add per coordinate pair;
+subtract is `a + bjj_neg(b)`, computed projectively with one field inversion per
+coordinate pair across the whole net chain.
 
 ---
 
@@ -686,7 +689,7 @@ must be rejected by the verifier.
 | 3 | `FAIL_ECDSA` | ecdsa.rs | Signature invalid or address binding failed |
 | 10 | `FAIL_SMT_VOTEID` | smt.rs | VoteID insertion chain invalid |
 | 11 | `FAIL_SMT_BALLOT` | smt.rs | Ballot insertion/update chain invalid |
-| 12 | `FAIL_SMT_RESULTS` | smt.rs | ResultsAdd/Sub SMT transition invalid |
+| 12 | `FAIL_SMT_RESULTS` | smt.rs | Net Results SMT transition invalid |
 | 13 | `FAIL_SMT_PROCESS` | smt.rs | Process config read-proof invalid or missing |
 | 14 | `FAIL_CONSISTENCY` | consistency.rs | VoteID namespace or proof binding mismatch |
 | 15 | `FAIL_BALLOT_NS` | consistency.rs | Ballot namespace or address binding mismatch |
@@ -753,10 +756,10 @@ configuration.
 
 ### 12.7 Tally Correctness
 
-The homomorphic result accumulators (`ResultsAdd`, `ResultsSub`) are verified to
-equal the element-wise sum of all voter ballots (and overwritten ballots,
-respectively). Ballot leaf hashes bind the serialized ballot data to the SMT
-leaf values, preventing substitution.
+A single net result accumulator (`Results`, key `0x04`) is verified to equal
+`OldResults + Σ(voter ballots) − Σ(overwritten ballots)`, the homomorphic net
+tally. Ballot leaf hashes bind the serialized ballot data to the SMT leaf
+values, preventing substitution.
 
 ### 12.8 Data Availability
 

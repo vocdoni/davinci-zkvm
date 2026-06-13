@@ -9,7 +9,7 @@
 //! |   3 | `FAIL_ECDSA`            | ecdsa.rs       | ECDSA signature or address binding failed  |
 //! |  10 | `FAIL_SMT_VOTEID`       | smt.rs         | VoteID insertion chain invalid             |
 //! |  11 | `FAIL_SMT_BALLOT`       | smt.rs         | Ballot insertion chain invalid             |
-//! |  12 | `FAIL_SMT_RESULTS`      | smt.rs         | ResultsAdd/Sub transition invalid          |
+//! |  12 | `FAIL_SMT_RESULTS`      | smt.rs         | net Results transition invalid             |
 //! |  13 | `FAIL_SMT_PROCESS`      | smt.rs         | Process config proof invalid or missing    |
 //! |  14 | `FAIL_CONSISTENCY`      | consistency.rs | VoteID namespace / proof binding mismatch  |
 //! |  15 | `FAIL_BALLOT_NS`        | consistency.rs | Ballot namespace / address binding mismatch|
@@ -74,7 +74,7 @@ pub const FAIL_REENC:       u32 = 1 << 17;
 pub const FAIL_KZG:         u32 = 1 << 18;
 /// Bit 19 => A mandatory protocol block is missing from the input.
 pub const FAIL_MISSING_BLOCK: u32 = 1 << 19;
-/// Bit 20 => Result accumulator: homomorphic ballot sum does not match ResultsAdd/Sub.
+/// Bit 20 => Result accumulator: homomorphic net ballot sum does not match Results.
 pub const FAIL_RESULT_ACCUM: u32 = 1 << 20;
 /// Bit 21 => Ballot leaf hash: SHA-256(serialized_ballot) ≠ SMT new_value.
 pub const FAIL_LEAF_HASH: u32 = 1 << 21;
@@ -243,24 +243,20 @@ pub struct StateBlock {
     pub vote_id_chain: Vec<SmtTransition>,
     /// Ballot SMT insertion/update chain (one transition per real vote).
     pub ballot_chain: Vec<SmtTransition>,
-    /// ResultsAdd SMT transition (one update per batch; None if all dummy).
-    pub results_add: Option<SmtTransition>,
-    /// ResultsSub SMT transition (present only when overwritten votes > 0).
-    pub results_sub: Option<SmtTransition>,
+    /// Net Results SMT transition (one update per batch; None if all dummy).
+    pub results: Option<SmtTransition>,
     /// Process config read-proofs (exactly 4: processID, ballotMode, encKey, censusOrigin).
     pub process_proofs: Vec<SmtTransition>,
     /// Shared n_levels for vote_id_chain and ballot_chain.
     pub n_levels: usize,
 
     // Result accumulator ballot data
-    /// Previous ResultsAdd leaf value (32 Fr elements). ZERO_FR ballot when absent.
-    pub old_results_add: BallotData,
-    /// Previous ResultsSub leaf value (32 Fr elements). ZERO_FR ballot when absent.
-    pub old_results_sub: BallotData,
+    /// Previous net Results leaf value (32 Fr elements). ZERO_FR ballot when absent.
+    pub old_results: BallotData,
     /// Per-voter re-encrypted ballots (32 Fr elements each), in same order as ballot_chain.
-    /// Used for homomorphic sum verification: NewResultsAdd = OldResultsAdd + Σ(all ballots).
+    /// Added to the net accumulator: NewResults = OldResults + Σ(all ballots) − Σ(overwritten).
     pub voter_ballots: Vec<BallotData>,
     /// Per-overwrite old ballot data (32 Fr elements each). Only present for UPDATE entries.
-    /// Used for homomorphic sum: NewResultsSub = OldResultsSub + Σ(overwritten ballots).
+    /// Subtracted from the net accumulator.
     pub overwritten_ballots: Vec<BallotData>,
 }

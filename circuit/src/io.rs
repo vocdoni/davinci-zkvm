@@ -372,19 +372,11 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
         ballot_chain.push(parse_smt_transition(input, off, ballot_n_levels, fail_mask));
     }
 
-    // ResultsAdd (0 or 1)
-    let has_results_add  = read1!(0) != 0;
+    // Net Results transition (0 or 1)
+    let has_results  = read1!(0) != 0;
     let results_n_levels = read1!(0) as usize;
     if results_n_levels > 256 { *fail_mask |= 1 << 31; }
-    let results_add = if has_results_add {
-        Some(parse_smt_transition(input, off, results_n_levels, fail_mask))
-    } else {
-        None
-    };
-
-    // ResultsSub (0 or 1, same n_levels)
-    let has_results_sub = read1!(0) != 0;
-    let results_sub = if has_results_sub {
+    let results = if has_results {
         Some(parse_smt_transition(input, off, results_n_levels, fail_mask))
     } else {
         None
@@ -406,11 +398,9 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
     // has_ballot_data: 0 = absent (zeros), 1 = present
     let has_ballot_data = read1!(0) != 0;
     let zero_ballot: [FrRaw; 32] = [ZERO_FR; 32];
-    let (old_results_add, old_results_sub, voter_ballots, overwritten_ballots) = if has_ballot_data {
-        let mut old_ra = [ZERO_FR; 32];
-        for i in 0..32 { old_ra[i] = read_fr!(); }
-        let mut old_rs = [ZERO_FR; 32];
-        for i in 0..32 { old_rs[i] = read_fr!(); }
+    let (old_results, voter_ballots, overwritten_ballots) = if has_ballot_data {
+        let mut old_r = [ZERO_FR; 32];
+        for i in 0..32 { old_r[i] = read_fr!(); }
 
         let n_vb = read1!(0) as usize;
         if n_vb > 4096 { *fail_mask |= 1 << 31; }
@@ -429,19 +419,19 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
             for i in 0..32 { b[i] = read_fr!(); }
             ob.push(b);
         }
-        (old_ra, old_rs, vb, ob)
+        (old_r, vb, ob)
     } else {
-        (zero_ballot, zero_ballot, Vec::new(), Vec::new())
+        (zero_ballot, Vec::new(), Vec::new())
     };
 
     StateBlock {
         n_voters, n_overwritten,
         process_id, old_state_root, new_state_root,
         vote_id_chain, ballot_chain,
-        results_add, results_sub,
+        results,
         process_proofs,
         n_levels,
-        old_results_add, old_results_sub,
+        old_results,
         voter_ballots, overwritten_ballots,
     }
 }

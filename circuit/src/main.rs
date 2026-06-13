@@ -141,7 +141,7 @@ fn main() {
     // Sub-checks:
     //   - Consistency: namespace validation and proof-to-state binding
     //   - SMT chains:  VoteID insertions, ballot insertions/updates,
-    //                  ResultsAdd/Sub transitions, process config reads
+    //                  net Results transition, process config reads
     //   - Re-encryption: ElGamal ballot re-encryption correctness
 
     // Consistency: namespace validation and proof-to-state binding.
@@ -168,8 +168,7 @@ fn main() {
 
     // Result accumulation and ballot leaf hashes:
     //     - Each ballot SMT leaf hash = SHA-256(serialized_ballot_data)
-    //     - NewResultsAdd = OldResultsAdd + Σ(all re-encrypted voter ballots)
-    //     - NewResultsSub = OldResultsSub + Σ(overwritten ballots)
+    //     - NewResults = OldResults + Σ(all voter ballots) − Σ(overwritten ballots)
     //     This ensures the election tally is correctly maintained across batches.
     let results_ok = match &parsed.state {
         Some(state) => results::verify_results(state, &mut fail_mask),

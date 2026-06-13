@@ -34,10 +34,8 @@ const (
 	ballotMin = uint64(0x10)
 	// voteIDMin is the minimum key for voteID SMT entries (bit 63 set).
 	voteIDMin = uint64(0x8000_0000_0000_0000)
-	// keyResultsAdd is the arbo state tree key for the accumulated ResultsAdd ballot.
-	keyResultsAdd = uint64(0x04)
-	// keyResultsSub is the arbo state tree key for the accumulated ResultsSub ballot.
-	keyResultsSub = uint64(0x05)
+	// keyResults is the arbo state tree key for the net accumulated Results ballot.
+	keyResults = uint64(0x04)
 )
 
 // configKeys are the process config keys stored in the state tree at election setup.
@@ -64,13 +62,11 @@ type Election struct {
 	OldRoot string
 	// configVals are the process config BigInt values inserted at setup.
 	configVals []*big.Int
-	// ResultsAdd is the Fr-wise accumulated sum of all re-encrypted ballot coordinates.
-	// Uses coordinate-wise Fr addition to match the circuit's ballot_add().
-	ResultsAdd frAccumBallot
-	// ResultsSub is the Fr-wise accumulated sum of overwritten ballot coordinates.
-	ResultsSub frAccumBallot
+	// Results is the net Fr-wise accumulator: Σ(all ballots) − Σ(overwritten ballots).
+	// Uses coordinate-wise Fr add/sub to match the circuit's net accumulator.
+	Results frAccumBallot
 	// VotedBallots maps voter CensusIdx → their last re-encrypted ballot stored in the
-	// state tree. Used to detect overwrites and to compute ResultsSub contributions.
+	// state tree. Used to detect overwrites and to subtract replaced ballots.
 	VotedBallots map[int]*elgamal.Ballot
 	// CspKey is the CSP's secp256k1 private key (nil for Merkle census mode).
 	CspKey *ecdsa.PrivateKey
@@ -130,16 +126,14 @@ func NewElection(nVoters int) (*Election, error) {
 		}
 	}
 
-	// ResultsAdd (0x04) and ResultsSub (0x05)
+	// Results (0x04): single net accumulator
 	zeroAccum := newZeroFrAccum()
 	zeroLeafBI := frAccumLeafHash(zeroAccum)
-	for _, k := range []uint64{keyResultsAdd, keyResultsSub} {
-		if err := procTree.Add(
-			arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(k)),
-			arbo.BigIntToBytes(bLen, zeroLeafBI),
-		); err != nil {
-			return nil, fmt.Errorf("procTree.Add results key 0x%02x: %w", k, err)
-		}
+	if err := procTree.Add(
+		arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(keyResults)),
+		arbo.BigIntToBytes(bLen, zeroLeafBI),
+	); err != nil {
+		return nil, fmt.Errorf("procTree.Add results key 0x%02x: %w", keyResults, err)
 	}
 
 	rootBytes, err := procTree.Root()
@@ -191,8 +185,7 @@ func NewElection(nVoters int) (*Election, error) {
 		censusLeaves: leaves,
 		OldRoot:      oldRoot,
 		configVals:   configValsBI,
-		ResultsAdd:   newZeroFrAccum(),
-		ResultsSub:   newZeroFrAccum(),
+		Results:      newZeroFrAccum(),
 		VotedBallots: make(map[int]*elgamal.Ballot),
 		CensusOrigin: 1,
 	}, nil
@@ -259,16 +252,14 @@ func NewCSPElection(nVoters int) (*Election, error) {
 		}
 	}
 
-	// ResultsAdd (0x04) and ResultsSub (0x05).
+	// Results (0x04): single net accumulator.
 	zeroAccum := newZeroFrAccum()
 	zeroLeafBI := frAccumLeafHash(zeroAccum)
-	for _, k := range []uint64{keyResultsAdd, keyResultsSub} {
-		if err := procTree.Add(
-			arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(k)),
-			arbo.BigIntToBytes(bLen, zeroLeafBI),
-		); err != nil {
-			return nil, fmt.Errorf("procTree.Add results key 0x%02x: %w", k, err)
-		}
+	if err := procTree.Add(
+		arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(keyResults)),
+		arbo.BigIntToBytes(bLen, zeroLeafBI),
+	); err != nil {
+		return nil, fmt.Errorf("procTree.Add results key 0x%02x: %w", keyResults, err)
 	}
 
 	rootBytes, err := procTree.Root()
@@ -306,8 +297,7 @@ func NewCSPElection(nVoters int) (*Election, error) {
 		ProcTree:     procTree,
 		OldRoot:      oldRoot,
 		configVals:   configValsBI,
-		ResultsAdd:   newZeroFrAccum(),
-		ResultsSub:   newZeroFrAccum(),
+		Results:      newZeroFrAccum(),
 		VotedBallots: make(map[int]*elgamal.Ballot),
 		CspKey:       cspKey,
 		CensusOrigin: 4,
@@ -383,9 +373,8 @@ func (e *Election) ProcessIDHex() string {
 
 // BuildStateBlock builds the STATETX protocol block for a batch of voters.
 // It inserts or updates each voter's voteID and ballot key in the process state tree,
-// accumulates the re-encrypted ballots into the ResultsAdd leaf (key 0x04), and, when
-// any voter is casting a replacement ballot, also updates the ResultsSub leaf (key 0x05)
-// with the homomorphic sum of the replaced old ballots.
+// and updates the single net Results leaf (key 0x04) with the homomorphic net sum
+// Σ(all re-encrypted ballots) − Σ(overwritten old ballots).
 // Returns the StateTransitionData, the list of overwritten (old) re-encrypted ballots
 // (may be empty), and an error.  e.OldRoot is advanced to the new root on success.
 // reencBallots must have the same length as ballotResults.
@@ -461,52 +450,32 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 		e.VotedBallots[v.CensusIdx] = reencBallots[i]
 	}
 
-	// ResultsAdd: accumulate re-encrypted ballots and update key 0x04
-	// Snapshot old accumulators for BallotProofData before mutation.
-	oldResultsAdd := e.ResultsAdd
-	oldResultsSub := e.ResultsSub
+	// Results: net accumulate (add all re-encrypted ballots, subtract overwritten)
+	// and update key 0x04. Snapshot old accumulator for BallotProofData before mutation.
+	oldResults := e.Results
 
-	// Accumulate using coordinate-wise Fr addition (matches circuit's ballot_add).
-	newResultsAdd := e.ResultsAdd
+	// net = old + Σ(all ballots) − Σ(overwritten ballots), coordinate-wise on BJJ.
+	newResults := e.Results
 	for _, rb := range reencBallots {
-		newResultsAdd = frAccumAdd(newResultsAdd, frAccumFromBallot(rb))
+		newResults = frAccumAdd(newResults, frAccumFromBallot(rb))
 	}
-	newResultsAddLeaf := frAccumLeafHash(newResultsAdd)
+	for _, ob := range overwrittenBallots {
+		newResults = frAccumSub(newResults, frAccumFromBallot(ob))
+	}
+	newResultsLeaf := frAccumLeafHash(newResults)
 
-	resultsAddEntry, err := buildArboUpdateEntry(
+	resultsEntry, err := buildArboUpdateEntry(
 		e.ProcTree,
-		new(big.Int).SetUint64(keyResultsAdd),
-		newResultsAddLeaf,
+		new(big.Int).SetUint64(keyResults),
+		newResultsLeaf,
 		procLevels,
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("ResultsAdd update: %w", err)
+		return nil, nil, fmt.Errorf("Results update: %w", err)
 	}
-	e.ResultsAdd = newResultsAdd
+	e.Results = newResults
 
-	// ResultsSub: when any voter overwrote a ballot, update key 0x05
-	var resultsSubEntry *davinci.SmtEntry
-	if len(overwrittenBallots) > 0 {
-		newResultsSub := e.ResultsSub
-		for _, ob := range overwrittenBallots {
-			newResultsSub = frAccumAdd(newResultsSub, frAccumFromBallot(ob))
-		}
-		newResultsSubLeaf := frAccumLeafHash(newResultsSub)
-
-		entry, err := buildArboUpdateEntry(
-			e.ProcTree,
-			new(big.Int).SetUint64(keyResultsSub),
-			newResultsSubLeaf,
-			procLevels,
-		)
-		if err != nil {
-			return nil, nil, fmt.Errorf("ResultsSub update: %w", err)
-		}
-		e.ResultsSub = newResultsSub
-		resultsSubEntry = &entry
-	}
-
-	// Read new root AFTER all insertions + ResultsAdd + (optional) ResultsSub updates.
+	// Read new root AFTER all insertions + Results update.
 	newRootBytes, err := e.ProcTree.Root()
 	if err != nil {
 		return nil, nil, fmt.Errorf("tree.Root (new): %w", err)
@@ -526,8 +495,7 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 		overwrittenBallotStrs[i] = ballotToFrStrings(ob)
 	}
 	ballotProofs := &davinci.BallotProofData{
-		OldResultsAdd:      frAccumToStrings(oldResultsAdd),
-		OldResultsSub:      frAccumToStrings(oldResultsSub),
+		OldResults:         frAccumToStrings(oldResults),
 		VoterBallots:       voterBallotStrs,
 		OverwrittenBallots: overwrittenBallotStrs,
 	}
@@ -540,8 +508,7 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 		NewStateRoot:     newRoot,
 		VoteIDSmt:        voteIDChain,
 		BallotSmt:        ballotChain,
-		ResultsAddSmt:    &resultsAddEntry,
-		ResultsSubSmt:    resultsSubEntry,
+		ResultsSmt:       &resultsEntry,
 		ProcessSmt:       processSmtProofs,
 		BallotProofs:     ballotProofs,
 	}, overwrittenBallots, nil

@@ -81,8 +81,7 @@ pub struct StateData {
     pub new_state_root: [u64; 4],
     pub vote_id_chain: Vec<SmtEntry>,
     pub ballot_chain: Vec<SmtEntry>,
-    pub results_add: Option<SmtEntry>,
-    pub results_sub: Option<SmtEntry>,
+    pub results: Option<SmtEntry>,
     /// Exactly 4 read-proofs: processID(0x0), ballotMode(0x2), encKey(0x3), censusOrigin(0x6).
     pub process_proofs: Vec<SmtEntry>,
     /// Optional ballot proof data for result accumulator verification.
@@ -92,13 +91,12 @@ pub struct StateData {
 
 /// Result accumulator ballot data for binary serialization.
 /// Contains the old results, per-voter ballots, and overwritten ballots needed
-/// to verify the homomorphic tally: NewResultsAdd = OldResultsAdd + Σ(voter_ballots).
+/// to verify the net homomorphic tally:
+/// NewResults = OldResults + Σ(voter_ballots) − Σ(overwritten_ballots).
 #[derive(Debug, Clone)]
 pub struct BallotProofData {
-    /// Previous ResultsAdd leaf value (32 BN254 Fr elements).
-    pub old_results_add: Vec<[u64; 4]>,
-    /// Previous ResultsSub leaf value (32 BN254 Fr elements).
-    pub old_results_sub: Vec<[u64; 4]>,
+    /// Previous net Results leaf value (32 BN254 Fr elements).
+    pub old_results: Vec<[u64; 4]>,
     /// Per-voter re-encrypted ballots (32 Fr elements each).
     pub voter_ballots: Vec<Vec<[u64; 4]>>,
     /// Per-overwrite old ballot data (32 Fr elements each).
@@ -123,22 +121,8 @@ pub fn write_state_block(sd: &StateData) -> Result<Vec<u8>> {
     // Ballot chain
     write_smt_chain(&mut buf, &sd.ballot_chain)?;
 
-    // ResultsAdd (0 or 1)
-    write_optional_smt(&mut buf, sd.results_add.as_ref())?;
-
-    // ResultsSub (0 or 1, same n_levels as resultsAdd)
-    let results_n_levels = sd.results_add.as_ref()
-        .map(|r| r.siblings.len())
-        .or_else(|| sd.results_sub.as_ref().map(|r| r.siblings.len()))
-        .unwrap_or(0);
-    let has_sub = sd.results_sub.is_some();
-    buf.extend_from_slice(&(has_sub as u64).to_le_bytes());
-    if let Some(r) = &sd.results_sub {
-        if r.siblings.len() != results_n_levels && results_n_levels > 0 {
-            bail!("results_sub sibling count {} != results_add {}", r.siblings.len(), results_n_levels);
-        }
-        write_smt_entry_body(&mut buf, r);
-    }
+    // Net Results transition (0 or 1)
+    write_optional_smt(&mut buf, sd.results.as_ref())?;
 
     // Process read-proofs: write n (0 or 4), then n_levels + entries only when n>0.
     if !sd.process_proofs.is_empty() && sd.process_proofs.len() != 4 {
@@ -162,15 +146,10 @@ pub fn write_state_block(sd: &StateData) -> Result<Vec<u8>> {
     if let Some(bp) = &sd.ballot_proof_data {
         buf.extend_from_slice(&1u64.to_le_bytes()); // has_ballot_data = true
 
-        if bp.old_results_add.len() != 32 {
-            bail!("old_results_add must have 32 elements, got {}", bp.old_results_add.len());
+        if bp.old_results.len() != 32 {
+            bail!("old_results must have 32 elements, got {}", bp.old_results.len());
         }
-        for fr in &bp.old_results_add { write_u64_slice(&mut buf, fr); }
-
-        if bp.old_results_sub.len() != 32 {
-            bail!("old_results_sub must have 32 elements, got {}", bp.old_results_sub.len());
-        }
-        for fr in &bp.old_results_sub { write_u64_slice(&mut buf, fr); }
+        for fr in &bp.old_results { write_u64_slice(&mut buf, fr); }
 
         buf.extend_from_slice(&(bp.voter_ballots.len() as u64).to_le_bytes());
         for (i, vb) in bp.voter_ballots.iter().enumerate() {

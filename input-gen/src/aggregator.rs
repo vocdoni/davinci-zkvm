@@ -236,20 +236,14 @@ pub fn build_fold_input(
 /// `[c1x, c1y, c2x, c2y] x 8`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultsPayload {
-    /// ResultsAdd accumulator (state key 0x04): 32 TE coordinates.
-    pub add_ballot: Vec<String>,
-    /// ResultsSub accumulator (state key 0x05): 32 TE coordinates.
-    pub sub_ballot: Vec<String>,
-    /// Claimed plaintexts of the add accumulator.
-    pub add_results: Vec<u64>,
-    /// Claimed plaintexts of the sub accumulator.
-    pub sub_results: Vec<u64>,
-    /// 16 Chaum-Pedersen proofs: first 8 for add, last 8 for sub.
+    /// Net Results accumulator (state key 0x04): 32 TE coordinates.
+    pub ballot: Vec<String>,
+    /// Claimed plaintexts of the net accumulator.
+    pub results: Vec<u64>,
+    /// 8 Chaum-Pedersen proofs, one per ciphertext.
     pub cp_proofs: Vec<CpProofJson>,
-    /// Inclusion siblings for the ResultsAdd leaf, root→leaf, zero-padded.
-    pub add_siblings: Vec<String>,
-    /// Inclusion siblings for the ResultsSub leaf; same length as add_siblings.
-    pub sub_siblings: Vec<String>,
+    /// Inclusion siblings for the Results leaf, root→leaf, zero-padded.
+    pub siblings: Vec<String>,
 }
 
 /// One Chaum-Pedersen decryption proof (TE coordinates, LE hex).
@@ -265,26 +259,24 @@ pub struct CpProofJson {
 impl ResultsPayload {
     /// Encode to the guest results frame (see circuit-aggregator main.rs).
     pub fn encode(&self) -> Result<Vec<u8>> {
-        if self.add_ballot.len() != 32 || self.sub_ballot.len() != 32 {
-            bail!("ballots must have 32 coordinates each");
+        if self.ballot.len() != 32 {
+            bail!("ballot must have 32 coordinates");
         }
-        if self.add_results.len() != 8 || self.sub_results.len() != 8 {
-            bail!("results must have 8 values each");
+        if self.results.len() != 8 {
+            bail!("results must have 8 values");
         }
-        if self.cp_proofs.len() != 16 {
-            bail!("expected 16 CP proofs, got {}", self.cp_proofs.len());
+        if self.cp_proofs.len() != 8 {
+            bail!("expected 8 CP proofs, got {}", self.cp_proofs.len());
         }
-        if self.add_siblings.len() != self.sub_siblings.len() || self.add_siblings.is_empty() {
-            bail!("sibling lists must be equal length and non-empty");
+        if self.siblings.is_empty() {
+            bail!("sibling list must be non-empty");
         }
-        let n_levels = self.add_siblings.len();
-        let mut out = Vec::with_capacity(2 * 1024 + 128 + 16 * 160 + 8 + 2 * n_levels * 32);
-        for (name, list) in [("add_ballot", &self.add_ballot), ("sub_ballot", &self.sub_ballot)] {
-            for (i, c) in list.iter().enumerate() {
-                out.extend_from_slice(&hex32_le(&format!("{}[{}]", name, i), c)?);
-            }
+        let n_levels = self.siblings.len();
+        let mut out = Vec::with_capacity(1024 + 64 + 8 * 160 + 8 + n_levels * 32);
+        for (i, c) in self.ballot.iter().enumerate() {
+            out.extend_from_slice(&hex32_le(&format!("ballot[{}]", i), c)?);
         }
-        for r in self.add_results.iter().chain(self.sub_results.iter()) {
+        for r in self.results.iter() {
             out.extend_from_slice(&r.to_le_bytes());
         }
         for (i, p) in self.cp_proofs.iter().enumerate() {
@@ -293,10 +285,8 @@ impl ResultsPayload {
             }
         }
         out.extend_from_slice(&(n_levels as u64).to_le_bytes());
-        for (name, list) in [("add_siblings", &self.add_siblings), ("sub_siblings", &self.sub_siblings)] {
-            for (i, s) in list.iter().enumerate() {
-                out.extend_from_slice(&hex32_le(&format!("{}[{}]", name, i), s)?);
-            }
+        for (i, s) in self.siblings.iter().enumerate() {
+            out.extend_from_slice(&hex32_le(&format!("siblings[{}]", i), s)?);
         }
         Ok(out)
     }

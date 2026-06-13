@@ -217,24 +217,21 @@ func TestNewBallotProofData(t *testing.T) {
 		return vals
 	}
 
-	bp := NewBallotProofData(make32(0), make32(100), [][]*big.Int{make32(200)}, nil)
+	bp := NewBallotProofData(make32(0), [][]*big.Int{make32(100)}, [][]*big.Int{make32(200)})
 
-	if len(bp.OldResultsAdd) != 32 {
-		t.Fatalf("OldResultsAdd: expected 32, got %d", len(bp.OldResultsAdd))
-	}
-	if len(bp.OldResultsSub) != 32 {
-		t.Fatalf("OldResultsSub: expected 32, got %d", len(bp.OldResultsSub))
+	if len(bp.OldResults) != 32 {
+		t.Fatalf("OldResults: expected 32, got %d", len(bp.OldResults))
 	}
 	if len(bp.VoterBallots) != 1 {
 		t.Fatalf("VoterBallots: expected 1, got %d", len(bp.VoterBallots))
 	}
-	if len(bp.OverwrittenBallots) != 0 {
-		t.Fatalf("OverwrittenBallots: expected 0, got %d", len(bp.OverwrittenBallots))
+	if len(bp.OverwrittenBallots) != 1 {
+		t.Fatalf("OverwrittenBallots: expected 1, got %d", len(bp.OverwrittenBallots))
 	}
 
 	// Verify hex encoding: first element should be bigIntToHex32BE(big.NewInt(0))
-	if bp.OldResultsAdd[0] != bigIntToHex32BE(big.NewInt(0)) {
-		t.Errorf("OldResultsAdd[0] = %s, want %s", bp.OldResultsAdd[0], bigIntToHex32BE(big.NewInt(0)))
+	if bp.OldResults[0] != bigIntToHex32BE(big.NewInt(0)) {
+		t.Errorf("OldResults[0] = %s, want %s", bp.OldResults[0], bigIntToHex32BE(big.NewInt(0)))
 	}
 }
 
@@ -293,7 +290,7 @@ func TestProveBatchRoundTrip(t *testing.T) {
 				Census: CensusProofFromBigInts(big.NewInt(1), big.NewInt(2), 0, nil),
 			},
 		},
-		State: NewStateTransitionData(1, 0, big.NewInt(1), big.NewInt(2), big.NewInt(3), nil, nil, nil, nil, nil),
+		State: NewStateTransitionData(1, 0, big.NewInt(1), big.NewInt(2), big.NewInt(3), nil, nil, nil, nil),
 	}
 
 	req, err := batch.toRequest()

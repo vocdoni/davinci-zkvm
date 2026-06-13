@@ -15,14 +15,11 @@
 //      finalize: one results frame (see RESULTS FRAME below)
 //
 // RESULTS FRAME (finalize mode, all LE):
-//   add_ballot   32 x 32B   TE coords of the ResultsAdd accumulator (8 ciphertexts)
-//   sub_ballot   32 x 32B   TE coords of the ResultsSub accumulator
-//   add_results   8 x u64   claimed plaintexts of add_ballot
-//   sub_results   8 x u64   claimed plaintexts of sub_ballot
-//   cp proofs    16 x 160B  A1x A1y A2x A2y Z (32B each); first 8 = add, last 8 = sub
-//   n_levels     u64        SMT depth (siblings padded to this length)
-//   add_siblings n x 32B    inclusion siblings for the ResultsAdd leaf (key 0x04)
-//   sub_siblings n x 32B    inclusion siblings for the ResultsSub leaf (key 0x05)
+//   ballot     32 x 32B   TE coords of the net Results accumulator (8 ciphertexts)
+//   results     8 x u64   claimed plaintexts of ballot
+//   cp proofs   8 x 160B  A1x A1y A2x A2y Z (32B each), one per ciphertext
+//   n_levels    u64       SMT depth (siblings padded to this length)
+//   siblings    n x 32B   inclusion siblings for the Results leaf (key 0x04)
 //
 // Proof blob layout (u64 LE words, `get_proof_bytes()` from ZisK v0.18.0):
 //   [minimal][n_publics=68][program_vk(4)][publics(64)][proof][zisk_vk(4)]
@@ -123,16 +120,15 @@ fn subtree_root(leaves: &[(FrRaw, FrRaw)], level: usize) -> FrRaw {
     }
 }
 
-/// Genesis state root: the 6 reserved config leaves in an otherwise empty
+/// Genesis state root: the 5 reserved config leaves in an otherwise empty
 /// arbo SHA-256 SMT. Mirrors davinci-node `state.Initialize()`.
 fn genesis_root(cfg: &Config) -> FrRaw {
     let zero_results = ballot_leaf_hash(&circuit_primitives::results::zero_ballot());
-    let leaves: [(FrRaw, FrRaw); 6] = [
+    let leaves: [(FrRaw, FrRaw); 5] = [
         ([0x00, 0, 0, 0], cfg.process_id),                       // ProcessID
         ([0x02, 0, 0, 0], cfg.ballot_mode),                      // BallotMode
         ([0x03, 0, 0, 0], hash_enc_key(&cfg.enc_x, &cfg.enc_y)), // EncryptionKey
-        ([0x04, 0, 0, 0], zero_results),                         // ResultsAdd
-        ([0x05, 0, 0, 0], zero_results),                         // ResultsSub
+        ([0x04, 0, 0, 0], zero_results),                         // Results (net)
         ([0x06, 0, 0, 0], [cfg.census_origin, 0, 0, 0]),         // CensusOrigin
     ];
     subtree_root(&leaves, 0)
@@ -159,84 +155,72 @@ fn u32x8_to_fr(v: &[u32; 8]) -> FrRaw {
 
 /// Finalize mode: parse and verify the results frame against the chain's
 /// final `state_root` and the config's encryption key, filling
-/// `results_u32` with the plaintext tally `add[i] - sub[i]` (8 x u64 as
-/// 16 LE u32 words). Panics on any invalid proof.
+/// `results_u32` with the plaintext tally (8 x u64 as 16 LE u32 words).
+/// The single net accumulator decrypts straight to the result; non-negativity
+/// is inherent in the bounded discrete-log recovery, so no add−sub guard is
+/// needed. Panics on any invalid proof.
 fn verify_results(frame: &[u8], cfg: &Config, state_root: &[u32; 8], results_u32: &mut [u32; 16]) {
     const BALLOT_BYTES: usize = 32 * 32;
     const CP_BYTES: usize = 160;
-    let fixed = BALLOT_BYTES * 2 + 64 + 64 + 16 * CP_BYTES + 8;
+    let fixed = BALLOT_BYTES + 64 + 8 * CP_BYTES + 8;
     assert!(frame.len() >= fixed, "results frame too short");
     let fr_at = |off: usize| le_to_fr(frame[off..off + 32].try_into().unwrap());
     let u64_at = |off: usize| u64::from_le_bytes(frame[off..off + 8].try_into().unwrap());
 
-    let mut add_ballot = [ZERO_FR; 32];
-    let mut sub_ballot = [ZERO_FR; 32];
+    let mut ballot = [ZERO_FR; 32];
     for i in 0..32 {
-        add_ballot[i] = fr_at(i * 32);
-        sub_ballot[i] = fr_at(BALLOT_BYTES + i * 32);
+        ballot[i] = fr_at(i * 32);
     }
-    let mut off = BALLOT_BYTES * 2;
-    let mut add_results = [0u64; 8];
-    let mut sub_results = [0u64; 8];
+    let mut off = BALLOT_BYTES;
+    let mut results = [0u64; 8];
     for i in 0..8 {
-        add_results[i] = u64_at(off + i * 8);
-        sub_results[i] = u64_at(off + 64 + i * 8);
+        results[i] = u64_at(off + i * 8);
     }
-    off += 128;
+    off += 64;
 
-    // Chaum-Pedersen decryption proofs: 8 for the add accumulator, 8 for sub.
+    // Chaum-Pedersen decryption proofs: one per ciphertext.
     let enc_key = (cfg.enc_x, cfg.enc_y);
-    for (bi, (ballot, results)) in
-        [(&add_ballot, &add_results), (&sub_ballot, &sub_results)].iter().enumerate()
-    {
-        for i in 0..8 {
-            let p = off + (bi * 8 + i) * CP_BYTES;
-            let proof = CpProof {
-                a1: (fr_at(p), fr_at(p + 32)),
-                a2: (fr_at(p + 64), fr_at(p + 96)),
-                z: fr_at(p + 128),
-            };
-            let c1 = (ballot[i * 4], ballot[i * 4 + 1]);
-            let c2 = (ballot[i * 4 + 2], ballot[i * 4 + 3]);
-            assert!(
-                verify_decryption(&enc_key, &c1, &c2, results[i], &proof),
-                "CP proof {} of accumulator {} failed", i, bi
-            );
-        }
+    for i in 0..8 {
+        let p = off + i * CP_BYTES;
+        let proof = CpProof {
+            a1: (fr_at(p), fr_at(p + 32)),
+            a2: (fr_at(p + 64), fr_at(p + 96)),
+            z: fr_at(p + 128),
+        };
+        let c1 = (ballot[i * 4], ballot[i * 4 + 1]);
+        let c2 = (ballot[i * 4 + 2], ballot[i * 4 + 3]);
+        assert!(
+            verify_decryption(&enc_key, &c1, &c2, results[i], &proof),
+            "CP proof {} failed", i
+        );
     }
-    off += 16 * CP_BYTES;
+    off += 8 * CP_BYTES;
 
-    // SMT inclusion of both accumulator leaves under the final state root.
+    // SMT inclusion of the net Results leaf under the final state root.
     // An identity update (fnc=(0,1), old == new) through the processor
     // proves the leaf is present with exactly this value.
     let n_levels = u64_at(off) as usize;
     off += 8;
-    assert_eq!(frame.len(), off + 2 * n_levels * 32, "bad results frame length");
+    assert_eq!(frame.len(), off + n_levels * 32, "bad results frame length");
     let root = u32x8_to_fr(state_root);
-    for (k, (key, ballot)) in
-        [([0x04u64, 0, 0, 0], &add_ballot), ([0x05, 0, 0, 0], &sub_ballot)].iter().enumerate()
-    {
-        let sib_off = off + k * n_levels * 32;
-        let siblings: Vec<FrRaw> = (0..n_levels).map(|i| fr_at(sib_off + i * 32)).collect();
-        let leaf = ballot_leaf_hash(ballot);
-        let t = SmtTransition {
-            old_root: root,
-            new_root: root,
-            old_key: *key,
-            old_value: leaf,
-            is_old0: false,
-            new_key: *key,
-            new_value: leaf,
-            fnc0: false,
-            fnc1: true,
-            siblings,
-        };
-        assert!(verify_transition(&t), "results leaf {:#x} inclusion failed", key[0]);
-    }
+    let siblings: Vec<FrRaw> = (0..n_levels).map(|i| fr_at(off + i * 32)).collect();
+    let leaf = ballot_leaf_hash(&ballot);
+    let t = SmtTransition {
+        old_root: root,
+        new_root: root,
+        old_key: [0x04, 0, 0, 0],
+        old_value: leaf,
+        is_old0: false,
+        new_key: [0x04, 0, 0, 0],
+        new_value: leaf,
+        fnc0: false,
+        fnc1: true,
+        siblings,
+    };
+    assert!(verify_transition(&t), "results leaf 0x04 inclusion failed");
 
     for i in 0..8 {
-        assert!(add_results[i] >= sub_results[i], "negative result at field {}", i);
-        let r = add_results[i] - sub_results[i];
+        let r = results[i];
         results_u32[i * 2] = (r & 0xFFFF_FFFF) as u32;
         results_u32[i * 2 + 1] = (r >> 32) as u32;
     }
