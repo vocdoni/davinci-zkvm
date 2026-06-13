@@ -17,9 +17,9 @@
 //! ## Hardware acceleration
 //!
 //! All BN254 Fr field operations are backed by the ZisK `arith256_mod` precompile
-//! via the `bn254_fr` module.  Each scalar multiplication (256-bit double-and-add)
-//! does ~5,000 field operations, so the ~50x speedup from the precompile is
-//! significant for batches with many voters.
+//! via the `bn254_fr` module.  Re-encryption scalar muls use 4-bit fixed-base
+//! window tables (built once per batch for B8 and the election public key),
+//! cutting each 256-bit mul from ~384 point ops to at most 63 additions.
 
 use crate::bn254_fr::{self, BnFr};
 use crate::poseidon::poseidon1;
@@ -95,30 +95,105 @@ impl BJJProj {
         BJJProj { x: x3, y: y3, z: z3 }
     }
 
+    /// Projective twisted Edwards doubling (dbl-2008-bbjlp formula).
+    /// Cheaper than `add(self, self)`: ~14 field ops vs ~19.
+    /// https://hyperelliptic.org/EFD/g1p/auto-twisted-projective.html#doubling-dbl-2008-bbjlp
+    fn dbl(&self) -> BJJProj {
+        let b = bn254_fr::sqr(&bn254_fr::add(&self.x, &self.y)); // B = (X1+Y1)^2
+        let c = bn254_fr::sqr(&self.x);                          // C = X1^2
+        let d = bn254_fr::sqr(&self.y);                          // D = Y1^2
+        let e = bn254_fr::mul(&CURVE_A, &c);                     // E = a*C
+        let f = bn254_fr::add(&e, &d);                           // F = E + D
+        let h = bn254_fr::sqr(&self.z);                          // H = Z1^2
+        let j = bn254_fr::sub(&f, &bn254_fr::add(&h, &h));       // J = F - 2H
+        let bcd = bn254_fr::sub(&bn254_fr::sub(&b, &c), &d);
+        let x3 = bn254_fr::mul(&bcd, &j);                        // X3 = (B-C-D)*J
+        let y3 = bn254_fr::mul(&f, &bn254_fr::sub(&e, &d));      // Y3 = F*(E-D)
+        let z3 = bn254_fr::mul(&f, &j);                          // Z3 = F*J
+        BJJProj { x: x3, y: y3, z: z3 }
+    }
+
     /// Convert to affine: (X/Z, Y/Z).
     fn to_affine(&self) -> (BnFr, BnFr) {
         let z_inv = bn254_fr::inv(&self.z);
         (bn254_fr::mul(&self.x, &z_inv), bn254_fr::mul(&self.y, &z_inv))
     }
+
+    /// Projective equality against an affine point: `(X/Z, Y/Z) == (ax, ay)`,
+    /// checked as `X == ax*Z && Y == ay*Z`. Avoids the field inversion in
+    /// `to_affine`. Valid curve points have Z != 0, so this is exact.
+    fn eq_affine(&self, ax: &BnFr, ay: &BnFr) -> bool {
+        bn254_fr::mul(ax, &self.z) == self.x && bn254_fr::mul(ay, &self.z) == self.y
+    }
 }
 
 // Scalar multiplication
 
-/// Scalar multiply: `scalar * point` using double-and-add (LSB-first).
+/// Scalar multiply: `scalar * point` using double-and-add (LSB-first),
+/// stopping at the highest set bit (small scalars like CP's `msg` cost
+/// proportionally less).
 fn scalar_mult(point: &BJJProj, scalar: &FrRaw) -> BJJProj {
+    let top = match (0..4).rev().find(|&i| scalar[i] != 0) {
+        None => return BJJProj::identity(),
+        Some(t) => t,
+    };
     let mut result = BJJProj::identity();
     let mut exp = point.clone();
-    for i in 0..4 {
+    for i in 0..=top {
         let mut word = scalar[i];
-        for _ in 0..64 {
+        let bits = if i == top { 64 - word.leading_zeros() } else { 64 };
+        for _ in 0..bits {
             if (word & 1) == 1 {
                 result = result.add(&exp);
             }
-            exp = exp.add(&exp);
+            exp = exp.dbl();
             word >>= 1;
         }
     }
     result
+}
+
+/// Precomputed 4-bit window table for a fixed base point.
+///
+/// `windows[w][v-1] = (v << 4w) * P` for w in 0..64, v in 1..=15, so a
+/// 256-bit scalar mul is at most 63 point additions (zero nibbles skipped)
+/// with no doublings.  Building the table costs ~960 adds + 256 dbls, paid
+/// once per batch; each re-encryption entry then saves ~2x256 dbls + adds,
+/// so it amortizes after ~2 entries.
+struct BjjFixedBase {
+    windows: Vec<[BJJProj; 15]>,
+}
+
+impl BjjFixedBase {
+    fn new(x: &FrRaw, y: &FrRaw) -> Self {
+        let mut windows = Vec::with_capacity(64);
+        let mut base = BJJProj::from_affine(*x, *y);
+        for _ in 0..64 {
+            let mut acc = BJJProj::identity();
+            let entries: [BJJProj; 15] = core::array::from_fn(|_| {
+                acc = acc.add(&base);
+                acc.clone()
+            });
+            windows.push(entries);
+            base = base.dbl().dbl().dbl().dbl();
+        }
+        BjjFixedBase { windows }
+    }
+
+    fn mul(&self, scalar: &FrRaw) -> BJJProj {
+        let mut result = BJJProj::identity();
+        for i in 0..4 {
+            let mut word = scalar[i];
+            for j in 0..16 {
+                let nib = (word & 0xF) as usize;
+                if nib != 0 {
+                    result = result.add(&self.windows[i * 16 + j][nib - 1]);
+                }
+                word >>= 4;
+            }
+        }
+        result
+    }
 }
 
 // Curve membership
@@ -137,14 +212,13 @@ fn is_on_bjj_curve(x: &BnFr, y: &BnFr) -> bool {
 
 /// Verify that `reencrypted[i] = original[i] + encZero(k', pubKey)` for all i.
 /// `k` is the raw re-encryption seed; `k' = poseidon1(k)` is derived inside.
-/// `pub_key` is the ElGamal encryption public key point.
 /// All 8 fields use the same delta since `EncryptedZero` uses the same k' for all fields.
-/// The public key is validated to be on the BabyJubJub curve before use, preventing
-/// degenerate inputs from causing silent incorrect results.
-pub fn verify_reencryption(
+/// `b8_table` / `pk_table` are the fixed-base window tables for B8 and the
+/// (already curve-validated) ElGamal public key.
+fn verify_reencryption(
     k: &FrRaw,
-    pub_key_x: &FrRaw,
-    pub_key_y: &FrRaw,
+    b8_table: &BjjFixedBase,
+    pk_table: &BjjFixedBase,
     original: &[BjjCiphertext],
     reencrypted: &[BjjCiphertext],
 ) -> bool {
@@ -152,35 +226,26 @@ pub fn verify_reencryption(
         return false;
     }
 
-    // Validate public key is on the BabyJubJub curve.
-    if !is_on_bjj_curve(pub_key_x, pub_key_y) {
-        return false;
-    }
-
     // k' = poseidon1(k)
     let k_prime = poseidon1(k);
 
-    // delta1 = k' * B8
-    let b8 = BJJProj::from_affine(B8X_LE, B8Y_LE);
-    let delta1_proj = scalar_mult(&b8, &k_prime);
+    // delta1 = k' * B8, delta2 = k' * pubKey
+    let delta1_proj = b8_table.mul(&k_prime);
+    let delta2_proj = pk_table.mul(&k_prime);
 
-    // delta2 = k' * pubKey
-    let pub_key_proj = BJJProj::from_affine(*pub_key_x, *pub_key_y);
-    let delta2_proj = scalar_mult(&pub_key_proj, &k_prime);
-
-    // For each field: newC1 = origC1 + delta1, newC2 = origC2 + delta2
+    // For each field: newC1 = origC1 + delta1, newC2 = origC2 + delta2.
+    // Compare the expected projective point against the claimed affine one by
+    // cross-multiplication, skipping the per-point field inversion.
     for i in 0..original.len() {
         let orig1 = BJJProj::from_affine(original[i].c1x, original[i].c1y);
         let expected1 = orig1.add(&delta1_proj);
-        let (ex1, ey1) = expected1.to_affine();
-        if ex1 != reencrypted[i].c1x || ey1 != reencrypted[i].c1y {
+        if !expected1.eq_affine(&reencrypted[i].c1x, &reencrypted[i].c1y) {
             return false;
         }
 
         let orig2 = BJJProj::from_affine(original[i].c2x, original[i].c2y);
         let expected2 = orig2.add(&delta2_proj);
-        let (ex2, ey2) = expected2.to_affine();
-        if ex2 != reencrypted[i].c2x || ey2 != reencrypted[i].c2y {
+        if !expected2.eq_affine(&reencrypted[i].c2x, &reencrypted[i].c2y) {
             return false;
         }
     }
@@ -189,6 +254,8 @@ pub fn verify_reencryption(
 
 /// Verify all re-encryption entries from the ParsedInput REENCBLK.
 /// Returns true if all are valid (or if the block is absent).
+/// The public key is curve-checked once and the fixed-base window tables
+/// for B8 and the public key are built once, shared by all entries.
 pub fn verify_batch_from_parsed(
     reenc_pub_key: &Option<(FrRaw, FrRaw)>,
     reenc_entries: &[ReencEntry],
@@ -201,11 +268,21 @@ pub fn verify_batch_from_parsed(
         }
         Some(pk) => pk,
     };
+    // No entries: nothing to re-encrypt, so skip the fixed-base table build.
+    if reenc_entries.is_empty() {
+        return true;
+    }
+    if !is_on_bjj_curve(pub_key_x, pub_key_y) {
+        *fail_mask |= FAIL_REENC;
+        return false;
+    }
+    let b8_table = BjjFixedBase::new(&B8X_LE, &B8Y_LE);
+    let pk_table = BjjFixedBase::new(pub_key_x, pub_key_y);
     for entry in reenc_entries {
         if !verify_reencryption(
             &entry.k,
-            pub_key_x,
-            pub_key_y,
+            &b8_table,
+            &pk_table,
             &entry.original,
             &entry.reencrypted,
         ) {
@@ -246,7 +323,67 @@ pub fn bjj_neg(p: &BjjAffine) -> BjjAffine {
     (bn254_fr::neg(&p.0), p.1)
 }
 
+/// Running point sum kept in projective coordinates, so a chain of N
+/// additions costs one field inversion total (in `finish`) instead of
+/// one per addition.
+pub struct BjjAccumulator(BJJProj);
+
+impl BjjAccumulator {
+    pub fn new(p: &BjjAffine) -> Self {
+        BjjAccumulator(BJJProj::from_affine(p.0, p.1))
+    }
+
+    pub fn add(&mut self, p: &BjjAffine) {
+        self.0 = self.0.add(&BJJProj::from_affine(p.0, p.1));
+    }
+
+    pub fn finish(&self) -> BjjAffine {
+        self.0.to_affine()
+    }
+}
+
 /// Curve membership check for an affine TE point.
 pub fn bjj_on_curve(p: &BjjAffine) -> bool {
     is_on_bjj_curve(&p.0, &p.1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SCALARS: [[u64; 4]; 4] = [
+        [1, 0, 0, 0],
+        [0xF0F0F0F0F0F0F0F0, 0x0123456789ABCDEF, 0xFFFFFFFFFFFFFFFF, 0x0000000000000001],
+        [0xDEADBEEFCAFEBABE, 0, 0x8000000000000000, 0x00FFFFFFFFFFFFFF],
+        [0, 0, 0, 0],
+    ];
+
+    #[test]
+    fn dbl_matches_add_self() {
+        let p = BJJProj::from_affine(B8X_LE, B8Y_LE);
+        let q = p.add(&p).add(&p); // odd multiple, generic point
+        assert_eq!(q.dbl().to_affine(), q.add(&q).to_affine());
+    }
+
+    #[test]
+    fn fixed_base_matches_double_and_add() {
+        let table = BjjFixedBase::new(&B8X_LE, &B8Y_LE);
+        let b8 = BJJProj::from_affine(B8X_LE, B8Y_LE);
+        for s in &SCALARS {
+            assert_eq!(table.mul(s).to_affine(), scalar_mult(&b8, s).to_affine());
+        }
+    }
+
+    #[test]
+    fn eq_affine_matches_to_affine() {
+        let b8 = BJJProj::from_affine(B8X_LE, B8Y_LE);
+        for s in &SCALARS {
+            let p = scalar_mult(&b8, s); // non-trivial Z != 1
+            let (ax, ay) = p.to_affine();
+            assert!(p.eq_affine(&ax, &ay));
+            // A wrong affine coordinate must be rejected.
+            let bad = bn254_fr::add(&ax, &bn254_fr::ONE);
+            assert!(!p.eq_affine(&bad, &ay));
+        }
+    }
 }

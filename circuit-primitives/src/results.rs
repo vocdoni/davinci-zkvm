@@ -12,7 +12,7 @@
 //! Additionally verifies that each ballot SMT leaf value equals SHA-256 of the
 //! serialized ballot data, binding the re-encrypted ballot to the state tree.
 
-use crate::babyjubjub::bjj_add;
+use crate::babyjubjub::BjjAccumulator;
 use crate::hash;
 use crate::types::{BallotData, FrRaw, StateBlock, ZERO_FR, FAIL_RESULT_ACCUM, FAIL_LEAF_HASH};
 use crate::bn254_fr::ONE;
@@ -32,12 +32,21 @@ pub fn zero_ballot() -> BallotData {
     b
 }
 
-/// Homomorphic ballot addition: BabyJubJub point addition of each of the
-/// 16 (x, y) coordinate pairs.
-pub fn ballot_add(a: &BallotData, b: &BallotData) -> BallotData {
+/// Homomorphic sum `init + Σ terms` with the 16 point accumulators kept
+/// projective across the whole chain: one field inversion per coordinate
+/// pair total, instead of one per added ballot.
+fn ballot_sum(init: &BallotData, terms: &[BallotData]) -> BallotData {
+    let mut accs: Vec<BjjAccumulator> = (0..BALLOT_FIELDS / 2)
+        .map(|i| BjjAccumulator::new(&(init[i * 2], init[i * 2 + 1])))
+        .collect();
+    for t in terms {
+        for (i, acc) in accs.iter_mut().enumerate() {
+            acc.add(&(t[i * 2], t[i * 2 + 1]));
+        }
+    }
     let mut out = [ZERO_FR; BALLOT_FIELDS];
-    for i in 0..BALLOT_FIELDS / 2 {
-        let p = bjj_add(&(a[i * 2], a[i * 2 + 1]), &(b[i * 2], b[i * 2 + 1]));
+    for (i, acc) in accs.iter().enumerate() {
+        let p = acc.finish();
         out[i * 2] = p.0;
         out[i * 2 + 1] = p.1;
     }
@@ -89,6 +98,43 @@ pub fn ballot_leaf_hash(b: &BallotData) -> FrRaw {
 ///    Only overwritten (UPDATE) votes contribute to ResultsSub.
 /// Returns `true` if all checks pass. Sets `FAIL_LEAF_HASH` or `FAIL_RESULT_ACCUM`
 /// in `fail_mask` on failure.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::babyjubjub::{bjj_add, bjj_generator, bjj_mul, BjjAffine};
+
+    #[test]
+    fn ballot_sum_matches_pairwise_adds() {
+        // Build a few valid ballots out of small multiples of B8.
+        let g = bjj_generator();
+        let pt = |s: u64| -> BjjAffine { bjj_mul(&g, &[s, 0, 0, 0]) };
+        let mk = |seed: u64| -> BallotData {
+            let mut b = [ZERO_FR; BALLOT_FIELDS];
+            for i in 0..BALLOT_FIELDS / 2 {
+                let p = pt(seed + i as u64 + 1);
+                b[i * 2] = p.0;
+                b[i * 2 + 1] = p.1;
+            }
+            b
+        };
+        let init = zero_ballot();
+        let terms = [mk(1), mk(100), mk(7777)];
+
+        let mut expected = init;
+        for t in &terms {
+            for i in 0..BALLOT_FIELDS / 2 {
+                let p = bjj_add(
+                    &(expected[i * 2], expected[i * 2 + 1]),
+                    &(t[i * 2], t[i * 2 + 1]),
+                );
+                expected[i * 2] = p.0;
+                expected[i * 2 + 1] = p.1;
+            }
+        }
+        assert_eq!(ballot_sum(&init, &terms), expected);
+    }
+}
+
 pub fn verify_results(state: &StateBlock, fail_mask: &mut u32) -> bool {
     // When no voter ballots are provided and no voters exist, nothing to check.
     // When voters exist but ballot data is absent, that's a protocol violation.
@@ -150,10 +196,7 @@ pub fn verify_results(state: &StateBlock, fail_mask: &mut u32) -> bool {
     // ResultsAdd accumulation
     // NewResultsAdd = OldResultsAdd + Σ(all voter ballots)
     if let Some(ref r_add) = state.results_add {
-        let mut sum = state.old_results_add;
-        for vb in &state.voter_ballots {
-            sum = ballot_add(&sum, vb);
-        }
+        let sum = ballot_sum(&state.old_results_add, &state.voter_ballots);
         let expected_new_hash = ballot_leaf_hash(&sum);
         if expected_new_hash != r_add.new_value {
             *fail_mask |= FAIL_RESULT_ACCUM;
@@ -174,10 +217,7 @@ pub fn verify_results(state: &StateBlock, fail_mask: &mut u32) -> bool {
     // ResultsSub accumulation
     // NewResultsSub = OldResultsSub + Σ(overwritten ballots)
     if let Some(ref r_sub) = state.results_sub {
-        let mut sum = state.old_results_sub;
-        for ob in &state.overwritten_ballots {
-            sum = ballot_add(&sum, ob);
-        }
+        let sum = ballot_sum(&state.old_results_sub, &state.overwritten_ballots);
         let expected_new_hash = ballot_leaf_hash(&sum);
         if expected_new_hash != r_sub.new_value {
             *fail_mask |= FAIL_RESULT_ACCUM;
