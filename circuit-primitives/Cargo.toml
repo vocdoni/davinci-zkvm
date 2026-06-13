@@ -10,3 +10,8 @@ edition = "2021"
 
 [dependencies]
 ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", tag = "v0.18.0" }
+
+# Test-only: parse the davinci-node-extracted Chaum-Pedersen vectors. Excluded
+# from the guest ELF build (dev-dependencies are not compiled for release).
+[dev-dependencies]
+serde_json = "1"

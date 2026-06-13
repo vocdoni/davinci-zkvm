@@ -87,3 +87,114 @@ pub fn verify_decryption(
     let right2 = bjj_add(&proof.a2, &bjj_mul(&d, &e));
     left2 == right2
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::poseidon::poseidon12;
+    use serde_json::Value;
+
+    const VECTORS: &str = include_str!("../testdata/cp_vectors.json");
+
+    /// Decimal string → FrRaw (little-endian u64 words). Values are < BN254 p.
+    fn dec_to_fr(s: &str) -> FrRaw {
+        let mut limbs = [0u64; 4];
+        for ch in s.bytes() {
+            let digit = (ch - b'0') as u128;
+            let mut carry = digit;
+            for limb in limbs.iter_mut() {
+                let v = (*limb as u128) * 10 + carry;
+                *limb = v as u64;
+                carry = v >> 64;
+            }
+        }
+        limbs
+    }
+
+    fn te_point(v: &Value) -> BjjAffine {
+        (
+            dec_to_fr(v["te_x"].as_str().unwrap()),
+            dec_to_fr(v["te_y"].as_str().unwrap()),
+        )
+    }
+
+    #[test]
+    fn generator_matches_reference() {
+        let root: Value = serde_json::from_str(VECTORS).unwrap();
+        assert_eq!(bjj_generator(), te_point(&root["generator"]));
+    }
+
+    // The Fiat-Shamir hash is the riskiest part of bit-exactness. Check the
+    // standalone Poseidon-12 vector independently of the curve arithmetic.
+    #[test]
+    fn poseidon12_matches_reference() {
+        let root: Value = serde_json::from_str(VECTORS).unwrap();
+        let inputs: Vec<FrRaw> = root["poseidon12_in"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| dec_to_fr(x.as_str().unwrap()))
+            .collect();
+        let arr: [FrRaw; 12] = inputs.try_into().unwrap();
+        let expected = dec_to_fr(root["poseidon12_out"].as_str().unwrap());
+        assert_eq!(poseidon12(&arr), expected);
+    }
+
+    // Full end-to-end: every davinci-node vector must verify, and the
+    // recomputed challenge e must match the reference value bit-for-bit.
+    #[test]
+    fn verifies_all_reference_vectors() {
+        let root: Value = serde_json::from_str(VECTORS).unwrap();
+        let pub_key = te_point(&root["pub_key"]);
+        for (i, vec) in root["vectors"].as_array().unwrap().iter().enumerate() {
+            let c1 = te_point(&vec["c1"]);
+            let c2 = te_point(&vec["c2"]);
+            let msg: u64 = vec["msg"].as_str().unwrap().parse().unwrap();
+            let proof = CpProof {
+                a1: te_point(&vec["a1"]),
+                a2: te_point(&vec["a2"]),
+                z: dec_to_fr(vec["z"].as_str().unwrap()),
+            };
+
+            // Recompute the challenge and compare to the reference e.
+            let m_g = bjj_mul(&bjj_generator(), &[msg, 0, 0, 0]);
+            let d = bjj_add(&c2, &bjj_neg(&m_g));
+            let mut inputs = [bn254_fr::ZERO; 12];
+            for (j, pt) in [&pub_key, &pub_key, &c1, &d, &proof.a1, &proof.a2]
+                .iter()
+                .enumerate()
+            {
+                inputs[j * 2] = te_x_to_rte(&pt.0);
+                inputs[j * 2 + 1] = pt.1;
+            }
+            let e = poseidon12(&inputs);
+            assert_eq!(
+                e,
+                dec_to_fr(vec["e"].as_str().unwrap()),
+                "vector {i}: challenge mismatch"
+            );
+
+            assert!(
+                verify_decryption(&pub_key, &c1, &c2, msg, &proof),
+                "vector {i}: verification failed"
+            );
+        }
+    }
+
+    // A wrong plaintext must be rejected (soundness).
+    #[test]
+    fn rejects_wrong_plaintext() {
+        let root: Value = serde_json::from_str(VECTORS).unwrap();
+        let pub_key = te_point(&root["pub_key"]);
+        let vec = &root["vectors"][0];
+        let c1 = te_point(&vec["c1"]);
+        let c2 = te_point(&vec["c2"]);
+        let msg: u64 = vec["msg"].as_str().unwrap().parse().unwrap();
+        let proof = CpProof {
+            a1: te_point(&vec["a1"]),
+            a2: te_point(&vec["a2"]),
+            z: dec_to_fr(vec["z"].as_str().unwrap()),
+        };
+        assert!(!verify_decryption(&pub_key, &c1, &c2, msg + 1, &proof));
+    }
+}
