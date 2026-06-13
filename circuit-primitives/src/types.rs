@@ -54,7 +54,7 @@ pub const ONE_FR: FrRaw = [1, 0, 0, 0];
 
 /// Maximum number of ballot proofs per batch.
 /// Must be a power of two. Increase here to support larger batches.
-pub const MAX_BATCH_SIZE: usize = 512;
+pub const MAX_BATCH_SIZE: usize = 256;
 
 // Fail-mask bit constants
 // See the module-level table for a complete description of each bit.
