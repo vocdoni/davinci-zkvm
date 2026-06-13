@@ -107,13 +107,10 @@ type StateTransitionData struct {
 	// Keys are in [BallotMin, BallotMax] = [0x10, 0x7FFFFFFFFFFFFFFF].
 	BallotSmt []SmtEntry `json:"ballot_smt"`
 
-	// ResultsAddSmt is the transition that accumulates the homomorphic sum of ballots.
+	// ResultsSmt is the net Results transition (key 0x04):
+	// NewResults = OldResults + Σ(VoterBallots) − Σ(OverwrittenBallots).
 	// Nil if no accumulator update (e.g. all dummy votes).
-	ResultsAddSmt *SmtEntry `json:"results_add_smt,omitempty"`
-
-	// ResultsSubSmt is the transition that records re-encrypted ballots to subtract.
-	// Nil when there are no overwritten votes.
-	ResultsSubSmt *SmtEntry `json:"results_sub_smt,omitempty"`
+	ResultsSmt *SmtEntry `json:"results_smt,omitempty"`
 
 	// ProcessSmt holds exactly 4 read-proofs for config entries in OldStateRoot.
 	// Order: processID (0x0), ballotMode (0x2), encryptionKey (0x3), censusOrigin (0x6).
@@ -122,8 +119,7 @@ type StateTransitionData struct {
 	// BallotProofs holds the result accumulator and leaf hash verification data.
 	// When non-nil, the circuit verifies:
 	//   - Each ballot SMT leaf = SHA-256(serialized_ballot)
-	//   - NewResultsAdd = OldResultsAdd + Σ(VoterBallots)
-	//   - NewResultsSub = OldResultsSub + Σ(OverwrittenBallots)
+	//   - NewResults = OldResults + Σ(VoterBallots) − Σ(OverwrittenBallots)
 	BallotProofs *BallotProofData `json:"ballot_proofs,omitempty"`
 }
 
@@ -131,10 +127,8 @@ type StateTransitionData struct {
 // Each BallotData is 32 hex strings representing 32 BN254 Fr field elements
 // (8 ElGamal ciphertexts × 4 coordinates: C1.X, C1.Y, C2.X, C2.Y).
 type BallotProofData struct {
-	// OldResultsAdd is the previous ResultsAdd leaf value (32 Fr elements, big-endian hex).
-	OldResultsAdd []string `json:"old_results_add"`
-	// OldResultsSub is the previous ResultsSub leaf value (32 Fr elements, big-endian hex).
-	OldResultsSub []string `json:"old_results_sub"`
+	// OldResults is the previous net Results leaf value (32 Fr elements, big-endian hex).
+	OldResults []string `json:"old_results"`
 	// VoterBallots contains the re-encrypted ballot for each voter (same order as BallotSmt).
 	// Each inner slice has exactly 32 big-endian hex strings.
 	VoterBallots [][]string `json:"voter_ballots"`
@@ -305,19 +299,14 @@ type FinalizeRequest struct {
 // 32-byte fields are arbo little-endian hex; ballot coordinates are Twisted
 // Edwards, ciphertext order [c1x, c1y, c2x, c2y] x 8.
 type ResultsPayload struct {
-	// AddBallot is the ResultsAdd accumulator (state key 0x04): 32 coords.
-	AddBallot []string `json:"add_ballot"`
-	// SubBallot is the ResultsSub accumulator (state key 0x05): 32 coords.
-	SubBallot []string `json:"sub_ballot"`
-	// AddResults / SubResults are the claimed plaintexts (8 each).
-	AddResults []uint64 `json:"add_results"`
-	SubResults []uint64 `json:"sub_results"`
-	// CpProofs are 16 Chaum-Pedersen proofs: first 8 add, last 8 sub.
+	// Ballot is the net Results accumulator (state key 0x04): 32 coords.
+	Ballot []string `json:"ballot"`
+	// Results are the claimed plaintexts (8 values).
+	Results []uint64 `json:"results"`
+	// CpProofs are 8 Chaum-Pedersen proofs, one per ciphertext.
 	CpProofs []CpProof `json:"cp_proofs"`
-	// AddSiblings / SubSiblings are inclusion siblings root→leaf,
-	// zero-padded to the same length.
-	AddSiblings []string `json:"add_siblings"`
-	SubSiblings []string `json:"sub_siblings"`
+	// Siblings are inclusion siblings root→leaf, zero-padded.
+	Siblings []string `json:"siblings"`
 }
 
 // CpProof is one Chaum-Pedersen decryption proof (TE coordinates, LE hex).

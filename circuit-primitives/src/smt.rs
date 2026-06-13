@@ -509,12 +509,9 @@ pub fn verify_state(
     // The end of the voteID chain must equal the start of the ballot chain
     // (or new_state_root when no ballot chain is present).
     let after_vote_ids = if state.ballot_chain.is_empty() {
-        match &state.results_add {
+        match &state.results {
             Some(r) => &r.old_root,
-            None => match &state.results_sub {
-                Some(r) => &r.old_root,
-                None => &state.new_state_root,
-            },
+            None => &state.new_state_root,
         }
     } else {
         &state.ballot_chain[0].old_root
@@ -539,12 +536,9 @@ pub fn verify_state(
             break;
         }
     }
-    let after_ballots = match &state.results_add {
+    let after_ballots = match &state.results {
         Some(r) => &r.old_root,
-        None => match &state.results_sub {
-            Some(r) => &r.old_root,
-            None => &state.new_state_root,
-        },
+        None => &state.new_state_root,
     };
     let ballot_start = if state.vote_id_chain.is_empty() {
         &state.old_state_root
@@ -560,33 +554,14 @@ pub fn verify_state(
         FAIL_SMT_BALLOT,
     );
 
-    // Results chain: resultsAdd → resultsSub → new_state_root
-    // Each results transition is verified individually, AND we require that:
-    //   1. resultsAdd.new_root == resultsSub.old_root   (when both present)
-    //   2. Final results root == new_state_root
-    if let Some(r_add) = &state.results_add {
-        if !verify_transition(r_add) {
+    // Results chain: single net Results transition → new_state_root.
+    if let Some(r) = &state.results {
+        if !verify_transition(r) {
             *fail_mask |= FAIL_SMT_RESULTS;
             ok = false;
         }
-        // Determine expected final root after resultsAdd.
-        let expected_add_new = match &state.results_sub {
-            Some(r_sub) => &r_sub.old_root,
-            None => &state.new_state_root,
-        };
-        if ok && r_add.new_root != *expected_add_new {
-            *fail_mask |= FAIL_SMT_RESULTS;
-            ok = false;
-        }
-    }
-
-    if let Some(r_sub) = &state.results_sub {
-        if !verify_transition(r_sub) {
-            *fail_mask |= FAIL_SMT_RESULTS;
-            ok = false;
-        }
-        // resultsSub must terminate at new_state_root.
-        if ok && r_sub.new_root != state.new_state_root {
+        // The Results transition must terminate at new_state_root.
+        if ok && r.new_root != state.new_state_root {
             *fail_mask |= FAIL_SMT_RESULTS;
             ok = false;
         }

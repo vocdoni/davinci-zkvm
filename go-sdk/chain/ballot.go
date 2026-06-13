@@ -88,6 +88,18 @@ func accumAdd(a, b accumBallot) accumBallot {
 	return out
 }
 
+// accumSub subtracts b from a homomorphically: a + (-b), where the TE
+// inverse of (x, y) is (-x, y). Matches davinci-node's Ballot.Neg + Add.
+func accumSub(a, b accumBallot) accumBallot {
+	p := bn254ScalarField
+	var negB accumBallot
+	for i := 0; i < 16; i++ {
+		negB[i*2] = new(big.Int).Mod(new(big.Int).Neg(b[i*2]), p)
+		negB[i*2+1] = b[i*2+1]
+	}
+	return accumAdd(a, negB)
+}
+
 // accumLeafHash computes the SHA-256 leaf value of an accumulator:
 // 32 coordinates as 32-byte big-endian words.
 func accumLeafHash(acc accumBallot) *big.Int {

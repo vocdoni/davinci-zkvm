@@ -347,8 +347,9 @@ func poseidonHasher(a, b *big.Int) *big.Int {
 func bigIntEq(a, b *big.Int) bool { return a.Cmp(b) == 0 }
 
 // Ballot accumulator
-// The circuit accumulates ResultsAdd / ResultsSub homomorphically: BabyJubJub
-// point addition per ciphertext component, like davinci-node's Ballot.Add.
+// The circuit accumulates a single net Results leaf homomorphically: BabyJubJub
+// point add for cast ballots, point subtract for overwritten ones, like
+// davinci-node's Ballot.Add / Neg.
 // The accumulator holds 32 TE coordinates (8 ciphertexts x [c1x c1y c2x c2y]).
 
 // bn254ScalarField is the BN254 scalar field order (Fr).
@@ -423,6 +424,18 @@ func frAccumAdd(a, b frAccumBallot) frAccumBallot {
 		out[i*2], out[i*2+1] = teAdd(a[i*2], a[i*2+1], b[i*2], b[i*2+1])
 	}
 	return out
+}
+
+// frAccumSub subtracts b from a homomorphically: a + (-b), where the TE
+// inverse of (x, y) is (-x, y). Matches davinci-node's Ballot.Neg + Add.
+func frAccumSub(a, b frAccumBallot) frAccumBallot {
+	p := bn254ScalarField
+	var negB frAccumBallot
+	for i := 0; i < 16; i++ {
+		negB[i*2] = new(big.Int).Mod(new(big.Int).Neg(b[i*2]), p)
+		negB[i*2+1] = b[i*2+1]
+	}
+	return frAccumAdd(a, negB)
 }
 
 // frAccumLeafHash computes SHA-256 of the 32 Fr elements (32-byte BE each).

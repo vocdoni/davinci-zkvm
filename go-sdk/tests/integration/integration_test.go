@@ -33,7 +33,7 @@ type batchSpec struct {
 
 // defaultBatches defines how many ballots are in each state-transition batch.
 // The first 20 entries use fresh voters (60 total); the last 2 re-use voters
-// 0-1 and 2-5 to exercise the overwrite (ResultsSub) code path.
+// 0-1 and 2-5 to exercise the overwrite (net subtraction) code path.
 // SeedOffset=7 shifts overwrite seeds to residue 8 mod 16, distinct from the
 // residues (1 or 9) produced by the fresh-vote formula.
 var defaultBatches = []batchSpec{
@@ -149,7 +149,7 @@ func TestChainedStateTransitions(t *testing.T) {
 		}
 
 		// Build re-encryption block before building the state block so the
-		// re-encrypted ballots can be accumulated into ResultsAdd.
+		// re-encrypted ballots can be accumulated into the net Results leaf.
 		reencBlock, reencBallots, err := election.BuildReencBlock(batch.Results)
 		if err != nil {
 			t.Fatalf("transition %d: BuildReencBlock: %v", txIdx, err)

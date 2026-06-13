@@ -1,13 +1,14 @@
 //! Result accumulator and ballot leaf hash verification.
 //!
-//! Implements the homomorphic ballot tally check from the DAVINCI protocol:
-//!   NewResultsAdd = OldResultsAdd + Σ(all voter ballots)
-//!   NewResultsSub = OldResultsSub + Σ(overwritten ballots)
+//! Implements the homomorphic ballot tally check from the DAVINCI protocol,
+//! a single net accumulator:
+//!   NewResults = OldResults + Σ(all voter ballots) − Σ(overwritten ballots)
 //!
 //! Each ballot is 32 BN254 Fr field elements (8 ElGamal ciphertexts × 4 TE
-//! coordinates). Addition is homomorphic: BabyJubJub point addition per
-//! ciphertext component, matching davinci-node's `Ballot.Add`, so the final
-//! accumulator stays a decryptable ElGamal ciphertext.
+//! coordinates). Both operations are homomorphic: BabyJubJub point addition
+//! and subtraction (group inverse via `bjj_neg`) per ciphertext component,
+//! matching davinci-node's `Ballot.Add` / `Ballot.Neg`, so the accumulator
+//! stays a decryptable ElGamal ciphertext.
 //!
 //! Additionally verifies that each ballot SMT leaf value equals SHA-256 of the
 //! serialized ballot data, binding the re-encrypted ballot to the state tree.
@@ -32,16 +33,21 @@ pub fn zero_ballot() -> BallotData {
     b
 }
 
-/// Homomorphic sum `init + Σ terms` with the 16 point accumulators kept
-/// projective across the whole chain: one field inversion per coordinate
-/// pair total, instead of one per added ballot.
-fn ballot_sum(init: &BallotData, terms: &[BallotData]) -> BallotData {
+/// Homomorphic net sum `init + Σ add_terms − Σ sub_terms` with the 16 point
+/// accumulators kept projective across the whole chain: one field inversion
+/// per coordinate pair total, instead of one per added/subtracted ballot.
+fn ballot_net(init: &BallotData, add_terms: &[BallotData], sub_terms: &[BallotData]) -> BallotData {
     let mut accs: Vec<BjjAccumulator> = (0..BALLOT_FIELDS / 2)
         .map(|i| BjjAccumulator::new(&(init[i * 2], init[i * 2 + 1])))
         .collect();
-    for t in terms {
+    for t in add_terms {
         for (i, acc) in accs.iter_mut().enumerate() {
             acc.add(&(t[i * 2], t[i * 2 + 1]));
+        }
+    }
+    for t in sub_terms {
+        for (i, acc) in accs.iter_mut().enumerate() {
+            acc.sub(&(t[i * 2], t[i * 2 + 1]));
         }
     }
     let mut out = [ZERO_FR; BALLOT_FIELDS];
@@ -91,11 +97,9 @@ pub fn ballot_leaf_hash(b: &BallotData) -> FrRaw {
 ///    `SHA256(serialize(ballot)) == ballot_chain[i].new_value`. This binds the
 ///    re-encrypted ballot data to the SMT leaf, preventing the prover from inserting
 ///    arbitrary leaf values.
-/// 2. **ResultsAdd accumulation**: `NewResultsAdd = OldResultsAdd + Σ(voter_ballots)`.
-///    The sum uses element-wise BN254 Fr addition (homomorphic under ElGamal).
-///    The new value is verified against `results_add.new_value` in the SMT.
-/// 3. **ResultsSub accumulation**: `NewResultsSub = OldResultsSub + Σ(overwritten_ballots)`.
-///    Only overwritten (UPDATE) votes contribute to ResultsSub.
+/// 2. **Net Results accumulation**: `NewResults = OldResults + Σ(voter_ballots)
+///    − Σ(overwritten_ballots)`. Homomorphic add/sub on BabyJubJub.
+///    The new value is verified against `results.new_value` in the SMT.
 /// Returns `true` if all checks pass. Sets `FAIL_LEAF_HASH` or `FAIL_RESULT_ACCUM`
 /// in `fail_mask` on failure.
 #[cfg(test)]
@@ -104,7 +108,7 @@ mod tests {
     use crate::babyjubjub::{bjj_add, bjj_generator, bjj_mul, BjjAffine};
 
     #[test]
-    fn ballot_sum_matches_pairwise_adds() {
+    fn ballot_net_matches_pairwise_ops() {
         // Build a few valid ballots out of small multiples of B8.
         let g = bjj_generator();
         let pt = |s: u64| -> BjjAffine { bjj_mul(&g, &[s, 0, 0, 0]) };
@@ -118,10 +122,11 @@ mod tests {
             b
         };
         let init = zero_ballot();
-        let terms = [mk(1), mk(100), mk(7777)];
+        let add_terms = [mk(1), mk(100), mk(7777)];
+        let sub_terms = [mk(100)];
 
         let mut expected = init;
-        for t in &terms {
+        for t in &add_terms {
             for i in 0..BALLOT_FIELDS / 2 {
                 let p = bjj_add(
                     &(expected[i * 2], expected[i * 2 + 1]),
@@ -131,7 +136,15 @@ mod tests {
                 expected[i * 2 + 1] = p.1;
             }
         }
-        assert_eq!(ballot_sum(&init, &terms), expected);
+        for t in &sub_terms {
+            for i in 0..BALLOT_FIELDS / 2 {
+                let neg = crate::babyjubjub::bjj_neg(&(t[i * 2], t[i * 2 + 1]));
+                let p = bjj_add(&(expected[i * 2], expected[i * 2 + 1]), &neg);
+                expected[i * 2] = p.0;
+                expected[i * 2 + 1] = p.1;
+            }
+        }
+        assert_eq!(ballot_net(&init, &add_terms, &sub_terms), expected);
     }
 }
 
@@ -143,12 +156,12 @@ pub fn verify_results(state: &StateBlock, fail_mask: &mut u32) -> bool {
             *fail_mask |= FAIL_RESULT_ACCUM;
             return false;
         }
-        // With no ballots there is nothing to accumulate, so a results
+        // With no ballots there is nothing to accumulate, so the results
         // transition must be absent (the leaf must not change). Otherwise a
         // prover could supply a valid SMT update of the Results leaf to an
         // arbitrary value and chain it to the new state root, injecting a
         // forged tally without any accumulation check binding it.
-        if state.results_add.is_some() || state.results_sub.is_some() {
+        if state.results.is_some() {
             *fail_mask |= FAIL_RESULT_ACCUM;
             return false;
         }
@@ -193,43 +206,23 @@ pub fn verify_results(state: &StateBlock, fail_mask: &mut u32) -> bool {
         }
     }
 
-    // ResultsAdd accumulation
-    // NewResultsAdd = OldResultsAdd + Σ(all voter ballots)
-    if let Some(ref r_add) = state.results_add {
-        let sum = ballot_sum(&state.old_results_add, &state.voter_ballots);
-        let expected_new_hash = ballot_leaf_hash(&sum);
-        if expected_new_hash != r_add.new_value {
+    // Net Results accumulation
+    // NewResults = OldResults + Σ(all voter ballots) − Σ(overwritten ballots)
+    if let Some(ref r) = state.results {
+        let net = ballot_net(&state.old_results, &state.voter_ballots, &state.overwritten_ballots);
+        let expected_new_hash = ballot_leaf_hash(&net);
+        if expected_new_hash != r.new_value {
             *fail_mask |= FAIL_RESULT_ACCUM;
             ok = false;
         }
-        // Also verify old leaf hash matches OldResultsAdd
-        let old_hash = ballot_leaf_hash(&state.old_results_add);
-        if old_hash != r_add.old_value {
+        // Also verify old leaf hash matches OldResults
+        let old_hash = ballot_leaf_hash(&state.old_results);
+        if old_hash != r.old_value {
             *fail_mask |= FAIL_RESULT_ACCUM;
             ok = false;
         }
-    } else if !state.voter_ballots.is_empty() {
-        // ResultsAdd SMT transition is required when there are voter ballots
-        *fail_mask |= FAIL_RESULT_ACCUM;
-        ok = false;
-    }
-
-    // ResultsSub accumulation
-    // NewResultsSub = OldResultsSub + Σ(overwritten ballots)
-    if let Some(ref r_sub) = state.results_sub {
-        let sum = ballot_sum(&state.old_results_sub, &state.overwritten_ballots);
-        let expected_new_hash = ballot_leaf_hash(&sum);
-        if expected_new_hash != r_sub.new_value {
-            *fail_mask |= FAIL_RESULT_ACCUM;
-            ok = false;
-        }
-        let old_hash = ballot_leaf_hash(&state.old_results_sub);
-        if old_hash != r_sub.old_value {
-            *fail_mask |= FAIL_RESULT_ACCUM;
-            ok = false;
-        }
-    } else if !state.overwritten_ballots.is_empty() {
-        // ResultsSub SMT transition is required when there are overwritten ballots
+    } else {
+        // The Results SMT transition is required when there are any ballots.
         *fail_mask |= FAIL_RESULT_ACCUM;
         ok = false;
     }

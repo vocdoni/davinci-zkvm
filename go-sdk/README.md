@@ -94,8 +94,7 @@ type StateTransitionData struct {
     VoteIDSmt       []SmtEntry  // VoteID chain SMT transitions
     BallotSmt       []SmtEntry  // Ballot chain SMT transitions
     ProcessSmt      []SmtEntry  // Process config read-proofs
-    ResultsAddSmt   *SmtEntry   // Results accumulator: add
-    ResultsSubSmt   *SmtEntry   // Results accumulator: subtract
+    ResultsSmt      *SmtEntry   // Net Results accumulator (key 0x04)
     BallotProofs    *BallotProofData // Encrypted ballot data for result verification
 }
 ```

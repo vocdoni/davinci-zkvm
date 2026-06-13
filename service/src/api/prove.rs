@@ -47,8 +47,7 @@ pub async fn submit_prove(
             vote_id_smt_entries = st.vote_id_smt.len(),
             ballot_smt_entries  = st.ballot_smt.len(),
             process_smt_entries = st.process_smt.len(),
-            has_results_add     = st.results_add_smt.is_some(),
-            has_results_sub     = st.results_sub_smt.is_some(),
+            has_results         = st.results_smt.is_some(),
             "State-transition block"
         );
     } else {
@@ -108,8 +107,7 @@ pub async fn submit_prove(
                 new_state_root: davinci_zkvm_input_gen::hex32_to_smt_fr(&st.new_state_root)?,
                 vote_id_chain: smt_entries_from_json(&st.vote_id_smt)?,
                 ballot_chain: smt_entries_from_json(&st.ballot_smt)?,
-                results_add: st.results_add_smt.as_ref().map(|e| smt_entry_from_json(e)).transpose()?,
-                results_sub: st.results_sub_smt.as_ref().map(|e| smt_entry_from_json(e)).transpose()?,
+                results: st.results_smt.as_ref().map(|e| smt_entry_from_json(e)).transpose()?,
                 process_proofs: smt_entries_from_json(&st.process_smt)?,
                 ballot_proof_data: st.ballot_proofs.as_ref().map(ballot_proof_data_from_json).transpose()?,
             };
@@ -255,8 +253,7 @@ fn ballot_proof_data_from_json(
         v.iter().map(|s| be_hex32_to_fr_le(s)).collect()
     };
     Ok(davinci_zkvm_input_gen::BallotProofData {
-        old_results_add: frs(&bp.old_results_add)?,
-        old_results_sub: frs(&bp.old_results_sub)?,
+        old_results: frs(&bp.old_results)?,
         voter_ballots: bp.voter_ballots.iter().map(|b| frs(b)).collect::<anyhow::Result<_>>()?,
         overwritten_ballots: bp.overwritten_ballots.iter().map(|b| frs(b)).collect::<anyhow::Result<_>>()?,
     })

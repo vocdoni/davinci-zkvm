@@ -51,29 +51,17 @@ func EncodeStateBlock(sd *StateTransitionData) ([]byte, error) {
 	}
 	buf = append(buf, chain...)
 
-	// ResultsAdd (0 or 1)
+	// Net Results transition (0 or 1)
 	resultsNLevels := 0
-	if sd.ResultsAddSmt != nil {
-		resultsNLevels = len(sd.ResultsAddSmt.Siblings)
-	} else if sd.ResultsSubSmt != nil {
-		resultsNLevels = len(sd.ResultsSubSmt.Siblings)
+	if sd.ResultsSmt != nil {
+		resultsNLevels = len(sd.ResultsSmt.Siblings)
 	}
-	buf = appendU64(buf, boolToU64(sd.ResultsAddSmt != nil))
+	buf = appendU64(buf, boolToU64(sd.ResultsSmt != nil))
 	buf = appendU64(buf, uint64(resultsNLevels))
-	if sd.ResultsAddSmt != nil {
-		e, err := encodeSMTEntry(*sd.ResultsAddSmt)
+	if sd.ResultsSmt != nil {
+		e, err := encodeSMTEntry(*sd.ResultsSmt)
 		if err != nil {
-			return nil, fmt.Errorf("results_add_smt: %w", err)
-		}
-		buf = append(buf, e...)
-	}
-
-	// ResultsSub (0 or 1, same n_levels)
-	buf = appendU64(buf, boolToU64(sd.ResultsSubSmt != nil))
-	if sd.ResultsSubSmt != nil {
-		e, err := encodeSMTEntry(*sd.ResultsSubSmt)
-		if err != nil {
-			return nil, fmt.Errorf("results_sub_smt: %w", err)
+			return nil, fmt.Errorf("results_smt: %w", err)
 		}
 		buf = append(buf, e...)
 	}
@@ -100,26 +88,14 @@ func EncodeStateBlock(sd *StateTransitionData) ([]byte, error) {
 		bp := sd.BallotProofs
 		buf = appendU64(buf, 1) // has_ballot_data = true
 
-		// OldResultsAdd: 32 Fr elements
-		if len(bp.OldResultsAdd) != 32 {
-			return nil, fmt.Errorf("old_results_add must have 32 elements, got %d", len(bp.OldResultsAdd))
+		// OldResults: 32 Fr elements
+		if len(bp.OldResults) != 32 {
+			return nil, fmt.Errorf("old_results must have 32 elements, got %d", len(bp.OldResults))
 		}
-		for i, s := range bp.OldResultsAdd {
+		for i, s := range bp.OldResults {
 			fr, err := beHexToFrLE(s)
 			if err != nil {
-				return nil, fmt.Errorf("old_results_add[%d]: %w", i, err)
-			}
-			buf = appendFr(buf, fr)
-		}
-
-		// OldResultsSub: 32 Fr elements
-		if len(bp.OldResultsSub) != 32 {
-			return nil, fmt.Errorf("old_results_sub must have 32 elements, got %d", len(bp.OldResultsSub))
-		}
-		for i, s := range bp.OldResultsSub {
-			fr, err := beHexToFrLE(s)
-			if err != nil {
-				return nil, fmt.Errorf("old_results_sub[%d]: %w", i, err)
+				return nil, fmt.Errorf("old_results[%d]: %w", i, err)
 			}
 			buf = appendFr(buf, fr)
 		}

@@ -337,6 +337,13 @@ impl BjjAccumulator {
         self.0 = self.0.add(&BJJProj::from_affine(p.0, p.1));
     }
 
+    /// Homomorphic subtraction: add the group inverse `(-x, y)`. One
+    /// projective add, no field inversion until `finish`.
+    pub fn sub(&mut self, p: &BjjAffine) {
+        let n = bjj_neg(p);
+        self.0 = self.0.add(&BJJProj::from_affine(n.0, n.1));
+    }
+
     pub fn finish(&self) -> BjjAffine {
         self.0.to_affine()
     }

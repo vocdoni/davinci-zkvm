@@ -24,9 +24,8 @@ const (
 	procLevels = 256
 	// ballotMin is the minimum key for ballot SMT entries.
 	ballotMin = uint64(0x10)
-	// keyResultsAdd / keyResultsSub are the accumulated results leaves.
-	keyResultsAdd = uint64(0x04)
-	keyResultsSub = uint64(0x05)
+	// keyResults is the net accumulated results leaf.
+	keyResults = uint64(0x04)
 )
 
 // configKeys are the process config keys inserted at genesis, in the
@@ -72,15 +71,14 @@ type State struct {
 	cfg          Config
 	tree         *arbo.Tree
 	root         string // current root, 0x-prefixed arbo LE hex
-	resultsAdd   accumBallot
-	resultsSub   accumBallot
+	results      accumBallot
 	votedBallots map[int]*elgamal.Ballot
 	voters       uint64
 	overwrites   uint64
 }
 
 // NewState builds the genesis state tree from cfg: the four config
-// leaves plus identity ResultsAdd/ResultsSub leaves. The resulting root
+// leaves plus the identity net Results leaf. The resulting root
 // matches the aggregator guest's in-circuit genesis computation.
 func NewState(cfg Config) (*State, error) {
 	if cfg.ProcessID == nil || cfg.BallotMode == nil || cfg.EncKey == nil || cfg.CensusRoot == nil {
@@ -111,13 +109,11 @@ func NewState(cfg Config) (*State, error) {
 		}
 	}
 	zeroLeaf := accumLeafHash(newIdentityAccum())
-	for _, k := range []uint64{keyResultsAdd, keyResultsSub} {
-		if err := tree.Add(
-			arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(k)),
-			arbo.BigIntToBytes(bLen, zeroLeaf),
-		); err != nil {
-			return nil, fmt.Errorf("genesis results leaf 0x%02x: %w", k, err)
-		}
+	if err := tree.Add(
+		arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(keyResults)),
+		arbo.BigIntToBytes(bLen, zeroLeaf),
+	); err != nil {
+		return nil, fmt.Errorf("genesis results leaf 0x%02x: %w", keyResults, err)
 	}
 
 	rootBytes, err := tree.Root()
@@ -128,8 +124,7 @@ func NewState(cfg Config) (*State, error) {
 		cfg:          cfg,
 		tree:         tree,
 		root:         "0x" + hex.EncodeToString(pad32(rootBytes)),
-		resultsAdd:   newIdentityAccum(),
-		resultsSub:   newIdentityAccum(),
+		results:      newIdentityAccum(),
 		votedBallots: make(map[int]*elgamal.Ballot),
 	}, nil
 }
@@ -245,35 +240,23 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 		s.votedBallots[v.CensusIdx] = reencBallots[i]
 	}
 
-	// Results accumulators (BabyJubJub point addition per ciphertext).
-	oldResultsAdd := s.resultsAdd
-	oldResultsSub := s.resultsSub
+	// Net results accumulator (BabyJubJub point add/sub per ciphertext):
+	// NewResults = OldResults + Σ(all ballots) − Σ(overwritten ballots).
+	oldResults := s.results
 
-	newResultsAdd := s.resultsAdd
+	newResults := s.results
 	for _, rb := range reencBallots {
-		newResultsAdd = accumAdd(newResultsAdd, accumFromBallot(rb))
+		newResults = accumAdd(newResults, accumFromBallot(rb))
 	}
-	resultsAddEntry, err := buildArboUpdateEntry(
-		s.tree, new(big.Int).SetUint64(keyResultsAdd), accumLeafHash(newResultsAdd), procLevels)
+	for _, ob := range overwritten {
+		newResults = accumSub(newResults, accumFromBallot(ob))
+	}
+	resultsEntry, err := buildArboUpdateEntry(
+		s.tree, new(big.Int).SetUint64(keyResults), accumLeafHash(newResults), procLevels)
 	if err != nil {
-		return nil, nil, fmt.Errorf("ResultsAdd update: %w", err)
+		return nil, nil, fmt.Errorf("Results update: %w", err)
 	}
-	s.resultsAdd = newResultsAdd
-
-	var resultsSubEntry *davinci.SmtEntry
-	if len(overwritten) > 0 {
-		newResultsSub := s.resultsSub
-		for _, ob := range overwritten {
-			newResultsSub = accumAdd(newResultsSub, accumFromBallot(ob))
-		}
-		entry, err := buildArboUpdateEntry(
-			s.tree, new(big.Int).SetUint64(keyResultsSub), accumLeafHash(newResultsSub), procLevels)
-		if err != nil {
-			return nil, nil, fmt.Errorf("ResultsSub update: %w", err)
-		}
-		s.resultsSub = newResultsSub
-		resultsSubEntry = &entry
-	}
+	s.results = newResults
 
 	newRootBytes, err := s.tree.Root()
 	if err != nil {
@@ -304,12 +287,10 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 		NewStateRoot:     newRoot,
 		VoteIDSmt:        voteIDChain,
 		BallotSmt:        ballotChain,
-		ResultsAddSmt:    &resultsAddEntry,
-		ResultsSubSmt:    resultsSubEntry,
+		ResultsSmt:       &resultsEntry,
 		ProcessSmt:       processSmtProofs,
 		BallotProofs: &davinci.BallotProofData{
-			OldResultsAdd:      accumToStrings(oldResultsAdd),
-			OldResultsSub:      accumToStrings(oldResultsSub),
+			OldResults:         accumToStrings(oldResults),
 			VoterBallots:       voterBallotStrs,
 			OverwrittenBallots: overwrittenStrs,
 		},
@@ -371,40 +352,23 @@ func (s *State) ResultsPayload(privKey *big.Int) (*davinci.ResultsPayload, []uin
 		return coords, msgs, proofs, nil
 	}
 
-	addCoords, addMsgs, addProofs, err := decryptAcc(s.resultsAdd)
+	coords, msgs, proofs, err := decryptAcc(s.results)
 	if err != nil {
-		return nil, nil, fmt.Errorf("ResultsAdd: %w", err)
-	}
-	subCoords, subMsgs, subProofs, err := decryptAcc(s.resultsSub)
-	if err != nil {
-		return nil, nil, fmt.Errorf("ResultsSub: %w", err)
+		return nil, nil, fmt.Errorf("Results: %w", err)
 	}
 
-	addSibs, err := s.leafSiblings(keyResultsAdd)
-	if err != nil {
-		return nil, nil, err
-	}
-	subSibs, err := s.leafSiblings(keyResultsSub)
+	sibs, err := s.leafSiblings(keyResults)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	results := make([]uint64, 8)
-	for i := range results {
-		if addMsgs[i] < subMsgs[i] {
-			return nil, nil, fmt.Errorf("negative tally at field %d: add=%d sub=%d",
-				i, addMsgs[i], subMsgs[i])
-		}
-		results[i] = addMsgs[i] - subMsgs[i]
-	}
+	copy(results, msgs)
 	return &davinci.ResultsPayload{
-		AddBallot:   addCoords,
-		SubBallot:   subCoords,
-		AddResults:  addMsgs,
-		SubResults:  subMsgs,
-		CpProofs:    append(addProofs, subProofs...),
-		AddSiblings: addSibs,
-		SubSiblings: subSibs,
+		Ballot:   coords,
+		Results:  msgs,
+		CpProofs: proofs,
+		Siblings: sibs,
 	}, results, nil
 }
 

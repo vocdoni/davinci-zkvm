@@ -49,11 +49,10 @@ func buildChainConfig(e *Election) (*davinci.ChainConfig, error) {
 	}, nil
 }
 
-// buildResultsPayload decrypts both result accumulators with the election
-// private key and assembles the finalize payload: TE ballot coordinates,
-// plaintexts, Chaum-Pedersen proofs (8 add + 8 sub) and the SMT inclusion
-// siblings of the two Results leaves. Returns the payload and the final
-// plaintext tally add[i] - sub[i].
+// buildResultsPayload decrypts the single net Results accumulator with the
+// election private key and assembles the finalize payload: TE ballot
+// coordinates, plaintexts, 8 Chaum-Pedersen proofs and the SMT inclusion
+// siblings of the Results leaf. Returns the payload and the plaintext tally.
 func buildResultsPayload(e *Election) (*davinci.ResultsPayload, []uint64, error) {
 	le32 := func(v *big.Int) string {
 		return hex.EncodeToString(arbo.BigIntToBytes(32, v))
@@ -95,13 +94,9 @@ func buildResultsPayload(e *Election) (*davinci.ResultsPayload, []uint64, error)
 		return coords, msgs, proofs, nil
 	}
 
-	addCoords, addMsgs, addProofs, err := decryptAcc(e.ResultsAdd)
+	coords, msgs, proofs, err := decryptAcc(e.Results)
 	if err != nil {
-		return nil, nil, fmt.Errorf("ResultsAdd: %w", err)
-	}
-	subCoords, subMsgs, subProofs, err := decryptAcc(e.ResultsSub)
-	if err != nil {
-		return nil, nil, fmt.Errorf("ResultsSub: %w", err)
+		return nil, nil, fmt.Errorf("Results: %w", err)
 	}
 
 	siblings := func(key uint64) ([]string, error) {
@@ -128,31 +123,18 @@ func buildResultsPayload(e *Election) (*davinci.ResultsPayload, []uint64, error)
 		}
 		return out, nil
 	}
-	addSibs, err := siblings(keyResultsAdd)
-	if err != nil {
-		return nil, nil, err
-	}
-	subSibs, err := siblings(keyResultsSub)
+	sibs, err := siblings(keyResults)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	results := make([]uint64, 8)
-	for i := range results {
-		if addMsgs[i] < subMsgs[i] {
-			return nil, nil, fmt.Errorf("negative tally at field %d: add=%d sub=%d",
-				i, addMsgs[i], subMsgs[i])
-		}
-		results[i] = addMsgs[i] - subMsgs[i]
-	}
+	copy(results, msgs)
 	return &davinci.ResultsPayload{
-		AddBallot:   addCoords,
-		SubBallot:   subCoords,
-		AddResults:  addMsgs,
-		SubResults:  subMsgs,
-		CpProofs:    append(addProofs, subProofs...),
-		AddSiblings: addSibs,
-		SubSiblings: subSibs,
+		Ballot:   coords,
+		Results:  msgs,
+		CpProofs: proofs,
+		Siblings: sibs,
 	}, results, nil
 }
 
@@ -204,6 +186,9 @@ func TestChainServiceFlow(t *testing.T) {
 	}
 	nBatches := envInt("CHAIN_BATCHES", 2)
 	batchSize := envInt("CHAIN_BATCH_SIZE", 2)
+	// When set, the final batch re-uses batch 0's voters so the net Results
+	// accumulator subtracts their overwritten ballots. Requires nBatches >= 2.
+	overwrite := os.Getenv("CHAIN_OVERWRITE") != "" && nBatches >= 2
 
 	client := newClient()
 	if err := checkServiceURL(apiURL + "/jobs"); err != nil {
@@ -223,8 +208,14 @@ func TestChainServiceFlow(t *testing.T) {
 	// 1. Prove each batch with output=stark (no KZG in chained mode).
 	batchJobs := make([]string, nBatches)
 	roots := []string{election.OldRoot}
+	wantOverwrites := 0
 	for b := 0; b < nBatches; b++ {
 		voters := election.Voters[b*batchSize : (b+1)*batchSize]
+		// Final batch re-votes batch 0's voters when overwrite mode is on.
+		if overwrite && b == nBatches-1 {
+			voters = election.Voters[0:batchSize]
+			wantOverwrites = batchSize
+		}
 		batch, err := GenerateBallotBatch(election.ProcessID, election.EncKey, voters, int64(42+100*b))
 		if err != nil {
 			t.Fatalf("batch %d: GenerateBallotBatch: %v", b, err)
@@ -335,8 +326,8 @@ func TestChainServiceFlow(t *testing.T) {
 	if int(d.totalVoters) != nBatches*batchSize {
 		t.Errorf("total_voters = %d, want %d", d.totalVoters, nBatches*batchSize)
 	}
-	if d.totalOverwrites != 0 {
-		t.Errorf("total_overwrites = %d, want 0", d.totalOverwrites)
+	if int(d.totalOverwrites) != wantOverwrites {
+		t.Errorf("total_overwrites = %d, want %d", d.totalOverwrites, wantOverwrites)
 	}
 	wantRoot := "0x" + hex.EncodeToString(d.stateRoot)
 	if wantRoot != election.OldRoot {
