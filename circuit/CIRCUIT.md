@@ -23,6 +23,7 @@ updated whenever the circuit logic changes.
 12. [Security Properties](#12-security-properties)
 13. [Known Limitations](#13-known-limitations)
 14. [Cryptographic Primitives](#14-cryptographic-primitives)
+15. [Performance Optimizations](#15-performance-optimizations)
 
 ---
 
@@ -440,10 +441,18 @@ Compute:
     - Verify old_root from (old_leaf, siblings, old_key path)
     - Verify new_root from (new_leaf, siblings, new_key path)
 
-  For NOOP / read (fnc0=false, fnc1=false):
-    - old_root == new_root
-    - Verify Merkle inclusion of (new_key, new_value) in old_root
+  For NOOP (fnc0=false, fnc1=false):
+    - old_root == new_root (the Processor only asserts roots are unchanged;
+      it does NOT touch the siblings, so a NOOP proves nothing about
+      membership). Used only where no read-binding is required.
 ```
+
+> **Read-proofs use the Verifier, not a Processor NOOP.** A Processor NOOP
+> only checks `old_root == new_root` and ignores the siblings, so it cannot
+> bind `(key, value)` to the tree. Anything that needs to *read* a committed
+> value out of the state tree (the process config read-proofs, §4.2.P) uses
+> the circomlib `SMTVerifier` inclusion path (`smt.rs::verify_inclusion`),
+> which reconstructs the root from the leaf and siblings. See §4.2.P.
 
 **Hash functions (Arbo SHA-256 compatible):**
 
@@ -456,11 +465,21 @@ All byte arrays use **little-endian** encoding (Arbo's `BigIntToBytes` conventio
 
 #### Process Config Read-Proofs
 
+The election config (ProcessID, BallotMode, EncryptionKey, CensusOrigin) is
+read out of the state tree at `OldStateRoot`. Each value is bound to the tree
+with a genuine **SMTVerifier inclusion proof** (`smt.rs::verify_inclusion`),
+matching davinci-node's `MerkleProof.Verify`. This is *not* a Processor NOOP:
+a NOOP only asserts `old_root == new_root` and never inspects the siblings, so
+it would let a prover assert an arbitrary config value — most dangerously a
+forged EncryptionKey, which is not a public output and so has no external
+backstop, enabling tally manipulation. Inclusion reconstructs the root from
+`leaf_hash(key, value)` and the siblings and rejects any mismatch.
+
 | # | Check | Fails on |
 |---|-------|----------|
 | 4.2.P1 | Exactly 4 process proofs | FAIL_SMT_PROCESS |
 | 4.2.P2 | Each proof: `old_root == new_root == OldStateRoot` (read-only) | FAIL_SMT_PROCESS |
-| 4.2.P3 | Each proof is a valid SMT transition (NOOP) | FAIL_SMT_PROCESS |
+| 4.2.P3 | Each proof: genuine SMT inclusion of `(key, value)` under `OldStateRoot` (SMTVerifier) | FAIL_SMT_PROCESS |
 | 4.2.P4 | Key order: `[0x00, 0x02, 0x03, 0x06]` (ProcessID, BallotMode, EncryptionKey, CensusOrigin) | FAIL_SMT_PROCESS |
 | 4.2.P5 | `process_proofs[0].new_value == state.process_id` (ProcessID matches header) | FAIL_SMT_PROCESS |
 
@@ -528,6 +547,14 @@ the state tree.
 | 4.4.9 | If `voter_ballots` is non-empty, ResultsAdd transition must be present | FAIL_RESULT_ACCUM |
 | 4.4.10 | If `overwritten_ballots` is non-empty, ResultsSub transition must be present | FAIL_RESULT_ACCUM |
 | 4.4.11 | If `n_voters > 0`, voter ballot data must be present | FAIL_RESULT_ACCUM |
+| 4.4.12 | If no ballots at all (`voter_ballots` and `overwritten_ballots` both empty), no Results transition may be present | FAIL_RESULT_ACCUM |
+
+> **4.4.12 — empty-batch Results lock.** With no ballots there is nothing to
+> accumulate, so the Results leaves must not change. Without this check a
+> prover could ship a valid stand-alone SMT update of a Results leaf to an
+> arbitrary value and chain it into `NewStateRoot`, injecting a forged tally
+> that no accumulation check binds. The guard rejects any `results_add` /
+> `results_sub` transition on an empty batch.
 
 **Ballot serialization:** Each ballot is 32 BN254 Fr elements (8 ElGamal ciphertexts × 4
 coordinates). Each Fr element is serialized as 32 big-endian bytes. The full serialization
@@ -806,4 +833,48 @@ evaluated at Z.
 | BLS12-381 Fr arithmetic | `bls_fr.rs` | ZisK `arith256_mod` precompile (syscall 0x802) | `(a·b+c) mod p` |
 | Poseidon (iden3, BN254) | `poseidon.rs` | Software (bn254_fr precompile for field ops) | 54 full rounds |
 | BabyJubJub | `babyjubjub.rs` | Software (bn254_fr precompile for field ops) | Twisted Edwards |
-| Arbo SMT | `smt.rs` | Software (SHA-256 precompile for hashing) | Circomlib Processor |
+| Arbo SMT | `smt.rs` | Software (SHA-256 precompile for hashing) | Circomlib Processor + Verifier |
+
+> All primitives live in the shared `circuit-primitives` crate, used by both
+> the vote-batch guest (`circuit/`) and the recursive aggregator
+> (`circuit-aggregator/`). Module paths above are relative to that crate.
+
+---
+
+## 15. Performance Optimizations
+
+SHA-256 (one `sha256_once` precompile call per hash) and BabyJubJub field
+inversions dominate the circuit's step count. Three optimizations cut the
+hot paths without changing any verification result — each is a behavior-
+preserving refactor of *when* work happens, not *what* is checked.
+
+### 15.1 SMT node-hash skip on padding levels (`smt.rs`)
+
+The SMT proofs are padded to a fixed 256 levels, but the real tree depth is
+only ~log₂(N). On the "not-applicable" levels below the insertion point the
+reconstructed node hash is discarded by the state machine, so
+`processor_level` computes the `node_hash` SHA-256 only inside the
+`stTop | stBot | stNew1` guard and skips it otherwise. This elides the large
+majority of node hashes per transition. (~+44% throughput at batch 256.)
+
+### 15.2 SMT lazy leaf hashing (`smt.rs::verify_transition`)
+
+`leaf_hash(old)` and `leaf_hash(new)` are each a SHA-256, but `processor_level`
+only consumes `old1leaf` when some level is `bot | new1 | upd`, and `new1leaf`
+when some level is `new1 | old0 | upd`. The two hashes are now computed lazily,
+after the per-level state machine has run, only when a consuming state actually
+fires. `is_old0` INSERTs (the VoteID leaves) elide the old-leaf hash; NOOP
+transitions elide both. Inputs are identical whenever a hash is consumed, so
+the result is unchanged.
+
+### 15.3 Projective re-encryption equality (`babyjubjub.rs`)
+
+Re-encryption checks `expected == claimed` for 16 BabyJubJub points per voter
+(8 ciphertexts × C1/C2). Previously each expected projective point was mapped
+to affine with a field inversion (`to_affine`) before comparison — 16
+inversions per voter. The accumulators now stay projective and compare against
+the claimed affine point by cross-multiplication: `X == ax·Z && Y == ay·Z`
+(`BJJProj::eq_affine`). Since valid curve points have `Z ≠ 0`, this is exactly
+`(X/Z, Y/Z) == (ax, ay)` with no inversion. The fixed-base window tables for
+B8 and the public key are also skipped entirely when a batch has no
+re-encryption entries.

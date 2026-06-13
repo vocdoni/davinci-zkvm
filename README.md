@@ -272,10 +272,10 @@ isn't counted; the time column is just SNARK generation.
 
 | batch | PLONK SNARK | votes/s | on-chain verify |
 |---:|---:|---:|---:|
-|  64 |    37 s |  1.7 |  350 ms |
-| 128 |    57 s |  2.2 |  340 ms |
-| 256 |    97 s |  2.6 |  340 ms |
-| 512 |   138 s |  3.7 |  480 ms |
+|  64 |    34 s |  1.9 |  315 ms |
+| 128 |    52 s |  2.4 |  349 ms |
+| 256 |    89 s |  2.9 |  309 ms |
+| 512 |   118 s |  4.3 |  505 ms |
 
 Scaling is sub-linear: per-vote cost roughly halves between batch 64 and
 batch 512. Proof size stays at 2.7 KB regardless of batch.
