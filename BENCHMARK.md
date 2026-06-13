@@ -39,6 +39,38 @@ decryption verification + results inclusion + PLONK wrap).
   rejects any batch with more than 256 proofs. Pick a batch ≤ 256 and
   fold more often for larger elections.
 
+## Scaling — 5120 votes measured, 20000 projected
+
+Larger elections amortize the per-election finalize constant toward zero
+and let folds use a wider fan-in, so throughput rises slightly above the
+1024-vote rows. Measured at 5120 votes (batch 256, fold every 4):
+
+| votes | batch | fold every | folds | stark avg / batch | steady fold | finalize | total | votes/s | on-chain verify |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 5120 | 256 | 4 | 5 | 1m42s | 20.0s | 25.1s | 36m25s | 2.34 | 0.50 s |
+
+The batch STARK average is ~8% above the 1024-vote rows (1m42s vs 1m35s):
+over a 34-min continuous batch-proving stretch the GPU thermally
+throttles, where the short 1024-vote run stayed cool. The steady fold
+holds dead flat at 20.0s across all four steady folds; the first fold is
+the usual ~35s bootstrap.
+
+**Projected 20000 votes**, best config (batch 250 → 80 batches, fold
+every 8 → 10 folds), using the sustained 5120 rates:
+
+| term | basis | time |
+|---|---|---|
+| batch proving | 20000 × 0.399 s/vote (sustained) | ~7990 s |
+| folds | 1 bootstrap (~41s) + 9 steady 9-inner (~26s) | ~275 s |
+| finalize | per-election constant | 25 s |
+| **total** | | **~2h18m** |
+| **throughput** | | **~2.41 votes/s** |
+
+One on-chain verification (~0.5 s) for the whole 20000-vote election. The
+projection rests on the sustained (already-throttled) batch rate, so the
+real 80-batch run should land close rather than degrade further. Batch
+proving is ~96% of the time; fold cadence moves the total by ~1–2%.
+
 ## Per-batch mode — one PLONK + one on-chain verification per batch
 
 | batch | PLONK SNARK | votes/s | on-chain verify |
