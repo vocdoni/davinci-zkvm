@@ -274,11 +274,11 @@ isn't counted; the time column is just SNARK generation.
 |---:|---:|---:|---:|
 |  64 |    34 s |  1.9 |  315 ms |
 | 128 |    52 s |  2.4 |  349 ms |
-| 256 |    89 s |  2.9 |  309 ms |
-| 512 |   118 s |  4.3 |  505 ms |
+| 256 |    88 s |  2.9 |  349 ms |
 
-Scaling is sub-linear: per-vote cost roughly halves between batch 64 and
-batch 512. Proof size stays at 2.7 KB regardless of batch.
+Scaling is sub-linear: per-vote cost drops by about a third between batch
+64 and batch 256 (256 is the maximum batch size). Proof size stays at
+2.7 KB regardless of batch.
 
 ## Development
 

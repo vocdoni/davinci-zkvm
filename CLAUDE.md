@@ -114,9 +114,9 @@ DAVINCI_API_URL=http://127.0.0.1:8080 DAVINCI_PROOF_TIMEOUT=30m \
   go test -run TestPlonkBenchmark -v -timeout 60m ./integration/
 ```
 
-The main benchmark is `TestPlonkBenchmark` (sizes 64/128/256/512,
-~18 min full sweep). Single-size smoke test: edit the `sizes` slice in
-`bench_test.go` to `[]int{64}`, run, restore to `[]int{64, 128, 256, 512}`
+The main benchmark is `TestPlonkBenchmark` (sizes 64/128/256,
+~12 min full sweep). Single-size smoke test: edit the `sizes` slice in
+`bench_test.go` to `[]int{64}`, run, restore to `[]int{64, 128, 256}`
 before committing.
 
 Chained-mode tests (gated by env, need GPU service):
@@ -199,9 +199,11 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
 - **`verify_zisk_proof_c` + the vadcop blob layout are ZisK v0.18.0
   internals**, not stable API — pin the ZisK version;
   `service/src/prover/recursion.rs` asserts the layout.
-- **Chained-mode batch 512 OOMs on this host**: the STARK prove peaks at
-  ~57 GB anon RSS and the kernel kills cargo-zisk (59 GB RAM). It can
-  take the service down with it. Use batch ≤ 256 in chained mode here.
+- **256 is the maximum batch size** (`MAX_BATCH_SIZE` in
+  `circuit-primitives/src/types.rs`, mirrored in `input-gen` and
+  `go-sdk/types.go`): the circuit rejects any batch with more than 256
+  proofs. Raising it means changing all three constants and rebuilding
+  both ELFs (new program_vk).
 
 ## Performance baseline (RTX 5090, ZisK v0.18.0)
 
@@ -209,8 +211,7 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
 |---:|---:|---:|---:|
 |  64 |   34 s | 1.9 | 315 ms |
 | 128 |   52 s | 2.4 | 349 ms |
-| 256 |   89 s | 2.9 | 309 ms |
-| 512 |  118 s | 4.3 | 505 ms |
+| 256 |   88 s | 2.9 | 349 ms |
 
 SNARK size is 2.7 KB regardless of batch. Chained-mode numbers
 (STARK batches + folds + one final PLONK) live in `BENCHMARK.md`.

@@ -4,7 +4,7 @@
 //! `ziskos::zisklib`, which call the underlying `sha256f` / `keccak_f`
 //! precompiles. They avoid the heap allocations of a hand-rolled
 //! padded-buffer + flatten approach — relevant for the SMT path where
-//! `sha256_once` is called ~5×10⁵ times per 512-voter batch.
+//! `sha256_once` is called ~2.5×10⁵ times per 256-voter batch.
 
 use crate::types::{FrRaw, ZERO_FR};
 use ziskos::zisklib::{keccak256, sha256};

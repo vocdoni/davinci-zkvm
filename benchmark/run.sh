@@ -53,7 +53,7 @@ for setup in $SETUPS; do
       CHAIN_BENCH=1 DAVINCI_API_URL="$API_URL" DAVINCI_PROOF_TIMEOUT="$TIMEOUT" \
       BENCH_VOTES="$VOTES" BENCH_BATCH_SIZE="$batch" BENCH_FOLD_EVERY="$fold" \
       BENCH_CACHE_DIR="$CACHE_DIR" \
-      go test ./integration -run TestChainBenchmark -v -timeout 150m) \
+      go test ./integration -run TestChainBenchmark -v -count=1 -timeout 150m) \
       > "$log" 2>&1; then
     echo "SETUP ${batch}x${fold} OK"
   else
