@@ -160,8 +160,8 @@ const PROVE_RETRY_DELAY_SECS: u64 = 5;
 ///    sometimes tears the CUDA context down ahead of the GPU destructor and
 ///    aborts with `cudaGetLastError: context is destroyed`. Subsequent
 ///    invocations within the same container never hit it.
-/// 2. **Fiat–Shamir flake at large batch sizes.** Around 512 voters we have
-///    occasionally seen ZisK return `Proof contribution challenge does not
+/// 2. **Fiat–Shamir flake at large batch sizes.** At the larger batch sizes
+///    we have occasionally seen ZisK return `Proof contribution challenge does not
 ///    match expected accumulated challenge` for an input that proves cleanly
 ///    on retry. The exact text is what we match on.
 ///

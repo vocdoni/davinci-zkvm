@@ -30,8 +30,9 @@ Each `batch:fold_every` setup runs serially (single GPU) and logs to
 `benchmark/results/RESULTS.md`. Curated results are kept in the
 top-level `BENCHMARK.md`.
 
-Batch 512 is not in the default sweep: the chained-mode 512-vote STARK
-prove peaks at ~57 GB RSS and gets OOM-killed on hosts with less RAM.
+256 is the maximum batch size (`MAX_BATCH_SIZE`); the circuit rejects
+anything larger. For bigger elections, keep the batch ≤ 256 and fold
+more often.
 
 ## Knobs
 
