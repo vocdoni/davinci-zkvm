@@ -97,6 +97,15 @@ pub fn verify_results(state: &StateBlock, fail_mask: &mut u32) -> bool {
             *fail_mask |= FAIL_RESULT_ACCUM;
             return false;
         }
+        // With no ballots there is nothing to accumulate, so a results
+        // transition must be absent (the leaf must not change). Otherwise a
+        // prover could supply a valid SMT update of the Results leaf to an
+        // arbitrary value and chain it to the new state root, injecting a
+        // forged tally without any accumulation check binding it.
+        if state.results_add.is_some() || state.results_sub.is_some() {
+            *fail_mask |= FAIL_RESULT_ACCUM;
+            return false;
+        }
         return true;
     }
 

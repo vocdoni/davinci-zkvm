@@ -318,6 +318,78 @@ pub fn verify_transition(t: &SmtTransition) -> bool {
     computed_new_root == t.new_root
 }
 
+// Inclusion verifier (SMTVerifier)
+
+/// Verify SMT **inclusion** of `(key, value)` under `root`.
+///
+/// Port of circomlib / gnark `smt.InclusionVerifier` (the `fnc = 0`, `isOld0 =
+/// 0`, `enabled = 1` case of `VerifierWithLeafHashFlag`). davinci-node verifies
+/// the process config read-proofs with this Verifier, NOT with the Processor:
+/// a Processor NOOP only asserts `old_root == new_root` and never touches the
+/// siblings, so it proves nothing about tree membership. Using it for a read
+/// proof lets a prover claim an arbitrary `(key, value)` (e.g. a forged
+/// encryption key). Inclusion reconstructs the root from the leaf and siblings
+/// and binds the value to the tree.
+///
+/// Returns `true` iff `(key, value)` is provably contained in `root`.
+pub fn verify_inclusion(root: &FrRaw, key: &FrRaw, value: &FrRaw, siblings: &[FrRaw]) -> bool {
+    let n = siblings.len();
+    if n == 0 {
+        return false;
+    }
+
+    // LevIns: locate the leaf level; leaf-level sibling must be zero.
+    let (lev_valid, lev_ins) = lev_ins_flag(siblings, true);
+    if !lev_valid {
+        return false;
+    }
+
+    let leaf = leaf_hash(key, value);
+
+    // VerifierSM specialized to fnc=0, is0=0, enabled=1: only stTop (carried
+    // from the root until levIns) and stNew (active at the leaf level) ever
+    // fire; stIOld and stI0 stay zero. After the leaf level the machine is na.
+    let mut st_top = vec![0u8; n];
+    let mut st_new = vec![0u8; n];
+    let mut st_na = vec![0u8; n];
+    for i in 0..n {
+        let (prev_top, prev_new, prev_na) = if i == 0 {
+            (1u8, 0u8, 0u8) // enabled=1 => top=1, na=1-enabled=0
+        } else {
+            (st_top[i - 1], st_new[i - 1], st_na[i - 1])
+        };
+        let aux1 = prev_top * (lev_ins[i] as u8); // fnc=0 => aux2=0
+        st_top[i] = prev_top - aux1;
+        st_new[i] = aux1;
+        st_na[i] = prev_na + prev_new; // prev_iold, prev_i0 are 0
+    }
+
+    // flagStates: exactly one terminal state set on the last level.
+    let last = n - 1;
+    if st_na[last] + st_new[last] != 1 {
+        return false;
+    }
+
+    // Bottom-up root reconstruction.
+    let zero = [0u64; 4];
+    let mut levels = vec![zero; n];
+    for i in (0..n).rev() {
+        let child = if i < n - 1 { levels[i + 1] } else { zero };
+        levels[i] = if st_top[i] == 1 {
+            let (l, r) = switcher(get_bit(key, i), child, siblings[i]);
+            node_hash(&l, &r)
+        } else if st_new[i] == 1 {
+            leaf
+        } else {
+            zero
+        };
+    }
+
+    // flagRoot: reconstructed root matches the claimed root.
+    // (The key-reuse guard is vacuous for fnc=0.)
+    &levels[0] == root
+}
+
 // Chain verifier
 
 /// Verify a sequence of SMT transitions forms a consistent chain:
@@ -528,18 +600,23 @@ pub fn verify_state(
         ok = false;
     } else {
         for (i, p) in state.process_proofs.iter().enumerate() {
+            // Read-only: roots unchanged and equal to the old state root.
             if p.old_root != state.old_state_root || p.new_root != state.old_state_root {
                 *fail_mask |= FAIL_SMT_PROCESS;
                 ok = false;
                 break;
             }
-            if !verify_transition(p) {
+            // Each proof must correspond to the correct config key, in order.
+            if p.new_key != EXPECTED_KEYS[i] {
                 *fail_mask |= FAIL_SMT_PROCESS;
                 ok = false;
                 break;
             }
-            // Each proof must correspond to the correct config key.
-            if p.new_key != EXPECTED_KEYS[i] {
+            // Genuine SMT inclusion of (key, value) under old_state_root
+            // (circomlib SMTVerifier, matching davinci-node). A Processor NOOP
+            // does not bind the value to the tree, so a prover could otherwise
+            // assert an arbitrary config value (e.g. a forged encryption key).
+            if !verify_inclusion(&state.old_state_root, &p.new_key, &p.new_value, &p.siblings) {
                 *fail_mask |= FAIL_SMT_PROCESS;
                 ok = false;
                 break;
@@ -557,4 +634,67 @@ pub fn verify_state(
     let new = state.new_state_root;
 
     (ok, old, new, state.n_voters as u64, state.n_overwritten as u64)
+}
+
+#[cfg(test)]
+mod inclusion_tests {
+    use super::*;
+
+    // Build a 2-leaf tree (keys differ in bit 0) and return the root plus both
+    // leaf keys/values. keyA goes left (bit0=0), keyB goes right (bit0=1).
+    fn two_leaf_tree() -> (FrRaw, FrRaw, FrRaw, FrRaw, FrRaw, FrRaw, FrRaw) {
+        let key_a: FrRaw = [0, 0, 0, 0];
+        let val_a: FrRaw = [11, 0, 0, 0];
+        let key_b: FrRaw = [1, 0, 0, 0];
+        let val_b: FrRaw = [22, 0, 0, 0];
+        let a = leaf_hash(&key_a, &val_a);
+        let b = leaf_hash(&key_b, &val_b);
+        let root = node_hash(&a, &b);
+        (root, key_a, val_a, key_b, val_b, a, b)
+    }
+
+    fn padded(sib0: FrRaw, levels: usize) -> Vec<FrRaw> {
+        let mut s = vec![[0u64; 4]; levels];
+        s[0] = sib0;
+        s
+    }
+
+    #[test]
+    fn accepts_genuine_inclusion() {
+        let (root, key_a, val_a, key_b, val_b, a, b) = two_leaf_tree();
+        // keyA: root-level sibling is leaf B; leaf level sibling is zero.
+        assert!(verify_inclusion(&root, &key_a, &val_a, &padded(b, 2)));
+        // keyB: root-level sibling is leaf A.
+        assert!(verify_inclusion(&root, &key_b, &val_b, &padded(a, 2)));
+    }
+
+    #[test]
+    fn accepts_with_trailing_zero_padding() {
+        // Real process proofs pad siblings to the full tree depth (256).
+        let (root, key_a, val_a, _kb, _vb, _a, b) = two_leaf_tree();
+        assert!(verify_inclusion(&root, &key_a, &val_a, &padded(b, 256)));
+    }
+
+    #[test]
+    fn rejects_forged_value() {
+        // The core security property: a prover cannot bind an arbitrary value
+        // (e.g. a forged encryption key) to a config key under the real root.
+        let (root, key_a, _val_a, _kb, _vb, _a, b) = two_leaf_tree();
+        let forged: FrRaw = [99, 0, 0, 0];
+        assert!(!verify_inclusion(&root, &key_a, &forged, &padded(b, 256)));
+    }
+
+    #[test]
+    fn rejects_wrong_sibling() {
+        let (root, key_a, val_a, _kb, _vb, _a, _b) = two_leaf_tree();
+        let bogus: FrRaw = [0xdead, 0, 0, 0];
+        assert!(!verify_inclusion(&root, &key_a, &val_a, &padded(bogus, 256)));
+    }
+
+    #[test]
+    fn rejects_wrong_root() {
+        let (_root, key_a, val_a, _kb, _vb, _a, b) = two_leaf_tree();
+        let wrong_root: FrRaw = [1, 2, 3, 4];
+        assert!(!verify_inclusion(&wrong_root, &key_a, &val_a, &padded(b, 256)));
+    }
 }
