@@ -175,30 +175,32 @@ fn processor_level(
         [0u64; 4]
     };
 
-    // new_root left arg = newChild*(stTop + stBot) + new1leaf*stNew1
-    let left_val = if st_top == 1 || st_bot == 1 {
-        *new_child
-    } else if st_new1 == 1 {
-        *new1leaf
-    } else {
-        [0u64; 4]
-    };
-
-    // new_root right arg = sibling*stTop + old1leaf*stNew1
-    let right_val = if st_top == 1 {
-        *sibling
-    } else if st_new1 == 1 {
-        *old1leaf
-    } else {
-        [0u64; 4]
-    };
-
-    let (nl, nr) = switcher(new_lr_bit, left_val, right_val);
-    let new_proof_hash = node_hash(&nl, &nr);
-
     // new_root = new_proof_hash*(stTop + stBot + stNew1) + new1leaf*(stOld0 + stUpd)
+    //
+    // new_proof_hash = node_hash(switcher(left_val, right_val)) is only consumed
+    // when stTop|stBot|stNew1.  On the zero-padded levels below the insertion
+    // point (na states) it is discarded, so compute it only inside the guard and
+    // skip the SHA-256 otherwise.  With nLevels=256 and real depth ~log2(N), this
+    // elides the large majority of node hashes per transition.
     let new_root = if st_top == 1 || st_bot == 1 || st_new1 == 1 {
-        new_proof_hash
+        // new_root left arg = newChild*(stTop + stBot) + new1leaf*stNew1
+        let left_val = if st_top == 1 || st_bot == 1 {
+            *new_child
+        } else if st_new1 == 1 {
+            *new1leaf
+        } else {
+            [0u64; 4]
+        };
+        // new_root right arg = sibling*stTop + old1leaf*stNew1
+        let right_val = if st_top == 1 {
+            *sibling
+        } else if st_new1 == 1 {
+            *old1leaf
+        } else {
+            [0u64; 4]
+        };
+        let (nl, nr) = switcher(new_lr_bit, left_val, right_val);
+        node_hash(&nl, &nr)
     } else if st_old0 == 1 || st_upd == 1 {
         *new1leaf
     } else {
@@ -220,10 +222,6 @@ pub fn verify_transition(t: &SmtTransition) -> bool {
     }
 
     let enabled = t.fnc0 || t.fnc1;
-
-    // Precompute leaf hashes.
-    let hash1_old = leaf_hash(&t.old_key, &t.old_value);
-    let hash1_new = leaf_hash(&t.new_key, &t.new_value);
 
     // LevIns: find insertion level.
     let (lev_valid, lev_ins) = lev_ins_flag(&t.siblings, enabled);
@@ -276,6 +274,16 @@ pub fn verify_transition(t: &SmtTransition) -> bool {
     if terminal != 1 {
         return false;
     }
+
+    // Lazy leaf hashes: each is a SHA-256, consumed by processor_level only for
+    // some states. old1leaf is read when any level is bot|new1|upd; new1leaf when
+    // any level is new1|old0|upd. is_old0 INSERTs (voteIDs) elide old1leaf; NOOP
+    // transitions elide both. Compute only what is actually consumed.
+    let need_old = (0..levels).any(|i| (st_bot_v[i] | st_new1_v[i] | st_upd_v[i]) == 1);
+    let need_new = (0..levels).any(|i| (st_new1_v[i] | st_old0_v[i] | st_upd_v[i]) == 1);
+    let zero_leaf = [0u64; 4];
+    let hash1_old = if need_old { leaf_hash(&t.old_key, &t.old_value) } else { zero_leaf };
+    let hash1_new = if need_new { leaf_hash(&t.new_key, &t.new_value) } else { zero_leaf };
 
     // ProcessorLevel: bottom-up reconstruction of (old_root, new_root).
     let zero = [0u64; 4];
