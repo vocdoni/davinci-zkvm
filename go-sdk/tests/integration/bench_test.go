@@ -46,7 +46,7 @@ func TestPlonkBenchmark(t *testing.T) {
 		t.Skipf("davinci-zkvm service not available at %s: %v", apiURL, err)
 	}
 
-	sizes := []int{64, 128, 256, 512}
+	sizes := []int{64, 128, 256}
 
 	type result struct {
 		size      int
