@@ -36,13 +36,15 @@ const (
 	failECDSA       = uint32(1 << 3)  // ECDSA signature or address binding failed
 	failSMTVoteID   = uint32(1 << 10) // voteID insertion chain invalid
 	failSMTBallot   = uint32(1 << 11) // ballot insertion chain invalid
-	failSMTResults  = uint32(1 << 12) // resultsAdd/Sub transition invalid
+	failSMTResults  = uint32(1 << 12) // net Results transition invalid
 	failSMTProcess  = uint32(1 << 13) // process read-proof invalid
 	failConsistency = uint32(1 << 14) // voteID namespace / proof binding mismatch
 	failBallotNS    = uint32(1 << 15) // ballot namespace / address binding mismatch
 	failCensus      = uint32(1 << 16) // census membership proof failed
 	failReenc       = uint32(1 << 17) // re-encryption verification failed
 	failKZG         = uint32(1 << 18) // KZG barycentric evaluation mismatch
+	failResultAccum = uint32(1 << 20) // net Results accumulator leaf mismatch
+	failLeafHash    = uint32(1 << 21) // ballot SMT leaf hash mismatch
 
 	// failSMTAny covers any SMT-related failure (bits 10–13).
 	failSMTAny = failSMTVoteID | failSMTBallot | failSMTResults | failSMTProcess
@@ -534,4 +536,64 @@ func TestCheatValidKZGRoundTrip(t *testing.T) {
 			assertCircuitValid(t, input, tc.name)
 		})
 	}
+}
+
+// TestCheatDoubleVote simulates a replay/double-vote: the second voter's
+// voteID SMT entry is forced to re-use the first voter's voteID key. The
+// circuit must reject it — a duplicate voteID either breaks the voteID
+// insertion chain (FAIL_SMT_VOTEID) or the voteID-to-proof binding
+// (FAIL_CONSISTENCY). This is the on-chain defense against counting the
+// same vote twice.
+func TestCheatDoubleVote(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+
+	sd := *base.stateData
+	if len(sd.VoteIDSmt) < 2 {
+		t.Skip("need at least 2 voteID SMT entries")
+	}
+	// Make voter 1 claim voter 0's voteID key (a duplicate insert).
+	sd.VoteIDSmt[1].NewKey = sd.VoteIDSmt[0].NewKey
+
+	tamperedState, err := davinci.EncodeStateBlock(&sd)
+	if err != nil {
+		t.Fatalf("EncodeStateBlock: %v", err)
+	}
+	tampered := append(base.baseBin, tamperedState...)
+	tampered = append(tampered, base.censusBlock...)
+	tampered = append(tampered, base.reencBlock...)
+	tampered = append(tampered, base.kzgBlock...)
+	assertCircuitFails(t, tampered, failSMTVoteID|failConsistency, "double_vote")
+}
+
+// TestCheatInflatedResults forges the net Results leaf to a value that does
+// not match the in-circuit recomputed tally (NewResults = OldResults +
+// Σ(voter ballots) − Σ(overwritten ballots)). A bad actor inflating the
+// tally must be rejected: the leaf is bound to the actual ballots, so the
+// forged new_value trips FAIL_RESULT_ACCUM (and the SMT transition no longer
+// reconstructs new_root, FAIL_SMT_RESULTS).
+func TestCheatInflatedResults(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+
+	sd := *base.stateData
+	if sd.ResultsSmt == nil {
+		t.Skip("no Results SMT transition in this batch")
+	}
+	// Forge a different net Results leaf (claim an arbitrary tally).
+	forged := make([]byte, 32)
+	for i := range forged {
+		forged[i] = 0xAB
+	}
+	re := *sd.ResultsSmt
+	re.NewValue = hex.EncodeToString(forged)
+	sd.ResultsSmt = &re
+
+	tamperedState, err := davinci.EncodeStateBlock(&sd)
+	if err != nil {
+		t.Fatalf("EncodeStateBlock: %v", err)
+	}
+	tampered := append(base.baseBin, tamperedState...)
+	tampered = append(tampered, base.censusBlock...)
+	tampered = append(tampered, base.reencBlock...)
+	tampered = append(tampered, base.kzgBlock...)
+	assertCircuitFails(t, tampered, failResultAccum|failSMTResults, "inflated_results")
 }
