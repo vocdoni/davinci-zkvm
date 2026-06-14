@@ -186,9 +186,21 @@ func TestChainServiceFlow(t *testing.T) {
 	}
 	nBatches := envInt("CHAIN_BATCHES", 2)
 	batchSize := envInt("CHAIN_BATCH_SIZE", 2)
-	// When set, the final batch re-uses batch 0's voters so the net Results
-	// accumulator subtracts their overwritten ballots. Requires nBatches >= 2.
-	overwrite := os.Getenv("CHAIN_OVERWRITE") != "" && nBatches >= 2
+	// The last `overwriteBatches` batches re-vote earlier batches' voters, so the
+	// net Results accumulator subtracts the overwritten ballots. Batch
+	// (nBatches-overwriteBatches+j) re-uses batch j's voters with a fresh seed
+	// (distinct voteIDs => ballot UPDATE + voteID INSERT). CHAIN_OVERWRITE=1 is a
+	// shorthand for a single overwrite batch.
+	overwriteBatches := envInt("CHAIN_OVERWRITE_BATCHES", 0)
+	if os.Getenv("CHAIN_OVERWRITE") != "" && overwriteBatches == 0 {
+		overwriteBatches = 1
+	}
+	if overwriteBatches >= nBatches {
+		overwriteBatches = nBatches - 1 // keep at least one fresh batch to overwrite
+	}
+	if overwriteBatches < 0 {
+		overwriteBatches = 0
+	}
 
 	client := newClient()
 	if err := checkServiceURL(apiURL + "/jobs"); err != nil {
@@ -210,12 +222,14 @@ func TestChainServiceFlow(t *testing.T) {
 	roots := []string{election.OldRoot}
 	wantOverwrites := 0
 	for b := 0; b < nBatches; b++ {
-		voters := election.Voters[b*batchSize : (b+1)*batchSize]
-		// Final batch re-votes batch 0's voters when overwrite mode is on.
-		if overwrite && b == nBatches-1 {
-			voters = election.Voters[0:batchSize]
-			wantOverwrites = batchSize
+		voterStart := b * batchSize
+		// The last `overwriteBatches` batches re-vote an earlier batch's voters.
+		if overwriteBatches > 0 && b >= nBatches-overwriteBatches {
+			j := b - (nBatches - overwriteBatches)
+			voterStart = j * batchSize
+			wantOverwrites += batchSize
 		}
+		voters := election.Voters[voterStart : voterStart+batchSize]
 		batch, err := GenerateBallotBatch(election.ProcessID, election.EncKey, voters, int64(42+100*b))
 		if err != nil {
 			t.Fatalf("batch %d: GenerateBallotBatch: %v", b, err)
@@ -400,4 +414,60 @@ func TestChainServiceFlow(t *testing.T) {
 	} else {
 		t.Logf("final PLONK verified on simulated chain; results=%v", fd.results)
 	}
+
+	// Independent soundness check: compute the expected net tally directly from
+	// the deterministic ballot-field formula (last ballot per voter wins) and
+	// compare it to the results committed in the finalize proof. This does not
+	// reuse the Go accumulator (election.Results), so a divergence between the
+	// circuit's in-guest net computation and the intended tally would surface
+	// here even if both Go accumulator and circuit agreed on a wrong value.
+	expTally := expectedChainTally(nBatches, batchSize, overwriteBatches)
+	for i := 0; i < 8; i++ {
+		if fd.results[i] != expTally[i] {
+			t.Errorf("analytic tally field[%d]: proof committed %d, expected %d",
+				i, fd.results[i], expTally[i])
+		}
+	}
+	t.Logf("analytic net tally verified against finalize proof: %v", expTally)
+}
+
+// expectedChainTally analytically computes the net vote tally for the chained
+// service test: `overwriteBatches` of the final batches re-vote earlier
+// batches' voters, and only the last ballot per voter counts. It mirrors
+// BallotProofForTestDeterministic's field formula (field f, seed s: first
+// (s+f*1000+attempt)%16 not already used in that ballot; 6 non-zero fields,
+// slots 6-7 always zero) with the chained test's seed scheme (seedBase =
+// 42+100*b, voter i in a batch uses seedBase+i).
+func expectedChainTally(nBatches, batchSize, overwriteBatches int) [8]uint64 {
+	lastFields := make(map[int][8]int64)
+	for b := 0; b < nBatches; b++ {
+		voterStart := b * batchSize
+		if overwriteBatches > 0 && b >= nBatches-overwriteBatches {
+			voterStart = (b - (nBatches - overwriteBatches)) * batchSize
+		}
+		seedBase := int64(42 + 100*b)
+		for i := 0; i < batchSize; i++ {
+			seed := seedBase + int64(i)
+			var fields [8]int64
+			stored := map[int64]bool{}
+			for f := int64(0); f < 6; f++ {
+				for attempt := int64(0); ; attempt++ {
+					val := (seed + f*1000 + attempt) % 16
+					if !stored[val] {
+						fields[f] = val
+						stored[val] = true
+						break
+					}
+				}
+			}
+			lastFields[voterStart+i] = fields
+		}
+	}
+	var totals [8]uint64
+	for _, fields := range lastFields {
+		for f := 0; f < 8; f++ {
+			totals[f] += uint64(fields[f])
+		}
+	}
+	return totals
 }
