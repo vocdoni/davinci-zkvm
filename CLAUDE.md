@@ -50,7 +50,7 @@ startup; chained mode additionally needs `AGGREGATOR_ELF_PATH`.
 | `service/src/prover/snark.rs` | Bincode-decodes `proof.bin` into the four Solidity-ready byte strings (`programVK`, `rootCVadcopFinal`, `publicValues`, `proofBytes`). |
 | `solidity/` | Vendored upstream PLONK verifier, byte-identical to `~/.zisk/provingKeySnark/final/*.sol`. **Don't edit these in-tree** — the Go helper patches them on a temp copy at compile time, so re-copying after a new ZisK release just works. |
 | `go-sdk/` | Go client. Exposes `PlonkSnark` (the 4-tuple) and `client.Prove(ctx, batch) -> ProveResult.Snark`. Never exposes STARK/VADCOP internals (chained mode only sees job IDs + the final PLONK). |
-| `go-sdk/chain/` | Chained-mode orchestrator: `Sequencer` (fold cadence, finalize), `State` (process SMT owner, reencryption, results accumulators), `Digest` (53×u32 "DAG1" publics parser + external vk-binding checks). Self-contained — must NOT import test code. |
+| `go-sdk/chain/` | Chained-mode orchestrator: `Sequencer` (fold cadence, finalize), `State` (process SMT owner, reencryption, results accumulators), `Digest` (53×u32 "DAG1" publics parser + external vk-binding checks). `snapshot.go` serializes/restores `State` for crash recovery (reencryption uses a random `k` per ballot, so replay isn't reproducible). `commitment.go`+`release.go` recompute the guest's `config_commitment` host-side and pin the canonical circuit-release vks (`CircuitRelease`) for independent end-to-end verification. Self-contained — must NOT import test code. |
 | `go-sdk/solidity/solidity.go` | `VerifyOnSimulated(dir, snark)` — compiles the verifier (local `solc` or `docker run ethereum/solc:stable`) and runs it on `go-ethereum/ethclient/simulated.NewBackend`. |
 
 ## Build & test commands
@@ -149,8 +149,19 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   assembled server-side from on-disk `proof.bin` — Go never ships them.
 - `POST /finalize` — last fold + results payload (CP decryption proofs,
   plaintext results, SMT inclusion siblings) → the final PLONK.
+- `POST /jobs/import` — accept a raw `proof.bin` body, register it as a
+  local `Done` `BatchStark` job (returns `{job_id}`), and write the same
+  `stark.json`/`publics.bin` artifacts a natively proved job exposes — so a
+  STARK proved on another worker can be referenced by `/fold` here. Decodes
+  the blob to reject garbage early; soundness still rests on the fold
+  guest's in-circuit re-verification, not on trusting the upload. Exists for
+  the external scatter/gather orchestrator (the `davinci-fold` sibling
+  repo); the single-worker `Sequencer` never needs it.
 - `GET /jobs/{id}/stark` — program_vk + publics of a STARK job (the
   sequencer uses it to learn vks and parse fold digests).
+- `GET /jobs/{id}/proof/stark` — the raw vadcop-final STARK blob the
+  aggregator verifies (lazily converted from `proof.bin`, cached as
+  `vadcop.bin`).
 - `GET /jobs/{id}` — status.
 - `GET /jobs/{id}/snark` — JSON with `program_vk`, `root_c_vadcop_final`,
   `public_values`, `proof_bytes`. These four hex strings map straight onto
@@ -196,6 +207,13 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
 - **Rebuilding either guest changes its program_vk.** The sequencer
   learns vks at runtime (`GET /jobs/{id}/stark`), but anything that
   pins a vk (docs, on-chain expectations) goes stale on rebuild.
+- **`go-sdk/chain/release.go::CircuitRelease` pins the aggregator
+  `program_vk` (`AggVK`) + vote-batch `batch_vk` (`BatchVK`)** for the
+  external verifiability anchor. The guest's `config_commitment` is
+  `sha256(config frame ‖ batch_vk ‖ fold_vk)`, so a stale manifest fails
+  the commitment check after a guest rebuild. Refreeze it by running a
+  finalize and reading the digest's `fold_vk`/`batch_vk` (or
+  `FetchStarkInfo`); the `davinci-fold` finalize log line prints both.
 - **`verify_zisk_proof_c` + the vadcop blob layout are ZisK v0.18.0
   internals**, not stable API — pin the ZisK version;
   `service/src/prover/recursion.rs` asserts the layout.

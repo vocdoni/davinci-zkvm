@@ -24,7 +24,8 @@ const PROGRAM_VK_LEN: usize = 4;
 
 /// Immutable election config for the chained mode. All 32-byte fields are
 /// little-endian (arbo/FrRaw convention). The guest recomputes the genesis
-/// state root from these values and commits sha256 of the encoded frame.
+/// state root from these values and commits sha256 of the encoded frame
+/// concatenated with batch_vk ‖ fold_vk (the circuit-release identity).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainConfig {
     /// ProcessID (state tree key 0x00), 32 bytes LE, hex-encoded.

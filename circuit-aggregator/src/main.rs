@@ -31,7 +31,7 @@
 //   [2]      step_count
 //   [3]      total_voters
 //   [4]      total_overwrites
-//   [5..13]  config_commitment = sha256(config frame)
+//   [5..13]  config_commitment = sha256(config frame ‖ batch_vk ‖ fold_vk)
 //   [13..21] state_root (last root_after)
 //   [21..29] batch_vk
 //   [29..37] fold_vk
@@ -41,6 +41,9 @@
 // digest. After PLONK verification the host checks publics.fold_vk ==
 // proof.program_vk and publics.batch_vk == the known vote-batch vk; the
 // digest chain then pins every intermediate step to the same vks.
+// config_commitment additionally folds both vks into the genesis commitment,
+// so one value binds the initial parameters AND the circuit release: a proof
+// from one ELF release cannot be replayed under another's constants.
 
 #![no_main]
 ziskos::entrypoint!(main);
@@ -82,7 +85,6 @@ struct Config {
     enc_y: FrRaw,
     census_origin: u64,
     census_root: FrRaw,
-    commitment: [u8; 32],
 }
 
 fn parse_config(frame: &[u8]) -> Config {
@@ -95,8 +97,19 @@ fn parse_config(frame: &[u8]) -> Config {
         enc_y: fr_at(96),
         census_origin: u64::from_le_bytes(frame[128..136].try_into().unwrap()),
         census_root: fr_at(136),
-        commitment: sha256_once(frame),
     }
+}
+
+/// Election-identity commitment: sha256 over the config frame plus the two
+/// circuit verification keys (each 4 u64 LE = 32 bytes). Binding the vks here
+/// pins the initial parameters and the circuit release in a single value.
+fn config_commitment(frame: &[u8], batch_vk: &[u64; 4], fold_vk: &[u64; 4]) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(frame.len() + 64);
+    buf.extend_from_slice(frame);
+    for w in batch_vk.iter().chain(fold_vk.iter()) {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
+    sha256_once(&buf)
 }
 
 /// Arbo root of a set of (key, value) leaves. Floating-leaf rule: a subtree
@@ -281,7 +294,8 @@ fn main() {
 
     let config_frame = read_input_slice();
     let cfg = parse_config(&config_frame);
-    let commitment_u32 = bytes32_to_u32x8(&cfg.commitment);
+    let commitment = config_commitment(&config_frame, &batch_vk, &fold_vk);
+    let commitment_u32 = bytes32_to_u32x8(&commitment);
     let census_root_u32 = fr_to_u32x8(&cfg.census_root);
     let batch_vk_u32 = fr_to_u32x8(&batch_vk);
     let fold_vk_u32 = fr_to_u32x8(&fold_vk);

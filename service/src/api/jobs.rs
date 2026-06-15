@@ -22,13 +22,15 @@
 //! unknown job ID.
 
 use crate::api::AppState;
+use crate::types::{Job, JobKind, JobStatus};
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{Path, State},
     http::{header, StatusCode},
     response::IntoResponse,
     Json,
 };
+use chrono::Utc;
 use std::path::PathBuf;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
@@ -137,6 +139,73 @@ async fn stream_file(path: PathBuf, download_name: String) -> axum::response::Re
         body,
     )
         .into_response()
+}
+
+/// `POST /jobs/import` — import a raw STARK `proof.bin` proven on another
+/// worker, registering it as a completed `BatchStark` job on this instance.
+///
+/// The chained-fold pipeline pins a fold chain to a single worker (the fold
+/// guest loads each STARK's blob from that worker's local filesystem), but
+/// batch STARKs can be proved anywhere. To scatter batches across a pool and
+/// fold them on one worker, the orchestrator ships each batch's `proof.bin`
+/// here and gets back a local job id usable in `/fold`.
+///
+/// Soundness does not depend on trusting the blob: the fold guest re-verifies
+/// every STARK in-circuit plus continuity/vk binding, so a forged or corrupt
+/// blob simply fails to fold. We still decode it here to reject garbage early
+/// and to surface the same `stark.json` / `publics.bin` artifacts a natively
+/// proved STARK job exposes.
+pub async fn import_stark(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> impl IntoResponse {
+    if body.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "empty proof body"})),
+        )
+            .into_response();
+    }
+
+    let job_id = Uuid::new_v4();
+    let job_dir = state.config.proof_output_dir.join(job_id.to_string());
+    if let Err(e) = tokio::fs::create_dir_all(&job_dir).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("create job dir: {}", e)})),
+        )
+            .into_response();
+    }
+    let proof_path = job_dir.join("proof.bin");
+    if let Err(e) = tokio::fs::write(&proof_path, &body).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("write proof.bin: {}", e)})),
+        )
+            .into_response();
+    }
+
+    // Decode the blob to reject non-STARK / corrupt bodies before they can be
+    // referenced by a fold, and write stark.json + publics.bin so the imported
+    // job is indistinguishable from a natively proved one.
+    if let Err(e) = crate::prover::recursion::write_stark_artifacts(&job_dir).await {
+        let _ = tokio::fs::remove_dir_all(&job_dir).await;
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": format!("not a valid STARK proof.bin: {}", e)})),
+        )
+            .into_response();
+    }
+
+    let now = Utc::now();
+    let mut job = Job::new(job_id, JobKind::BatchStark, vec![]);
+    job.status = JobStatus::Done;
+    job.started_at = Some(now);
+    job.finished_at = Some(now);
+    job.elapsed_ms = Some(0);
+    state.prover.jobs.insert(job_id, job);
+
+    (StatusCode::OK, Json(serde_json::json!({"job_id": job_id}))).into_response()
 }
 
 /// `GET /jobs/:id/snark` — return the Solidity-ready PLONK payload as JSON.

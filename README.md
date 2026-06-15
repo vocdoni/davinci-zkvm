@@ -226,6 +226,7 @@ No Anvil, ganache, or RPC endpoint needed.
 | `POST` | `/prove` | Submit a state-transition batch. `output: "plonk"` (default) or `"stark"` (foldable). Returns a job ID. |
 | `POST` | `/fold` | Chained mode: fold batch STARKs into the chain (genesis when `prev_fold_job` is absent). |
 | `POST` | `/finalize` | Chained mode: verify the decrypted results and wrap the chain in the final PLONK. |
+| `POST` | `/jobs/import` | Chained mode: import a raw STARK `proof.bin` proven on another worker as a local `BatchStark` job (scatter/gather). Body is the raw blob; returns a job ID. |
 | `GET` | `/jobs/{id}` | Job status (queued / running / done / failed) and timing. |
 | `GET` | `/jobs/{id}/snark` | The Solidity-ready PLONK payload as JSON. |
 | `GET` | `/jobs/{id}/snark/raw` | The raw `proof.bin` (bincode), for `cargo-zisk verify`. |
