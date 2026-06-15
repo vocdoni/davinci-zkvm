@@ -210,6 +210,44 @@ func (c *Client) FetchStarkProof(jobID string) ([]byte, error) {
 	return body, nil
 }
 
+// FetchStarkRaw downloads the raw bincode `proof.bin` of a completed STARK
+// job (GET /jobs/{id}/snark/raw). This is the blob the aggregator guest's
+// loader expects; ship it to another worker with [Client.ImportStark] to fold
+// a scattered batch on a single fold worker.
+func (c *Client) FetchStarkRaw(jobID string) ([]byte, error) {
+	resp, err := c.httpClient.Get(fmt.Sprintf("%s/jobs/%s/snark/raw", c.baseURL, jobID))
+	if err != nil {
+		return nil, fmt.Errorf("GET /jobs/%s/snark/raw: %w", jobID, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET /jobs/%s/snark/raw: status %d: %s", jobID, resp.StatusCode, body)
+	}
+	return body, nil
+}
+
+// ImportStark uploads a raw STARK `proof.bin` (POST /jobs/import) and returns
+// the new local job ID registered as a completed BatchStark job on this
+// worker. Use it to gather batch STARKs proved elsewhere onto a single fold
+// worker before calling [Client.SubmitFold].
+func (c *Client) ImportStark(proofBin []byte) (string, error) {
+	resp, err := c.httpClient.Post(c.baseURL+"/jobs/import", "application/octet-stream", bytes.NewReader(proofBin))
+	if err != nil {
+		return "", fmt.Errorf("POST /jobs/import: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("POST /jobs/import: status %d: %s", resp.StatusCode, respBody)
+	}
+	var result ProveResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("decode /jobs/import response: %w", err)
+	}
+	return result.JobID, nil
+}
+
 // FetchPublics downloads the raw committed publics of a completed job
 // (256 bytes: the guest's u32 output registers, little-endian).
 func (c *Client) FetchPublics(jobID string) ([]byte, error) {

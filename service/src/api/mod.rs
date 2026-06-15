@@ -26,6 +26,7 @@ pub fn router(state: AppState) -> Router {
         .route("/prove", post(prove::submit_prove))
         .route("/fold", post(fold::submit_fold))
         .route("/finalize", post(fold::submit_finalize))
+        .route("/jobs/import", post(jobs::import_stark))
         .route("/jobs/:id", get(jobs::get_job_status))
         .route("/jobs/:id/stark", get(jobs::get_job_stark))
         .route("/jobs/:id/proof/stark", get(jobs::get_job_proof_stark))

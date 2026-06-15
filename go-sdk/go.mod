@@ -4,9 +4,12 @@ go 1.25.5
 
 require (
 	github.com/ethereum/go-ethereum v1.16.7
+	github.com/frankban/quicktest v1.14.6
+	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/iden3/go-iden3-crypto v0.0.17
 	github.com/vocdoni/arbo v0.0.0-20260224125436-30808c99dfb2
 	github.com/vocdoni/davinci-node v0.0.2-0.20260302160544-e9393d9f6610
+	github.com/vocdoni/davinci-node/spec v0.0.0-20260302160544-e9393d9f6610
 	github.com/vocdoni/lean-imt-go v0.0.0-20260212110350-173da8db474b
 )
 
@@ -43,7 +46,6 @@ require (
 	github.com/fatih/color v1.16.0 // indirect
 	github.com/ferranbt/fastssz v0.1.4 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
-	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/getsentry/sentry-go v0.41.0 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/goccy/go-yaml v1.11.0 // indirect
@@ -51,6 +53,7 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
+	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/pprof v0.0.0-20251213031049-b05bdaca462f // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
@@ -105,7 +108,6 @@ require (
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/urfave/cli/v2 v2.27.5 // indirect
 	github.com/vocdoni/davinci-circom v0.1.0 // indirect
-	github.com/vocdoni/davinci-node/spec v0.0.0-20260302160544-e9393d9f6610 // indirect
 	github.com/vocdoni/gnark-crypto-primitives v0.0.2-0.20260115102516-64ce9c3fd55d // indirect
 	github.com/vocdoni/poseidon377 v0.0.0-20260107010505-905fd2aadb69 // indirect
 	github.com/x448/float16 v0.8.4 // indirect

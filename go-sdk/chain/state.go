@@ -372,6 +372,20 @@ func (s *State) ResultsPayload(privKey *big.Int) (*davinci.ResultsPayload, []uin
 	}, results, nil
 }
 
+// EncryptedResults returns the net results accumulator as 32 Twisted-Edwards
+// little-endian hex coordinates: 8 ElGamal ciphertexts, [c1x, c1y, c2x, c2y]
+// per field. This is the ciphertext published to the keywarden at election end;
+// decrypting it with the election private key yields the tally. It matches the
+// Ballot field of ResultsPayload, so the keywarden sees exactly what finalize
+// will decrypt.
+func (s *State) EncryptedResults() []string {
+	coords := make([]string, 32)
+	for i, v := range s.results {
+		coords[i] = hex.EncodeToString(arbo.BigIntToBytes(32, v))
+	}
+	return coords
+}
+
 // leafSiblings returns the inclusion siblings of a state tree key,
 // zero-padded to procLevels, as plain LE hex.
 func (s *State) leafSiblings(key uint64) ([]string, error) {
