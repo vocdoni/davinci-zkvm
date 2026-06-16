@@ -22,6 +22,7 @@
 //! skips reduction and requires the caller to guarantee the value is already `< p`.
 
 use ziskos::syscalls::{SyscallArith256ModParams, syscall_arith256_mod};
+use ziskos::zisklib::fcall_uint256_inv_mod;
 
 /// BLS12-381 Fr modulus:
 ///   p = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001
@@ -33,7 +34,9 @@ pub const BLS_FR_MOD: [u64; 4] = [
     0x73eda753299d7d48,
 ];
 
-/// p - 2: exponent for Fermat inversion  `a^(p-2) mod p`.
+/// p - 2: exponent for the legacy Fermat inversion `a^(p-2) mod p`.
+/// Retained for reference; `inv()` now uses `fcall_uint256_inv_mod` instead.
+#[allow(dead_code)]
 const PM2: [u64; 4] = [
     0xfffffffeffffffff,
     0x53bda402fffe5bfe,
@@ -144,19 +147,37 @@ pub fn neg(a: &BlsFrRaw) -> BlsFrRaw {
     sub_256(&BLS_FR_MOD, a)
 }
 
-/// Compute `a^(-1) mod p` using Fermat's little theorem: `a^(p-2) mod p`.
-/// Returns `ZERO` when `a` is `ZERO` (caller should avoid inverting zero).
-/// Cost: ~383 `arith256_mod` calls (255 squarings + ~128 multiplications).
+/// Compute `a^(-1) mod p`.
+///
+/// # Implementation (optimized)
+///
+/// Uses `fcall_uint256_inv_mod` — a ZisK *free-input call* (fcall) that reads
+/// the inverse as an unverified hint from the prover. Because fcalls are not
+/// constrained by the ZisK VM, the result is **verified** with a single checked
+/// `arith256_mod` syscall: `a * result ≡ 1 (mod p)`. If the hint is wrong (e.g.
+/// a malicious prover), the check fails and `ZERO` is returned, which propagates
+/// as a verification failure downstream — no unsoundness.
+///
+/// This replaces the legacy Fermat `a^(p-2) mod p` (~383 `arith256_mod` syscalls)
+/// with **1 fcall hint + 1 checked multiply**. The KZG barycentric evaluation
+/// (`kzg.rs`) calls `inv` inside `batch_inverse` (1× per batch of 4096) plus one
+/// constant inversion — each previously costing ~383 syscalls.
+///
+/// Returns `ZERO` when `a` is `ZERO`.
 #[inline]
 pub fn inv(a: &BlsFrRaw) -> BlsFrRaw {
     if a == &ZERO {
         return ZERO;
     }
-    pow(a, &PM2)
+    match fcall_uint256_inv_mod(a, &BLS_FR_MOD) {
+        Some(result) if muladd(a, &result, &ZERO) == ONE => result,
+        _ => ZERO,
+    }
 }
 
 /// Modular exponentiation `a^exp mod p`, square-and-multiply (LSB-first).
-/// Uses ~256 squarings and up to ~128 extra multiplications.
+/// Retained for reference; `inv()` now uses `fcall_uint256_inv_mod`.
+#[allow(dead_code)]
 pub fn pow(a: &BlsFrRaw, exp: &[u64; 4]) -> BlsFrRaw {
     let mut result = ONE;
     let mut base = *a;

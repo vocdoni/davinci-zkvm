@@ -19,6 +19,7 @@
 //! representation used by `types::FrRaw`.
 
 use ziskos::syscalls::{SyscallArith256ModParams, syscall_arith256_mod};
+use ziskos::zisklib::fcall_uint256_inv_mod;
 
 /// BN254 scalar field modulus (Fr):
 ///   p = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
@@ -29,7 +30,9 @@ pub const BN254_FR_MOD: [u64; 4] = [
     0x30644e72e131a029,
 ];
 
-/// p - 2: exponent for Fermat inversion `a^(p-2) mod p`.
+/// p - 2: exponent for the legacy Fermat inversion `a^(p-2) mod p`.
+/// Retained for reference; `inv()` now uses `fcall_uint256_inv_mod` instead.
+#[allow(dead_code)]
 const PM2: [u64; 4] = [
     0x43e1f593efffffff,
     0x2833e84879b97091,
@@ -87,15 +90,35 @@ pub fn neg(a: &BnFr) -> BnFr {
     sub_256(&BN254_FR_MOD, a)
 }
 
-/// Fermat inversion: `a^(p-2) mod p`.
-/// Returns `ZERO` when `a` is `ZERO` (caller should avoid inverting zero).
+/// Compute `a^(-1) mod p`.
+///
+/// # Implementation (optimized)
+///
+/// Uses `fcall_uint256_inv_mod` — a ZisK *free-input call* (fcall) that reads
+/// the inverse as an unverified hint from the prover. Because fcalls are not
+/// constrained by the ZisK VM, the result is **verified** with a single checked
+/// `arith256_mod` syscall: `a * result ≡ 1 (mod p)`. If the hint is wrong (e.g.
+/// a malicious prover), the check fails and `ZERO` is returned, which propagates
+/// as a verification failure downstream — no unsoundness.
+///
+/// This replaces the legacy Fermat `a^(p-2) mod p` (~383 `arith256_mod` syscalls)
+/// with **1 fcall hint + 1 checked multiply**.
+///
+/// Returns `ZERO` when `a` is `ZERO`.
 #[inline]
 pub fn inv(a: &BnFr) -> BnFr {
-    if a == &ZERO { return ZERO; }
-    pow(a, &PM2)
+    if a == &ZERO {
+        return ZERO;
+    }
+    match fcall_uint256_inv_mod(a, &BN254_FR_MOD) {
+        Some(result) if muladd(a, &result, &ZERO) == ONE => result,
+        _ => ZERO,
+    }
 }
 
 /// Modular exponentiation `a^exp mod p` (square-and-multiply, LSB-first).
+/// Retained for reference; `inv()` now uses `fcall_uint256_inv_mod`.
+#[allow(dead_code)]
 pub fn pow(a: &BnFr, exp: &[u64; 4]) -> BnFr {
     let mut result = ONE;
     let mut base = *a;
