@@ -10,6 +10,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+
+	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 )
 
 // Aggregator digest modes (word [1]).
@@ -98,4 +100,52 @@ func (d *Digest) StateRootHex() string {
 func (d *Digest) SameChain(o *Digest) bool {
 	return bytes.Equal(d.ConfigCommitment, o.ConfigCommitment) &&
 		d.BatchVK == o.BatchVK && d.FoldVK == o.FoldVK
+}
+
+// VerifyDigest performs the full semantic verification of a finalize digest
+// against the published election parameters and the pinned circuit release.
+//
+// An independent verifier who sees only the PLONK snark and the election
+// config calls this to confirm the proof is correctly bound — no sequencer
+// or service access required. The checks are:
+//
+//  1. Mode is finalize.
+//  2. fold_vk == proof's program_vk (closes the self-recursion knot).
+//  3. Both VKs match the pinned CircuitRelease (prevents circuit substitution).
+//  4. config_commitment == sha256(config_frame ‖ batch_vk ‖ fold_vk), recomputed
+//     from the published election config (prevents parameter substitution).
+//
+// Pass release as nil to skip the release-pinning check (3); this should only
+// be done when the caller has independently established the VKs are correct.
+func VerifyDigest(d *Digest, snarkProgramVK string, cfg *davinci.ChainConfig,
+	release *Release) error {
+	if d.Mode != ModeFinalize {
+		return fmt.Errorf("mode: got %d, want %d (finalize)", d.Mode, ModeFinalize)
+	}
+	if d.FoldVK != snarkProgramVK {
+		return fmt.Errorf("fold_vk binding: digest commits %s but proof program_vk is %s",
+			d.FoldVK, snarkProgramVK)
+	}
+	if release != nil && release.IsSet() {
+		if err := release.Verify(d.FoldVK, d.BatchVK); err != nil {
+			return fmt.Errorf("circuit release: %w", err)
+		}
+	}
+	batchWords, err := VKWords(d.BatchVK)
+	if err != nil {
+		return fmt.Errorf("batch vk words: %w", err)
+	}
+	foldWords, err := VKWords(d.FoldVK)
+	if err != nil {
+		return fmt.Errorf("fold vk words: %w", err)
+	}
+	expectedCC, err := CanonicalConfigCommitment(cfg, batchWords, foldWords)
+	if err != nil {
+		return fmt.Errorf("config commitment: %w", err)
+	}
+	if !bytes.Equal(d.ConfigCommitment, expectedCC[:]) {
+		return fmt.Errorf("config commitment mismatch: the digest does not " +
+			"bind the declared election parameters and circuit VKs")
+	}
+	return nil
 }

@@ -4,6 +4,7 @@
 package chain
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -231,6 +232,40 @@ func (s *Sequencer) Finalize(privKey *big.Int) (*FinalResult, error) {
 	snark, err := s.client.FetchSnark(finID)
 	if err != nil {
 		return nil, fmt.Errorf("FetchSnark %s: %w", finID, err)
+	}
+
+	// Circuit-release anchor: verify the service-learned VKs match the
+	// pinned CircuitRelease. Without this, a malicious service can substitute
+	// backdoored circuit ELFs (new VKs) and the sequencer will accept them as
+	// the baseline. The constants must be refreshed after every ELF rebuild.
+	if CircuitRelease.IsSet() {
+		if err := CircuitRelease.Verify(s.aggVK, s.batchVK); err != nil {
+			return nil, fmt.Errorf("circuit release check (refreeze "+
+				"CircuitRelease after ELF rebuild): %w", err)
+		}
+	}
+
+	// Config-commitment check: the digest must bind the same election
+	// parameters and circuit VKs the sequencer declared. This prevents a
+	// malicious service from substituting different parameters (e.g. a fake
+	// census root or encryption key) — the commitment in the digest would
+	// not match the locally recomputed one.
+	batchVKWords, err := VKWords(s.batchVK)
+	if err != nil {
+		return nil, fmt.Errorf("batch vk words: %w", err)
+	}
+	foldVKWords, err := VKWords(s.aggVK)
+	if err != nil {
+		return nil, fmt.Errorf("fold vk words: %w", err)
+	}
+	expectedCC, err := s.state.ConfigCommitment(batchVKWords, foldVKWords)
+	if err != nil {
+		return nil, fmt.Errorf("config commitment: %w", err)
+	}
+	if !bytes.Equal(digest.ConfigCommitment, expectedCC[:]) {
+		return nil, fmt.Errorf("config commitment mismatch: the digest does " +
+			"not bind the declared election parameters and circuit VKs — " +
+			"possible parameter or circuit substitution")
 	}
 
 	// Consistency against the local state and the external vk binding.
