@@ -6,6 +6,7 @@
 package chain
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -91,6 +92,36 @@ func RestoreState(cfg Config, blob []byte) (*State, error) {
 	root := "0x" + hex.EncodeToString(pad32(rootBytes))
 	if root != snap.Root {
 		return nil, fmt.Errorf("restored root %s != snapshot root %s", root, snap.Root)
+	}
+
+	// Anchor the snapshot to the election config: verify the four immutable
+	// config leaves in the restored tree match cfg. Without this, a snapshot
+	// taken under a different config (different process_id, encryption key,
+	// census_root, etc.) restores without detection, and Finalize would
+	// accept proofs built under the wrong parameters. The config leaves are
+	// set at genesis and never modified, so they must match at any point in
+	// the chain.
+	bLen := arbo.HashFunctionSha256.Len()
+	expectedLeaves := []struct {
+		key   uint64
+		value *big.Int
+	}{
+		{0x00, cfg.ProcessID},
+		{0x02, cfg.BallotMode},
+		{0x03, encKeyLeafValue(cfg.EncKey)},
+		{0x06, new(big.Int).SetUint64(cfg.CensusOrigin)},
+	}
+	for _, leaf := range expectedLeaves {
+		keyBytes := arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(leaf.key))
+		_, got, err := tree.Get(keyBytes)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot anchor: config leaf 0x%02x not found: %w", leaf.key, err)
+		}
+		want := arbo.BigIntToBytes(bLen, leaf.value)
+		if !bytes.Equal(got, want) {
+			return nil, fmt.Errorf("snapshot anchor: config leaf 0x%02x mismatch — "+
+				"snapshot was taken under different election parameters", leaf.key)
+		}
 	}
 
 	var results accumBallot
