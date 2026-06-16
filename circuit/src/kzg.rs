@@ -159,9 +159,11 @@ pub fn evaluate_barycentric(blob: &[u8], z: BlsFrRaw) -> BlsFrRaw {
         if d == ZERO {
             continue; // skip zero cells (common in sparse blobs)
         }
-        // term = d * w[i] * (z - w[i])^-1
-        let term = bls_fr::mul(&bls_fr::mul(&d, &omega[i]), &inv_diffs[i]);
-        sum = bls_fr::add(&sum, &term);
+        // term = d * w[i] * (z - w[i])^-1, accumulated into sum via a fused
+        // muladd: sum = (d * w[i]) * inv_diffs[i] + sum. Saves one syscall
+        // per non-zero cell versus separate mul + add.
+        let d_omega = bls_fr::mul(&d, &omega[i]);
+        sum = bls_fr::muladd(&d_omega, &inv_diffs[i], &sum);
     }
 
     // Factor: (z^N - 1) / N  (z^4096 via 12 squarings)
