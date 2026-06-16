@@ -88,45 +88,33 @@ func EncodeStateBlock(sd *StateTransitionData) ([]byte, error) {
 		bp := sd.BallotProofs
 		buf = appendU64(buf, 1) // has_ballot_data = true
 
-		// OldResults: 32 Fr elements
 		if len(bp.OldResults) != 32 {
 			return nil, fmt.Errorf("old_results must have 32 elements, got %d", len(bp.OldResults))
 		}
-		for i, s := range bp.OldResults {
-			fr, err := beHexToFrLE(s)
-			if err != nil {
-				return nil, fmt.Errorf("old_results[%d]: %w", i, err)
-			}
-			buf = appendFr(buf, fr)
+		buf, err = appendFrHexSlice(buf, bp.OldResults, beHexToFrLE)
+		if err != nil {
+			return nil, fmt.Errorf("old_results: %w", err)
 		}
 
-		// VoterBallots: n_vb, then 32 Fr per ballot
 		buf = appendU64(buf, uint64(len(bp.VoterBallots)))
 		for i, vb := range bp.VoterBallots {
 			if len(vb) != 32 {
 				return nil, fmt.Errorf("voter_ballots[%d] must have 32 elements, got %d", i, len(vb))
 			}
-			for j, s := range vb {
-				fr, err := beHexToFrLE(s)
-				if err != nil {
-					return nil, fmt.Errorf("voter_ballots[%d][%d]: %w", i, j, err)
-				}
-				buf = appendFr(buf, fr)
+			buf, err = appendFrHexSlice(buf, vb, beHexToFrLE)
+			if err != nil {
+				return nil, fmt.Errorf("voter_ballots[%d]: %w", i, err)
 			}
 		}
 
-		// OverwrittenBallots: n_ob, then 32 Fr per ballot
 		buf = appendU64(buf, uint64(len(bp.OverwrittenBallots)))
 		for i, ob := range bp.OverwrittenBallots {
 			if len(ob) != 32 {
 				return nil, fmt.Errorf("overwritten_ballots[%d] must have 32 elements, got %d", i, len(ob))
 			}
-			for j, s := range ob {
-				fr, err := beHexToFrLE(s)
-				if err != nil {
-					return nil, fmt.Errorf("overwritten_ballots[%d][%d]: %w", i, j, err)
-				}
-				buf = appendFr(buf, fr)
+			buf, err = appendFrHexSlice(buf, ob, beHexToFrLE)
+			if err != nil {
+				return nil, fmt.Errorf("overwritten_ballots[%d]: %w", i, err)
 			}
 		}
 	} else {
@@ -178,12 +166,9 @@ func encodeSMTEntry(e SmtEntry) ([]byte, error) {
 	}
 	buf = appendU64(buf, uint64(e.Fnc0))
 	buf = appendU64(buf, uint64(e.Fnc1))
-	for _, sib := range e.Siblings {
-		fr, err := leHexToFr(sib)
-		if err != nil {
-			return nil, fmt.Errorf("sibling: %w", err)
-		}
-		buf = appendFr(buf, fr)
+	buf, err := appendFrHexSlice(buf, e.Siblings, leHexToFr)
+	if err != nil {
+		return nil, fmt.Errorf("sibling: %w", err)
 	}
 	return buf, nil
 }
@@ -236,6 +221,33 @@ func appendU64(buf []byte, v uint64) []byte {
 	return append(buf, tmp[:]...)
 }
 
+// appendFrHexSlice converts each hex string via conv and appends the result
+// as a Fr word. Eliminates the repeated parse-append-errcheck boilerplate.
+func appendFrHexSlice(buf []byte, items []string, conv func(string) ([4]uint64, error)) ([]byte, error) {
+	for i, s := range items {
+		fr, err := conv(s)
+		if err != nil {
+			return nil, fmt.Errorf("[%d]: %w", i, err)
+		}
+		buf = appendFr(buf, fr)
+	}
+	return buf, nil
+}
+
+// appendCiphertexts encodes a slice of BjjCiphertext values (4 Fr words each).
+func appendCiphertexts(buf []byte, cts []BjjCiphertext) ([]byte, error) {
+	for j, ct := range cts {
+		for _, field := range []string{ct.C1.X, ct.C1.Y, ct.C2.X, ct.C2.Y} {
+			fr, err := beHexToFrLE(field)
+			if err != nil {
+				return nil, fmt.Errorf("ct[%d]: %w", j, err)
+			}
+			buf = appendFr(buf, fr)
+		}
+	}
+	return buf, nil
+}
+
 func boolToU64(b bool) uint64 {
 	if b {
 		return 1
@@ -261,13 +273,7 @@ func beHexToFrLE(s string) ([4]uint64, error) {
 	if len(b) != 32 {
 		return [4]uint64{}, fmt.Errorf("expected 32 bytes, got %d: %q", len(b), s)
 	}
-	// b is big-endian bytes [b31, b30, ..., b0]; convert to LE u64 limbs.
-	var out [4]uint64
-	for i := 0; i < 4; i++ {
-		// limb i = bytes[(3-i)*8 .. (4-i)*8] interpreted as big-endian
-		out[i] = binary.BigEndian.Uint64(b[(3-i)*8 : (4-i)*8])
-	}
-	return out, nil
+	return beBytes32ToFrLE(b), nil
 }
 
 // EncodeCensusBlock serializes a slice of CensusProof into the CENSUS binary block.
@@ -304,12 +310,9 @@ func EncodeCensusBlock(proofs []CensusProof) ([]byte, error) {
 		buf = appendFr(buf, leaf)
 		buf = appendU64(buf, p.Index)
 		buf = appendU64(buf, uint64(len(p.Siblings)))
-		for _, s := range p.Siblings {
-			sib, err := beHexToFrLE(s)
-			if err != nil {
-				return nil, fmt.Errorf("census sibling: %w", err)
-			}
-			buf = appendFr(buf, sib)
+		buf, err = appendFrHexSlice(buf, p.Siblings, beHexToFrLE)
+		if err != nil {
+			return nil, fmt.Errorf("census sibling: %w", err)
 		}
 	}
 	return buf, nil
@@ -343,59 +346,23 @@ buf = appendU64(buf, uint64(len(r.Entries)))
 buf = appendFr(buf, pKeyX)
 buf = appendFr(buf, pKeyY)
 
-for i, entry := range r.Entries {
-k, err := beHexToFrLE(entry.K)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] k: %w", i, err)
-}
-buf = appendFr(buf, k)
+	for i, entry := range r.Entries {
+		k, err := beHexToFrLE(entry.K)
+		if err != nil {
+			return nil, fmt.Errorf("reenc entry[%d] k: %w", i, err)
+		}
+		buf = appendFr(buf, k)
 
-for j, ct := range entry.Original {
-c1x, err := beHexToFrLE(ct.C1.X)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] original[%d] c1x: %w", i, j, err)
-}
-c1y, err := beHexToFrLE(ct.C1.Y)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] original[%d] c1y: %w", i, j, err)
-}
-c2x, err := beHexToFrLE(ct.C2.X)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] original[%d] c2x: %w", i, j, err)
-}
-c2y, err := beHexToFrLE(ct.C2.Y)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] original[%d] c2y: %w", i, j, err)
-}
-buf = appendFr(buf, c1x)
-buf = appendFr(buf, c1y)
-buf = appendFr(buf, c2x)
-buf = appendFr(buf, c2y)
-}
-for j, ct := range entry.Reencrypted {
-c1x, err := beHexToFrLE(ct.C1.X)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] reencrypted[%d] c1x: %w", i, j, err)
-}
-c1y, err := beHexToFrLE(ct.C1.Y)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] reencrypted[%d] c1y: %w", i, j, err)
-}
-c2x, err := beHexToFrLE(ct.C2.X)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] reencrypted[%d] c2x: %w", i, j, err)
-}
-c2y, err := beHexToFrLE(ct.C2.Y)
-if err != nil {
-return nil, fmt.Errorf("reenc entry[%d] reencrypted[%d] c2y: %w", i, j, err)
-}
-buf = appendFr(buf, c1x)
-buf = appendFr(buf, c1y)
-buf = appendFr(buf, c2x)
-buf = appendFr(buf, c2y)
-}
-}
-return buf, nil
+		buf, err = appendCiphertexts(buf, entry.Original[:])
+		if err != nil {
+			return nil, fmt.Errorf("reenc entry[%d] original: %w", i, err)
+		}
+		buf, err = appendCiphertexts(buf, entry.Reencrypted[:])
+		if err != nil {
+			return nil, fmt.Errorf("reenc entry[%d] reencrypted: %w", i, err)
+		}
+	}
+	return buf, nil
 }
 
 // kzgMagic is "KZGBLK!!" as literal bytes (matches circuit/src/types.rs KZG_MAGIC).
@@ -541,14 +508,7 @@ func addressHexToFrLE(s string) ([4]uint64, error) {
 	if len(b) != 20 {
 		return [4]uint64{}, fmt.Errorf("expected 20 bytes for address, got %d: %q", len(b), s)
 	}
-	// b is big-endian 20 bytes: [b19, b18, ..., b0]
-	// Pack into 32-byte big-endian (12 zero prefix bytes + 20 address bytes)
 	var padded [32]byte
 	copy(padded[12:], b)
-	var out [4]uint64
-	out[0] = binary.BigEndian.Uint64(padded[24:32])
-	out[1] = binary.BigEndian.Uint64(padded[16:24])
-	out[2] = binary.BigEndian.Uint64(padded[8:16])
-	out[3] = binary.BigEndian.Uint64(padded[0:8])
-	return out, nil
+	return beBytes32ToFrLE(padded[:]), nil
 }
