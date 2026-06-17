@@ -488,7 +488,9 @@ func bjjPointToFr32Hex(p interface{ Point() (*big.Int, *big.Int) }) (xHex, yHex 
 // KZG helpers
 
 // deriveKZGZ computes the evaluation point Z for KZG verification:
+//
 //	Z = SHA-256(processID_be32 ‖ rootHashBefore_be32 ‖ commitment_48)
+//
 // This matches the derivation in circuit/src/kzg.rs.
 func deriveKZGZ(processIDHex, rootBeforeHex string, commitment [48]byte) *big.Int {
 	processIDBytes, _ := hex.DecodeString(strings.TrimPrefix(processIDHex, "0x"))

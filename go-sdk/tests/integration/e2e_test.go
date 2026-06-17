@@ -55,20 +55,20 @@ func TestFullE2E(t *testing.T) {
 	//   values differ from the originals, making the tally verifiable.
 	batches := []batchSpec{
 		// Phase A: initial fresh votes
-		{Size: 2 * scale, VoterStart: -1, SeedOffset: 0},          // batch 1: fresh
-		{Size: 4 * scale, VoterStart: -1, SeedOffset: 0},          // batch 2: fresh
+		{Size: 2 * scale, VoterStart: -1, SeedOffset: 0}, // batch 1: fresh
+		{Size: 4 * scale, VoterStart: -1, SeedOffset: 0}, // batch 2: fresh
 
 		// Phase B: first round of overwrites (interleaved with fresh)
-		{Size: 2 * scale, VoterStart: 0, SeedOffset: 7},           // batch 3: overwrite batch-1 voters (1st time)
-		{Size: 2 * scale, VoterStart: -1, SeedOffset: 0},          // batch 4: fresh
-		{Size: 4 * scale, VoterStart: -1, SeedOffset: 0},          // batch 5: fresh
+		{Size: 2 * scale, VoterStart: 0, SeedOffset: 7},  // batch 3: overwrite batch-1 voters (1st time)
+		{Size: 2 * scale, VoterStart: -1, SeedOffset: 0}, // batch 4: fresh
+		{Size: 4 * scale, VoterStart: -1, SeedOffset: 0}, // batch 5: fresh
 
 		// Phase C: more overwrites and double overwrite
-		{Size: 4 * scale, VoterStart: 2 * scale, SeedOffset: 7},   // batch 6: overwrite batch-2 voters (1st time)
-		{Size: 2 * scale, VoterStart: 0, SeedOffset: 13},          // batch 7: overwrite batch-1 voters (2nd time = 3rd vote)
+		{Size: 4 * scale, VoterStart: 2 * scale, SeedOffset: 7}, // batch 6: overwrite batch-2 voters (1st time)
+		{Size: 2 * scale, VoterStart: 0, SeedOffset: 13},        // batch 7: overwrite batch-1 voters (2nd time = 3rd vote)
 
 		// Phase D: final fresh votes after all overwrites
-		{Size: 2 * scale, VoterStart: -1, SeedOffset: 0},          // batch 8: fresh
+		{Size: 2 * scale, VoterStart: -1, SeedOffset: 0}, // batch 8: fresh
 	}
 
 	nFresh := freshVoterCount(batches)

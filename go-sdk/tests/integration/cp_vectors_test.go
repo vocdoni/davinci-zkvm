@@ -46,14 +46,14 @@ type cpVector struct {
 }
 
 type cpVectors struct {
-	Order          string     `json:"order"`
-	ScalingFactor  string     `json:"scaling_factor"`
-	Generator      cpPoint    `json:"generator"`
-	PubKey         cpPoint    `json:"pub_key"`
-	PrivKey        string     `json:"priv_key"`
-	Vectors        []cpVector `json:"vectors"`
-	Poseidon12In   []string   `json:"poseidon12_in"`
-	Poseidon12Out  string     `json:"poseidon12_out"`
+	Order         string     `json:"order"`
+	ScalingFactor string     `json:"scaling_factor"`
+	Generator     cpPoint    `json:"generator"`
+	PubKey        cpPoint    `json:"pub_key"`
+	PrivKey       string     `json:"priv_key"`
+	Vectors       []cpVector `json:"vectors"`
+	Poseidon12In  []string   `json:"poseidon12_in"`
+	Poseidon12Out string     `json:"poseidon12_out"`
 }
 
 func toCpPoint(p ecc.Point) cpPoint {

@@ -2,20 +2,16 @@
 //!
 //! Endpoints exposed for a completed job:
 //!
-//! - `GET /jobs/:id`           — JSON status (queued / running / done /
-//!                               failed) plus timing metadata.
-//! - `GET /jobs/:id/snark`     — JSON payload ready for the on-chain
-//!                               verifier:
-//!                               `{ program_vk, root_c_vadcop_final,
-//!                                  public_values, proof_bytes }`,
-//!                               all `0x`-prefixed hex.
+//! - `GET /jobs/:id` — JSON status (queued / running / done / failed) plus
+//!   timing metadata.
+//! - `GET /jobs/:id/snark` — JSON payload ready for the on-chain verifier:
+//!   `{ program_vk, root_c_vadcop_final, public_values, proof_bytes }`, all
+//!   `0x`-prefixed hex.
 //! - `GET /jobs/:id/snark/raw` — raw `proof.bin` (bincode), useful for
-//!                               `cargo-zisk verify` and other ZisK-native
-//!                               tooling.
-//! - `GET /jobs/:id/publics`   — the 256-byte `publicValues` blob on its
-//!                               own.
-//! - `GET /jobs/:id/inputs`    — the raw `input.bin` the SNARK was
-//!                               generated over (audit / re-proving).
+//!   `cargo-zisk verify` and other ZisK-native tooling.
+//! - `GET /jobs/:id/publics` — the 256-byte `publicValues` blob on its own.
+//! - `GET /jobs/:id/inputs` — the raw `input.bin` the SNARK was generated
+//!   over (audit / re-proving).
 //!
 //! All artifact endpoints return `429 Too Early` until the job is `done`,
 //! `422 Unprocessable Entity` if the job failed, and `404 Not Found` for an

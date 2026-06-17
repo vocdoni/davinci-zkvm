@@ -9,8 +9,8 @@
 package integration
 
 import (
-	"encoding/hex"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"

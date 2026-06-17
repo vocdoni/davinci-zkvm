@@ -24,6 +24,11 @@ fn bad_request(msg: String) -> axum::response::Response {
 }
 
 /// Confirm the referenced job exists, completed, and has the expected kind.
+///
+/// `Result<(), Response>` is the axum handler-helper pattern: the `Err` side
+/// is a ready-made response the caller returns directly. `axum::Response` is
+/// ~128 bytes, hence the allow.
+#[allow(clippy::result_large_err)]
 fn check_parent_job(
     state: &AppState,
     id: Uuid,

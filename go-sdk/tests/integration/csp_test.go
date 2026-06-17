@@ -21,10 +21,10 @@ func TestCSPChainedStateTransitions(t *testing.T) {
 		scale = 1
 	}
 	cspBatches := []batchSpec{
-		{2 * scale, -1, 0},  // batch 1: fresh voters
-		{2 * scale, -1, 0},  // batch 2: fresh voters
-		{2 * scale, -1, 0},  // batch 3: fresh voters
-		{2 * scale, 0, 7},   // batch 4: overwrite voters from batch 1
+		{2 * scale, -1, 0}, // batch 1: fresh voters
+		{2 * scale, -1, 0}, // batch 2: fresh voters
+		{2 * scale, -1, 0}, // batch 3: fresh voters
+		{2 * scale, 0, 7},  // batch 4: overwrite voters from batch 1
 	}
 
 	nFresh := freshVoterCount(cspBatches)

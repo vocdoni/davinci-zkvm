@@ -13,18 +13,18 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	arbo "github.com/vocdoni/arbo"
 	"github.com/vocdoni/arbo/memdb"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/vocdoni/davinci-node/crypto/blobs"
-	bjjgnark "github.com/vocdoni/davinci-node/crypto/ecc/bjj_gnark"
 	"github.com/vocdoni/davinci-node/crypto/ecc"
+	bjjgnark "github.com/vocdoni/davinci-node/crypto/ecc/bjj_gnark"
 	"github.com/vocdoni/davinci-node/crypto/ecc/format"
 	"github.com/vocdoni/davinci-node/crypto/elgamal"
 	nodesig "github.com/vocdoni/davinci-node/crypto/signatures/ethereum"
 	"github.com/vocdoni/davinci-node/types"
-	leanimt "github.com/vocdoni/lean-imt-go"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
+	leanimt "github.com/vocdoni/lean-imt-go"
 )
 
 const (
@@ -112,10 +112,10 @@ func NewElection(nVoters int) (*Election, error) {
 	// Config values stored under their respective keys.
 	// The circuit validates these keys and cross-checks processID and encKey.
 	configValsBI := []*big.Int{
-		processIDBI,        // 0x00 = ProcessID (must match STATETX block header)
-		big.NewInt(0x01),   // 0x02 = BallotMode
-		encKeyHashBI,       // 0x03 = EncryptionKey (SHA-256 of pubkey coordinates)
-		big.NewInt(0x01),   // 0x06 = CensusOrigin
+		processIDBI,      // 0x00 = ProcessID (must match STATETX block header)
+		big.NewInt(0x01), // 0x02 = BallotMode
+		encKeyHashBI,     // 0x03 = EncryptionKey (SHA-256 of pubkey coordinates)
+		big.NewInt(0x01), // 0x06 = CensusOrigin
 	}
 	for i, k := range configKeys {
 		if err := procTree.Add(
@@ -199,11 +199,11 @@ func NewCSPElection(nVoters int) (*Election, error) {
 	// Use the same structure as NewElection but with a distinct identifier.
 	var processID types.ProcessID
 	copy(processID[:], "DAVINCI_CSP_INTEGR_T") // 20 bytes for addr
-	processID[20] = 0x01                        // version bytes (must be non-zero)
+	processID[20] = 0x01                       // version bytes (must be non-zero)
 	processID[21] = 0x00
 	processID[22] = 0x00
-	processID[23] = 0x04                        // censusOrigin hint
-	processID[24] = 0x00                        // nonce
+	processID[23] = 0x04 // censusOrigin hint
+	processID[24] = 0x00 // nonce
 	processID[25] = 0x00
 	processID[26] = 0x00
 	processID[27] = 0x00
@@ -238,10 +238,10 @@ func NewCSPElection(nVoters int) (*Election, error) {
 
 	bLen := arbo.HashFunctionSha256.Len()
 	configValsBI := []*big.Int{
-		processIDBI,        // 0x00 = ProcessID
-		big.NewInt(0x01),   // 0x02 = BallotMode
-		encKeyHashBI,       // 0x03 = EncryptionKey hash
-		big.NewInt(0x04),   // 0x06 = CensusOrigin = CSP
+		processIDBI,      // 0x00 = ProcessID
+		big.NewInt(0x01), // 0x02 = BallotMode
+		encKeyHashBI,     // 0x03 = EncryptionKey hash
+		big.NewInt(0x04), // 0x06 = CensusOrigin = CSP
 	}
 	for i, k := range configKeys {
 		if err := procTree.Add(
@@ -306,7 +306,8 @@ func NewCSPElection(nVoters int) (*Election, error) {
 
 // BuildCspData builds the CSP ECDSA census block for a batch of voters.
 // Each voter's eligibility is signed by the CSP key using Ethereum personal-sign:
-//   message = "\x19Ethereum Signed Message:\n92" || processID(32BE) || address(20) || weight(32BE) || index(8BE)
+//
+//	message = "\x19Ethereum Signed Message:\n92" || processID(32BE) || address(20) || weight(32BE) || index(8BE)
 func (e *Election) BuildCspData(batchVoters []*Voter) (*davinci.CspData, error) {
 	if e.CspKey == nil {
 		return nil, fmt.Errorf("election is not in CSP mode (no CSP key)")
@@ -603,7 +604,7 @@ func (e *Election) BuildKZGBlock(batchIdx int, oldRoot string) (*davinci.KZGRequ
 	// Construct a deterministic blob for this batch.
 	var blob types.Blob
 	for i := 0; i < 16; i++ {
-		big.NewInt(int64(batchIdx*16+i+1)).FillBytes(blob[i*32 : (i+1)*32])
+		big.NewInt(int64(batchIdx*16 + i + 1)).FillBytes(blob[i*32 : (i+1)*32])
 	}
 
 	kzgCommitment, err := blob.ComputeCommitment()
@@ -707,7 +708,6 @@ func (ta *TallyAccumulator) Subtract(ballots []*elgamal.Ballot) {
 		ta.count--
 	}
 }
-
 
 // (the election private key) and returns the 8 vote field totals.
 // Uses baby-step giant-step (BSGS) for discrete log recovery.

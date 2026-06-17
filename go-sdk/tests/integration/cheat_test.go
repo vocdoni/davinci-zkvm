@@ -7,6 +7,7 @@
 //  1. Generates a self-contained valid circuit input (2 ballot proofs on-the-fly)
 //  2. Verifies the valid input is accepted (overall_ok = 1)
 //  3. Tampers one field and verifies the corresponding fail_mask bit is set
+//
 // Prerequisites:
 //   - ziskemu in PATH
 //   - gen-input binary in PATH or at target/release/gen-input
@@ -423,7 +424,7 @@ func TestCheatWrongStateRoot(t *testing.T) {
 	// Shallow-copy the stateData and corrupt the old root.
 	sd := *base.stateData
 	sd.OldStateRoot = "0x" + hex.EncodeToString(make([]byte, 32)) // all-zeros
-	sd.ProcessID = sd.OldStateRoot                                 // processID = hash of old state
+	sd.ProcessID = sd.OldStateRoot                                // processID = hash of old state
 
 	tamperedState, err := davinci.EncodeStateBlock(&sd)
 	if err != nil {
@@ -467,8 +468,8 @@ func TestCheatMismatchedVoteID(t *testing.T) {
 // the STATETX block values so the cross-block binding check passes.
 func TestCheatValidKZGRoundTrip(t *testing.T) {
 	tests := []struct {
-		name   string
-		blob   func() *types.Blob
+		name string
+		blob func() *types.Blob
 	}{
 		{
 			name: "sparse_blob",

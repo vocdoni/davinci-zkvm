@@ -24,6 +24,21 @@ func pad32(b []byte) []byte {
 	return out
 }
 
+// paddedSiblingHexes zero-pads sibs to exactly levels entries and returns
+// each as 0x-prefixed 32-byte hex. arbo unpacks only the non-empty siblings;
+// the circuit expects one per level.
+func paddedSiblingHexes(sibs [][]byte, bLen, levels int) []string {
+	zero := make([]byte, bLen)
+	for len(sibs) < levels {
+		sibs = append(sibs, zero)
+	}
+	out := make([]string, levels)
+	for i, sib := range sibs[:levels] {
+		out[i] = "0x" + hex.EncodeToString(pad32(sib))
+	}
+	return out
+}
+
 // buildArboInsertEntry inserts newKey into the tree and returns the
 // circuit insert proof (fnc = 1,0). The key must not exist yet.
 func buildArboInsertEntry(tree *arbo.Tree, newKeyBI, newValueBI *big.Int, levels int) (davinci.SmtEntry, error) {
@@ -73,11 +88,7 @@ func buildArboInsertEntry(tree *arbo.Tree, newKeyBI, newValueBI *big.Int, levels
 	if !isOld0 && len(sibs) > 0 {
 		sibs = sibs[:len(sibs)-1]
 	}
-	zero := make([]byte, bLen)
-	for len(sibs) < levels {
-		sibs = append(sibs, zero)
-	}
-	sibs = sibs[:levels]
+	sibStrs := paddedSiblingHexes(sibs, bLen, levels)
 
 	entry := davinci.SmtEntry{
 		OldRoot:  "0x" + hex.EncodeToString(pad32(oldRootBytes)),
@@ -88,13 +99,10 @@ func buildArboInsertEntry(tree *arbo.Tree, newKeyBI, newValueBI *big.Int, levels
 		NewValue: "0x" + hex.EncodeToString(pad32(newValueBytes)),
 		Fnc0:     1,
 		Fnc1:     0,
-		Siblings: make([]string, levels),
+		Siblings: sibStrs,
 	}
 	if isOld0 {
 		entry.IsOld0 = 1
-	}
-	for i, sib := range sibs {
-		entry.Siblings[i] = "0x" + hex.EncodeToString(pad32(sib))
 	}
 	return entry, nil
 }
@@ -130,15 +138,7 @@ func buildArboUpdateEntry(tree *arbo.Tree, keyBI, newValueBI *big.Int, levels in
 	if err != nil {
 		return davinci.SmtEntry{}, fmt.Errorf("UnpackSiblings: %w", err)
 	}
-	zero := make([]byte, bLen)
-	for len(sibs) < levels {
-		sibs = append(sibs, zero)
-	}
-	sibs = sibs[:levels]
-	sibStrs := make([]string, levels)
-	for i, sib := range sibs {
-		sibStrs[i] = "0x" + hex.EncodeToString(pad32(sib))
-	}
+	sibStrs := paddedSiblingHexes(sibs, bLen, levels)
 
 	return davinci.SmtEntry{
 		OldRoot:  "0x" + hex.EncodeToString(pad32(oldRootBytes)),
@@ -177,15 +177,7 @@ func buildArboReadProofs(tree *arbo.Tree, keys []uint64, bLen, levels int) ([]da
 		if err != nil {
 			return nil, err
 		}
-		zero := make([]byte, bLen)
-		for len(sibs) < levels {
-			sibs = append(sibs, zero)
-		}
-		sibs = sibs[:levels]
-		sibStrs := make([]string, levels)
-		for i, sib := range sibs {
-			sibStrs[i] = "0x" + hex.EncodeToString(pad32(sib))
-		}
+		sibStrs := paddedSiblingHexes(sibs, bLen, levels)
 		entries = append(entries, davinci.SmtEntry{
 			OldRoot:  rootHex,
 			NewRoot:  rootHex,

@@ -27,16 +27,16 @@ const MaxBatchSize = 256
 //	    root[i] = uint64(outputs[base+i*2]) | (uint64(outputs[base+i*2+1]) << 32)
 //	}
 const (
-	OutputOverallOk  = 0  // 1 = all checks passed, 0 = failure
-	OutputFailMask   = 1  // bit-flag mask (see FAIL_* in types.rs)
+	OutputOverallOk = 0 // 1 = all checks passed, 0 = failure
+	OutputFailMask  = 1 // bit-flag mask (see FAIL_* in types.rs)
 
 	// RootHashBefore: 256-bit Arbo SHA-256 state root before the batch (8 × u32, LE)
-	OutputOldRoot    = 2  // base index; occupies slots [2..9]
+	OutputOldRoot = 2 // base index; occupies slots [2..9]
 
 	// RootHashAfter: 256-bit Arbo SHA-256 state root after the batch (8 × u32, LE)
-	OutputNewRoot    = 10 // base index; occupies slots [10..17]
+	OutputNewRoot = 10 // base index; occupies slots [10..17]
 
-	OutputVotersCount     = 18 // number of non-dummy votes in this batch
+	OutputVotersCount      = 18 // number of non-dummy votes in this batch
 	OutputOverwrittenCount = 19 // number of votes that overwrote an earlier ballot
 
 	// CensusRoot: 256-bit lean-IMT Poseidon BN254 census root (8 × u32, LE)
@@ -47,11 +47,11 @@ const (
 	OutputBlobCommitment = 28 // base index; occupies slots [28..39]
 
 	// Diagnostic outputs (not used as public inputs)
-	OutputBatchOk    = 40 // Groth16 batch verification result (1=ok)
-	OutputECDSAOk    = 41 // ECDSA signature batch result (1=ok)
-	OutputNProofs    = 43 // number of Groth16 proofs verified
-	OutputNPublic    = 44 // number of public inputs per Groth16 proof
-	OutputLogN       = 45 // log₂ of the aggregation tree depth
+	OutputBatchOk = 40 // Groth16 batch verification result (1=ok)
+	OutputECDSAOk = 41 // ECDSA signature batch result (1=ok)
+	OutputNProofs = 43 // number of Groth16 proofs verified
+	OutputNPublic = 44 // number of public inputs per Groth16 proof
+	OutputLogN    = 45 // log₂ of the aggregation tree depth
 )
 
 // SmtEntry represents one Arbo-compatible SMT state-transition proof.

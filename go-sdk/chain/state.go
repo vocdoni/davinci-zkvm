@@ -282,13 +282,13 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 		OverwrittenCount: uint64(len(overwritten)),
 		// STATETX carries the processID as arbo-LE hex (the leaf value
 		// encoding for config key 0x00).
-		ProcessID:        "0x" + hex.EncodeToString(arbo.BigIntToBytes(bLen, s.cfg.ProcessID)),
-		OldStateRoot:     oldRoot,
-		NewStateRoot:     newRoot,
-		VoteIDSmt:        voteIDChain,
-		BallotSmt:        ballotChain,
-		ResultsSmt:       &resultsEntry,
-		ProcessSmt:       processSmtProofs,
+		ProcessID:    "0x" + hex.EncodeToString(arbo.BigIntToBytes(bLen, s.cfg.ProcessID)),
+		OldStateRoot: oldRoot,
+		NewStateRoot: newRoot,
+		VoteIDSmt:    voteIDChain,
+		BallotSmt:    ballotChain,
+		ResultsSmt:   &resultsEntry,
+		ProcessSmt:   processSmtProofs,
 		BallotProofs: &davinci.BallotProofData{
 			OldResults:         accumToStrings(oldResults),
 			VoterBallots:       voterBallotStrs,
