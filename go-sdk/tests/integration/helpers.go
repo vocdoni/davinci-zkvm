@@ -299,6 +299,21 @@ func buildArboReadProofs(tree *arbo.Tree, keys []uint64, bLen, levels int) ([]da
 	return entries, nil
 }
 
+// NumFields / BallotFields mirror the SDK's field-count knob so the harness
+// builds N-field state consistently with the guest circuit.
+const (
+	NumFields    = davinci.NumFields
+	BallotFields = davinci.BallotFields
+)
+
+// wideBallot is the state-path carrier for an N-field ballot: a slice of
+// NumFields ElGamal ciphertexts. Slots [0, election.NumFields) hold the real
+// re-encrypted ciphertexts; slots [election.NumFields, NumFields) carry the TE
+// identity ((0,1),(0,1)). The guest reads num_fields from the BallotMode leaf,
+// asserts the padded slots are identity, and skips the per-field EC work there,
+// so the SMT leaf, results accumulator and reencryption block stay consistent.
+type wideBallot []*elgamal.Ciphertext
+
 // Census (lean-IMT Poseidon) helpers
 
 // ballotLeafHash computes a deterministic 32-byte SHA-256 leaf value for an
@@ -307,11 +322,11 @@ func buildArboReadProofs(tree *arbo.Tree, keys []uint64, bLen, levels int) ([]da
 // big-endian word so the hash is unambiguous. Points are stored internally in
 // Reduced Twisted Edwards (RTE) form and must be converted to TE before hashing
 // to match the circuit's expected digest.
-func ballotLeafHash(b *elgamal.Ballot) *big.Int {
+func ballotLeafHash(b wideBallot) *big.Int {
 	h := sha256.New()
 	buf := make([]byte, 32)
-	for i := 0; i < 8; i++ {
-		if b.Ciphertexts[i] == nil {
+	for i := 0; i < NumFields; i++ {
+		if b[i] == nil {
 			// Identity point (0,1) in TE: 4 coordinates = 0, 1, 0, 1
 			zeroCoord := make([]byte, 32)
 			oneCoord := make([]byte, 32)
@@ -322,9 +337,9 @@ func ballotLeafHash(b *elgamal.Ballot) *big.Int {
 			h.Write(oneCoord)
 			continue
 		}
-		c1rx, c1ry := b.Ciphertexts[i].C1.Point()
+		c1rx, c1ry := b[i].C1.Point()
 		c1tx, c1ty := format.FromRTEtoTE(c1rx, c1ry)
-		c2rx, c2ry := b.Ciphertexts[i].C2.Point()
+		c2rx, c2ry := b[i].C2.Point()
 		c2tx, c2ty := format.FromRTEtoTE(c2rx, c2ry)
 		for _, coord := range []*big.Int{c1tx, c1ty, c2tx, c2ty} {
 			coord.FillBytes(buf)
@@ -362,8 +377,8 @@ var (
 	bjjTED = big.NewInt(168696)
 )
 
-// frAccumBallot represents a ballot as 32 big.Int TE coordinates.
-type frAccumBallot [32]*big.Int
+// frAccumBallot represents a ballot as BallotFields big.Int TE coordinates.
+type frAccumBallot [BallotFields]*big.Int
 
 // newZeroFrAccum returns the identity accumulator: every point is the TE
 // identity (0, 1), matching davinci-node elgamal.NewBallot.
@@ -400,13 +415,13 @@ func teAdd(x1, y1, x2, y2 *big.Int) (*big.Int, *big.Int) {
 	return x3.Mod(x3, p), y3.Mod(y3, p)
 }
 
-// frAccumFromBallot converts an elgamal.Ballot to frAccumBallot (TE coordinates).
-func frAccumFromBallot(ballot *elgamal.Ballot) frAccumBallot {
+// frAccumFromBallot converts a wideBallot to frAccumBallot (TE coordinates).
+func frAccumFromBallot(ballot wideBallot) frAccumBallot {
 	var acc frAccumBallot
-	for i := 0; i < 8; i++ {
-		rx, ry := ballot.Ciphertexts[i].C1.Point()
+	for i := 0; i < NumFields; i++ {
+		rx, ry := ballot[i].C1.Point()
 		c1tx, c1ty := format.FromRTEtoTE(rx, ry)
-		rx2, ry2 := ballot.Ciphertexts[i].C2.Point()
+		rx2, ry2 := ballot[i].C2.Point()
 		c2tx, c2ty := format.FromRTEtoTE(rx2, ry2)
 		acc[i*4] = c1tx
 		acc[i*4+1] = c1ty
@@ -417,10 +432,10 @@ func frAccumFromBallot(ballot *elgamal.Ballot) frAccumBallot {
 }
 
 // frAccumAdd adds two ballots homomorphically: BabyJubJub point addition of
-// each of the 16 (x, y) coordinate pairs.
+// each of the BallotFields/2 (x, y) coordinate pairs.
 func frAccumAdd(a, b frAccumBallot) frAccumBallot {
 	var out frAccumBallot
-	for i := 0; i < 16; i++ {
+	for i := 0; i < BallotFields/2; i++ {
 		out[i*2], out[i*2+1] = teAdd(a[i*2], a[i*2+1], b[i*2], b[i*2+1])
 	}
 	return out
@@ -431,7 +446,7 @@ func frAccumAdd(a, b frAccumBallot) frAccumBallot {
 func frAccumSub(a, b frAccumBallot) frAccumBallot {
 	p := bn254ScalarField
 	var negB frAccumBallot
-	for i := 0; i < 16; i++ {
+	for i := 0; i < BallotFields/2; i++ {
 		negB[i*2] = new(big.Int).Mod(new(big.Int).Neg(b[i*2]), p)
 		negB[i*2+1] = b[i*2+1]
 	}
@@ -449,9 +464,9 @@ func frAccumLeafHash(acc frAccumBallot) *big.Int {
 	return new(big.Int).SetBytes(h.Sum(nil))
 }
 
-// frAccumToStrings converts frAccumBallot to 32 big-endian hex strings.
+// frAccumToStrings converts frAccumBallot to BallotFields big-endian hex strings.
 func frAccumToStrings(acc frAccumBallot) []string {
-	out := make([]string, 32)
+	out := make([]string, BallotFields)
 	for i, v := range acc {
 		out[i] = bigIntToFr32(v)
 	}

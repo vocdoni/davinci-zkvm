@@ -221,18 +221,66 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   `circuit-primitives/src/types.rs`, mirrored in `input-gen` and
   `go-sdk/types.go`): the circuit rejects any batch with more than 256
   proofs. Raising it means changing all three constants and rebuilding
-  both ELFs (new program_vk).
+  both ELFs (new program_vk). Note batch 256 at num_fields=16 needs
+  `--minimal-memory` to fit the 32 GB GPU (auto-enabled on retry; see
+  Performance baseline).
+- **Ballot capacity is `NUM_FIELDS = 16`** (`circuit-primitives/src/types.rs`,
+  mirrored in `input-gen/src/lib.rs` and `go-sdk/types.go`;
+  davinci-node calls it `FieldsPerBallot`). The fixed-size gnark/circom
+  circuits always carry 16 ElGamal ciphertexts, but the zkVM guest reads
+  the election's declared `num_fields` from bits[0:8] of the committed
+  BallotMode leaf (`process_proofs[1].new_value[0]`, bound to the
+  `old_state_root`) and skips per-field EC work on padded slots
+  `i >= num_fields`. **Soundness rests on identity-padding:** davinci-node
+  stores the TE identity ciphertext `((0,1),(0,1))` in padded slots (not an
+  encryption-of-zero), and the guest asserts each padded slot is identity
+  before skipping its reencryption-verify and accumulator EC adds
+  (`verify_reencryption` / `ballot_net` in `circuit-primitives/src/`). The
+  SHA-256 ballot leaf still covers all 16 coords. Reencryption uses a
+  distinct Poseidon-chained offset scalar per field (`k_0 = poseidon1(k)`,
+  `k_{i+1} = poseidon1(k_i)`), matching davinci-node v0.3.0.
+  `TestCheatTamperPaddedSlot` guards the skip; sweep configs in tests with
+  `BALLOT_NUM_FIELDS`.
 
 ## Performance baseline (RTX 5090, ZisK v0.18.0)
 
-| batch | PLONK SNARK | votes/s | on-chain verify |
-|---:|---:|---:|---:|
-|  64 |   34 s | 1.9 | 315 ms |
-| 128 |   52 s | 2.4 | 349 ms |
-| 256 |   88 s | 2.9 | 349 ms |
+Ballot capacity is 16 fields (`NUM_FIELDS`), but the guest reads the
+election's declared `num_fields` from the committed BallotMode leaf and
+skips the per-field EC work on identity-padded slots `i >= num_fields`
+(see the `NUM_FIELDS` gotcha above). Proving time therefore scales with
+the *declared* field count, not the 16-field maximum. PLONK SNARK time
+(`TestPlonkBenchmark`, sweep the field count with `BALLOT_NUM_FIELDS`):
 
-SNARK size is 2.7 KB regardless of batch. Chained-mode numbers
-(STARK batches + folds + one final PLONK) live in `BENCHMARK.md`.
+| batch | num_fields=2 | num_fields=16 | on-chain verify |
+|---:|---:|---:|---:|
+|  64 |   38 s |    83 s | ~0.3–0.5 s |
+| 128 |   73 s |   164 s | ~0.5 s |
+| 256 |  102 s | 289 s (min-mem) | ~0.3 s |
+
+SNARK size is 768 B `proofBytes` / 256 B `publicValues`, invariant across
+batch size and field count (the on-chain interface does not change with
+`num_fields`). On-chain verify is field-count independent.
+
+**Batch 256 at num_fields=16 needs `--minimal-memory`.** The per-field
+chained reencryption (davinci-node v0.3.0 uses a distinct Poseidon-chained
+offset scalar per ciphertext field) means ~16 EC scalar-muls per ballot at
+full capacity; at 256 ballots the default GPU schedule overflows 32 GB during
+inner-proof generation (deterministic SIGKILL, not a transient flake). The
+worker auto-escalates to `cargo-zisk prove --minimal-memory` on any retry,
+which keeps the witness footprint under the GPU ceiling (peak ~31.3 GB) and
+proves+verifies in ~289 s. `--minimal-memory` only reschedules witness
+storage — it doesn't touch the circuit, constraints, or the proven statement,
+so the result still verifies and soundness is unaffected (the proof bytes
+themselves differ run-to-run anyway: the PLONK wrap is zero-knowledge). The
+speed cost is small: a matched A/B on one batch-128 num_fields=16 input
+measured 138.4 s plain vs 142.1 s with `--minimal-memory` (+2.7%); on a
+lighter input where memory isn't the bottleneck it was +0.7%. Set
+`ZISK_MINIMAL_MEMORY=1` to force it from the first attempt and skip the doomed
+default-schedule attempt for workloads known to run batch 256 at high
+`num_fields`.
+
+Chained-mode numbers (STARK batches + folds + one final PLONK) live in
+`BENCHMARK.md`.
 
 ## Workflow tips
 

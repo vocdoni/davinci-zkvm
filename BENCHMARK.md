@@ -73,13 +73,28 @@ proving is ~96% of the time; fold cadence moves the total by ~1–2%.
 
 ## Per-batch mode — one PLONK + one on-chain verification per batch
 
-| batch | PLONK SNARK | votes/s | on-chain verify |
-|---:|---:|---:|---:|
-|  64 |  34 s | 1.9 | 315 ms |
-| 128 |  52 s | 2.4 | 349 ms |
-| 256 |  88 s | 2.9 | 349 ms |
+Ballot capacity is 16 fields; the guest skips per-field EC work on padded
+slots, so PLONK time scales with the election's declared `num_fields`, not
+the 16-field max (sweep with `BALLOT_NUM_FIELDS`):
 
-SNARK size is 2.7 KB regardless of batch size.
+| batch | PLONK (num_fields=2) | PLONK (num_fields=16) | on-chain verify |
+|---:|---:|---:|---:|
+|  64 |  38 s |    83 s | ~0.3–0.5 s |
+| 128 |  73 s |   164 s | ~0.5 s |
+| 256 | 102 s | 289 s (min-mem) | ~0.3 s |
+
+`proofBytes` is 768 B / `publicValues` 256 B regardless of batch or field
+count. At num_fields=16 the per-field chained reencryption makes the
+`ArithEq` trace large enough that batch 256 overflows the 32 GB GPU under
+the default schedule. The prover worker auto-escalates to
+`cargo-zisk prove --minimal-memory` on retry (force from the first attempt
+with `ZISK_MINIMAL_MEMORY=1`), which holds the witness footprint at a
+~31.3 GB peak and proves+verifies in ~289 s. `--minimal-memory` only
+reschedules witness storage — it doesn't change the circuit, constraints, or
+the proven statement, so the result still verifies and soundness is
+unaffected. The speed cost is small: a matched A/B on one batch-128
+num_fields=16 input measured 138.4 s plain vs 142.1 s with `--minimal-memory`
+(+2.7%); on a lighter input it was +0.7%.
 
 ## Comparing the modes
 

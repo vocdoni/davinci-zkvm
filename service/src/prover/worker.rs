@@ -202,11 +202,16 @@ fn is_transient_prover_error(msg: &str) -> bool {
 async fn run_prove_with_retry(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
     let mut last_err = anyhow::anyhow!("prove never attempted");
     for attempt in 1..=MAX_PROVE_RETRIES + 1 {
-        match run_prove(config, task).await {
+        // Retries escalate to --minimal-memory: it makes the proof fit on the
+        // GPU for large batches at high num_fields (deterministic OOM otherwise)
+        // and is byte-identical to a normal prove, so it can never weaken a
+        // result. The first attempt stays fast unless the operator forces it.
+        let minimal_memory = config.zisk_minimal_memory || attempt > 1;
+        match run_prove(config, task, minimal_memory).await {
             Ok(()) => return Ok(()),
             Err(e) if attempt <= MAX_PROVE_RETRIES && is_transient_prover_error(&e.to_string()) => {
                 warn!(
-                    "Job {} hit a transient prover error (attempt {}/{}); retrying in {}s",
+                    "Job {} hit a transient prover error (attempt {}/{}); retrying in {}s with --minimal-memory",
                     task.job_id, attempt, MAX_PROVE_RETRIES, PROVE_RETRY_DELAY_SECS
                 );
                 last_err = e;
@@ -219,7 +224,7 @@ async fn run_prove_with_retry(config: &Config, task: &ProveTask) -> anyhow::Resu
     Err(last_err)
 }
 
-async fn run_prove(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
+async fn run_prove(config: &Config, task: &ProveTask, minimal_memory: bool) -> anyhow::Result<()> {
     // Run the ZisK prove pipeline. With `plonk` set the output at
     // `proof.bin` is a bincode-encoded ZisK `Proof` whose body is the
     // fflonk PLONK SNARK; without it the body is the vadcop-final STARK,
@@ -243,6 +248,9 @@ async fn run_prove(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
         zisk_args.push("--proving-key-plonk".to_string());
         zisk_args.push(config.proving_key_plonk_path.display().to_string());
         zisk_args.push("--plonk".to_string());
+    }
+    if minimal_memory {
+        zisk_args.push("--minimal-memory".to_string());
     }
 
     let output = if config.zisk_mpi_procs > 1 {

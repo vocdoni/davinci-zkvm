@@ -50,10 +50,10 @@ type VoterBallot struct {
 type VoterReencryption struct {
 	// K is the re-encryption random seed (before Poseidon hash).
 	K *big.Int
-	// Original contains the 8 original ElGamal ciphertexts from the ballot proof.
-	Original [8]BjjCiphertext
-	// Reencrypted contains the 8 re-encrypted ciphertexts stored in the state tree.
-	Reencrypted [8]BjjCiphertext
+	// Original contains the NumFields original ElGamal ciphertexts from the ballot proof.
+	Original [NumFields]BjjCiphertext
+	// Reencrypted contains the NumFields re-encrypted ciphertexts stored in the state tree.
+	Reencrypted [NumFields]BjjCiphertext
 }
 
 // ProveBatch is a complete batch of voter ballots with all auxiliary data

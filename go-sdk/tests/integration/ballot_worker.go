@@ -43,10 +43,10 @@ type workerBallotResult struct {
 	ProofJSON    string    `json:"proof_json"`
 	PublicInputs []string  `json:"public_inputs"`
 	SigJSON      string    `json:"sig_json"`
-	C1X          [8]string `json:"c1x"`
-	C1Y          [8]string `json:"c1y"`
-	C2X          [8]string `json:"c2x"`
-	C2Y          [8]string `json:"c2y"`
+	C1X          [NumFields]string `json:"c1x"`
+	C1Y          [NumFields]string `json:"c1y"`
+	C2X          [NumFields]string `json:"c2x"`
+	C2Y          [NumFields]string `json:"c2y"`
 }
 
 // ---- parent side ----
@@ -180,7 +180,7 @@ func generateBallotBatchSubprocessOne(
 		sigs[i] = json.RawMessage(wr.SigJSON)
 
 		raw := &ballotRaw{}
-		for j := 0; j < 8; j++ {
+		for j := 0; j < NumFields; j++ {
 			raw.C1X[j], _ = new(big.Int).SetString(wr.C1X[j], 10)
 			raw.C1Y[j], _ = new(big.Int).SetString(wr.C1Y[j], 10)
 			raw.C2X[j], _ = new(big.Int).SetString(wr.C2X[j], 10)

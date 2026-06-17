@@ -67,8 +67,8 @@ type BallotResult struct {
 
 // ballotRaw holds the raw ciphertext data extracted from an elgamal.Ballot.
 type ballotRaw struct {
-	// Fields contains the 8 ciphertext pairs (C1, C2) as (x, y) big.Int pairs.
-	C1X, C1Y, C2X, C2Y [8]*big.Int
+	// Fields contains the NumFields ciphertext pairs (C1, C2) as (x, y) big.Int pairs.
+	C1X, C1Y, C2X, C2Y [davinci.NumFields]*big.Int
 }
 
 // GenerateBallotBatch generates one Groth16 ballot proof per voter and returns
@@ -101,7 +101,7 @@ func GenerateBallotBatch(
 
 	for i, v := range voters {
 		seed := seedBase + int64(i)
-		res, err := ballotprooftest.BallotProofForTestDeterministic(
+		res, err := ballotprooftest.DeterministicBallotProof(
 			v.AddressBytes, processID, encKey, seed)
 		if err != nil {
 			return nil, fmt.Errorf("voter %d ballot proof: %w", i, err)
@@ -199,14 +199,14 @@ func (b *BatchProveComponents) ToProveRequest() *davinci.ProveRequest {
 	}
 }
 
-// extractBallotRaw copies the 8 ciphertext big.Int values out of a BallotProofResult.
+// extractBallotRaw copies the NumFields ciphertext big.Int values out of a BallotProofResult.
 // BallotProofResult.Ballot has TE (Twisted Edwards) coordinates. We convert back to RTE
 // (Reduced Twisted Edwards) before calling SetPoint, which expects RTE form.
 func extractBallotRaw(res *ballotprooftest.BallotProofResult) *ballotRaw {
 	// Convert TE → RTE so SetPoint receives the expected coordinate form.
 	rteBallot := res.Ballot.FromTEtoRTE()
 	raw := &ballotRaw{}
-	for i := 0; i < 8; i++ {
+	for i := 0; i < davinci.NumFields; i++ {
 		if i < len(rteBallot.Ciphertexts) && rteBallot.Ciphertexts[i] != nil {
 			x1, y1 := rteBallot.Ciphertexts[i].C1.Point()
 			x2, y2 := rteBallot.Ciphertexts[i].C2.Point()

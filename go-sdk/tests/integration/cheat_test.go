@@ -416,6 +416,42 @@ func TestCheatWrongReencKey(t *testing.T) {
 	assertCircuitFails(t, tampered, failReenc, "wrong_reenc_key")
 }
 
+// TestCheatTamperPaddedSlot verifies the soundness of the num_fields-aware skip:
+// the guest skips the per-field EC re-encryption work on padded slots
+// (i >= num_fields) but guards it by asserting those slots carry the TE identity.
+// An attacker who stuffs a non-identity ciphertext into a skipped slot (e.g. to
+// smuggle extra encrypted weight past the homomorphic accumulator) must be
+// rejected. The fixture's NumFields is 6, so slot 6 is padded.
+func TestCheatTamperPaddedSlot(t *testing.T) {
+	base, election, results := buildCheatInput(t)
+
+	if election.NumFields >= davinci.NumFields {
+		t.Skipf("fixture NumFields=%d leaves no padded slot to tamper", election.NumFields)
+	}
+	padIdx := election.NumFields // first padded (skipped) ciphertext slot
+
+	reencData, _, err := election.BuildReencBlock(results)
+	if err != nil {
+		t.Fatalf("BuildReencBlock: %v", err)
+	}
+	// Corrupt the padded slot's original ciphertext to a non-identity x-coord on
+	// both sides, simulating an attacker trying to ride the skipped EC check.
+	for i := range reencData.Entries {
+		reencData.Entries[i].Original[padIdx].C1.X = bigIntToFr32(big.NewInt(0x99))
+		reencData.Entries[i].Reencrypted[padIdx].C1.X = bigIntToFr32(big.NewInt(0x99))
+	}
+
+	tamperedReenc, err := davinci.EncodeReencBlock(reencData)
+	if err != nil {
+		t.Fatalf("EncodeReencBlock: %v", err)
+	}
+
+	tampered := append(append(base.baseBin, base.stateBlock...), base.censusBlock...)
+	tampered = append(tampered, tamperedReenc...)
+	tampered = append(tampered, base.kzgBlock...)
+	assertCircuitFails(t, tampered, failReenc, "tamper_padded_slot")
+}
+
 // TestCheatWrongStateRoot verifies that an incorrect old state root in STATETX causes
 // at least one FAIL_SMT_* bit in the fail_mask.
 func TestCheatWrongStateRoot(t *testing.T) {

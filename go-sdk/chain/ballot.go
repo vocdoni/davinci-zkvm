@@ -1,5 +1,5 @@
-// ballot.go holds the homomorphic results accumulator: 8 ElGamal
-// ciphertexts as 32 Twisted Edwards coordinates, accumulated by
+// ballot.go holds the homomorphic results accumulator: NumFields ElGamal
+// ciphertexts as BallotFields Twisted Edwards coordinates, accumulated by
 // BabyJubJub point addition like davinci-node's Ballot.Add.
 package chain
 
@@ -10,6 +10,8 @@ import (
 
 	"github.com/vocdoni/davinci-node/crypto/ecc/format"
 	"github.com/vocdoni/davinci-node/crypto/elgamal"
+
+	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 )
 
 // bn254ScalarField is the BN254 scalar field order (Fr), the BabyJubJub
@@ -23,9 +25,9 @@ var (
 	bjjTED = big.NewInt(168696)
 )
 
-// accumBallot is a ballot as 32 TE coordinates: 8 ciphertexts x
-// [c1x, c1y, c2x, c2y].
-type accumBallot [32]*big.Int
+// accumBallot is a ballot as BallotFields TE coordinates: NumFields
+// ciphertexts x [c1x, c1y, c2x, c2y].
+type accumBallot [davinci.BallotFields]*big.Int
 
 // newIdentityAccum returns the identity accumulator: every point is the
 // TE identity (0, 1), matching davinci-node elgamal.NewBallot.
@@ -65,7 +67,7 @@ func teAdd(x1, y1, x2, y2 *big.Int) (*big.Int, *big.Int) {
 // accumFromBallot converts an elgamal.Ballot to TE coordinates.
 func accumFromBallot(ballot *elgamal.Ballot) accumBallot {
 	var acc accumBallot
-	for i := 0; i < 8; i++ {
+	for i := 0; i < davinci.NumFields; i++ {
 		rx, ry := ballot.Ciphertexts[i].C1.Point()
 		c1tx, c1ty := format.FromRTEtoTE(rx, ry)
 		rx2, ry2 := ballot.Ciphertexts[i].C2.Point()
@@ -79,10 +81,10 @@ func accumFromBallot(ballot *elgamal.Ballot) accumBallot {
 }
 
 // accumAdd adds two ballots homomorphically: point addition of each of
-// the 16 (x, y) coordinate pairs.
+// the BallotFields/2 (x, y) coordinate pairs.
 func accumAdd(a, b accumBallot) accumBallot {
 	var out accumBallot
-	for i := 0; i < 16; i++ {
+	for i := 0; i < davinci.BallotFields/2; i++ {
 		out[i*2], out[i*2+1] = teAdd(a[i*2], a[i*2+1], b[i*2], b[i*2+1])
 	}
 	return out
@@ -93,7 +95,7 @@ func accumAdd(a, b accumBallot) accumBallot {
 func accumSub(a, b accumBallot) accumBallot {
 	p := bn254ScalarField
 	var negB accumBallot
-	for i := 0; i < 16; i++ {
+	for i := 0; i < davinci.BallotFields/2; i++ {
 		negB[i*2] = new(big.Int).Mod(new(big.Int).Neg(b[i*2]), p)
 		negB[i*2+1] = b[i*2+1]
 	}
@@ -112,9 +114,9 @@ func accumLeafHash(acc accumBallot) *big.Int {
 	return new(big.Int).SetBytes(h.Sum(nil))
 }
 
-// accumToStrings converts an accumulator to 32 big-endian hex strings.
+// accumToStrings converts an accumulator to BallotFields big-endian hex strings.
 func accumToStrings(acc accumBallot) []string {
-	out := make([]string, 32)
+	out := make([]string, davinci.BallotFields)
 	for i, v := range acc {
 		out[i] = bigIntToFr32(v)
 	}
@@ -122,11 +124,11 @@ func accumToStrings(acc accumBallot) []string {
 }
 
 // ballotLeafHash computes the SHA-256 arbo leaf value of a ballot stored
-// in the state tree: 32 TE coordinates as 32-byte big-endian words.
+// in the state tree: BallotFields TE coordinates as 32-byte big-endian words.
 func ballotLeafHash(b *elgamal.Ballot) *big.Int {
 	h := sha256.New()
 	buf := make([]byte, 32)
-	for i := 0; i < 8; i++ {
+	for i := 0; i < davinci.NumFields; i++ {
 		if b.Ciphertexts[i] == nil {
 			zeroCoord := make([]byte, 32)
 			oneCoord := make([]byte, 32)
@@ -149,11 +151,11 @@ func ballotLeafHash(b *elgamal.Ballot) *big.Int {
 	return new(big.Int).SetBytes(h.Sum(nil))
 }
 
-// ballotToFrStrings converts a ballot to 32 big-endian hex strings in TE
-// coordinates, for BallotProofData.
+// ballotToFrStrings converts a ballot to BallotFields big-endian hex strings
+// in TE coordinates, for BallotProofData.
 func ballotToFrStrings(b *elgamal.Ballot) []string {
-	out := make([]string, 32)
-	for i := 0; i < 8; i++ {
+	out := make([]string, davinci.BallotFields)
+	for i := 0; i < davinci.NumFields; i++ {
 		if b.Ciphertexts[i] == nil {
 			out[i*4] = bigIntToFr32(big.NewInt(0))
 			out[i*4+1] = bigIntToFr32(big.NewInt(1))

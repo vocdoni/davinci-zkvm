@@ -18,6 +18,12 @@ use std::path::{Path, PathBuf};
 
 pub mod aggregator;
 
+/// Number of ElGamal ciphertexts per ballot. Must match the guest's
+/// `circuit_primitives::types::NUM_FIELDS`.
+pub const NUM_FIELDS: usize = 16;
+/// Flat ballot width: NUM_FIELDS ciphertexts × 4 BN254 Fr coordinates.
+pub const BALLOT_FIELDS: usize = NUM_FIELDS * 4;
+
 // "GROTH16B" in little-endian ASCII => matches guest magic constant
 const MAGIC: u64 = 0x423631484f545247u64;
 const STATE_MAGIC: u64 = u64::from_le_bytes(*b"STATETX!");
@@ -145,23 +151,23 @@ pub fn write_state_block(sd: &StateData) -> Result<Vec<u8>> {
     if let Some(bp) = &sd.ballot_proof_data {
         buf.extend_from_slice(&1u64.to_le_bytes()); // has_ballot_data = true
 
-        if bp.old_results.len() != 32 {
-            bail!("old_results must have 32 elements, got {}", bp.old_results.len());
+        if bp.old_results.len() != BALLOT_FIELDS {
+            bail!("old_results must have {} elements, got {}", BALLOT_FIELDS, bp.old_results.len());
         }
         for fr in &bp.old_results { write_u64_slice(&mut buf, fr); }
 
         buf.extend_from_slice(&(bp.voter_ballots.len() as u64).to_le_bytes());
         for (i, vb) in bp.voter_ballots.iter().enumerate() {
-            if vb.len() != 32 {
-                bail!("voter_ballots[{}] must have 32 elements, got {}", i, vb.len());
+            if vb.len() != BALLOT_FIELDS {
+                bail!("voter_ballots[{}] must have {} elements, got {}", i, BALLOT_FIELDS, vb.len());
             }
             for fr in vb { write_u64_slice(&mut buf, fr); }
         }
 
         buf.extend_from_slice(&(bp.overwritten_ballots.len() as u64).to_le_bytes());
         for (i, ob) in bp.overwritten_ballots.iter().enumerate() {
-            if ob.len() != 32 {
-                bail!("overwritten_ballots[{}] must have 32 elements, got {}", i, ob.len());
+            if ob.len() != BALLOT_FIELDS {
+                bail!("overwritten_ballots[{}] must have {} elements, got {}", i, BALLOT_FIELDS, ob.len());
             }
             for fr in ob { write_u64_slice(&mut buf, fr); }
         }
@@ -671,11 +677,11 @@ pub struct BjjCiphertextData {
     pub c2y: [u64; 4],
 }
 
-/// Re-encryption data for one voter: seed k, 8 original ciphertexts, 8 re-encrypted ciphertexts.
+/// Re-encryption data for one voter: seed k, original + re-encrypted ciphertexts.
 pub struct ReencEntryData {
     pub k: [u64; 4],
-    pub original: [BjjCiphertextData; 8],
-    pub reencrypted: [BjjCiphertextData; 8],
+    pub original: [BjjCiphertextData; NUM_FIELDS],
+    pub reencrypted: [BjjCiphertextData; NUM_FIELDS],
 }
 
 /// Serialize re-encryption entries into the REENCBLK binary block.

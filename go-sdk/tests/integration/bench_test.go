@@ -24,8 +24,11 @@ package integration
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,6 +50,16 @@ func TestPlonkBenchmark(t *testing.T) {
 	}
 
 	sizes := []int{64, 128, 256}
+	if v := os.Getenv("BENCH_SIZES"); v != "" {
+		sizes = nil
+		for _, s := range strings.Split(v, ",") {
+			n, err := strconv.Atoi(strings.TrimSpace(s))
+			if err != nil || n <= 0 {
+				t.Fatalf("bad BENCH_SIZES entry %q: %v", s, err)
+			}
+			sizes = append(sizes, n)
+		}
+	}
 
 	type result struct {
 		size     int

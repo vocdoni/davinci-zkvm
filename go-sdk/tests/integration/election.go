@@ -22,6 +22,7 @@ import (
 	"github.com/vocdoni/davinci-node/crypto/ecc/format"
 	"github.com/vocdoni/davinci-node/crypto/elgamal"
 	nodesig "github.com/vocdoni/davinci-node/crypto/signatures/ethereum"
+	spectestutil "github.com/vocdoni/davinci-node/spec/testutil"
 	"github.com/vocdoni/davinci-node/types"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 	leanimt "github.com/vocdoni/lean-imt-go"
@@ -41,6 +42,19 @@ const (
 // configKeys are the process config keys stored in the state tree at election setup.
 // These are read-only per batch (verified via process read-proofs in the circuit).
 var configKeys = []uint64{0x00, 0x02, 0x03, 0x06}
+
+// ballotModeLeaf returns the packed BallotMode value stored at config key 0x02
+// and its declared NumFields. The guest reads num_fields from the low byte of
+// this leaf to drive its num_fields-aware reencryption/accumulator skip, so the
+// padded ciphertext slots [NumFields, max) must carry the TE identity end-to-end.
+func ballotModeLeaf() (*big.Int, int) {
+	bm := spectestutil.FixedBallotMode()
+	packed, err := bm.Pack()
+	if err != nil {
+		panic(fmt.Sprintf("pack fixed ballot mode: %v", err))
+	}
+	return packed, int(bm.NumFields)
+}
 
 // Election holds all state for a DAVINCI election in the integration test.
 type Election struct {
@@ -67,11 +81,15 @@ type Election struct {
 	Results frAccumBallot
 	// VotedBallots maps voter CensusIdx → their last re-encrypted ballot stored in the
 	// state tree. Used to detect overwrites and to subtract replaced ballots.
-	VotedBallots map[int]*elgamal.Ballot
+	VotedBallots map[int]wideBallot
 	// CspKey is the CSP's secp256k1 private key (nil for Merkle census mode).
 	CspKey *ecdsa.PrivateKey
 	// CensusOrigin is the census type: 1 = lean-IMT, 4 = CSP ECDSA.
 	CensusOrigin int
+	// NumFields is the declared active ballot field count (BallotMode.NumFields).
+	// Ciphertext slots [NumFields, NumFields_max) carry the TE identity so the
+	// guest's num_fields-aware reencryption/accumulator can skip them.
+	NumFields int
 }
 
 // NewElection creates a new test election with nVoters registered voters.
@@ -109,11 +127,12 @@ func NewElection(nVoters int) (*Election, error) {
 	}
 
 	bLen := arbo.HashFunctionSha256.Len()
+	bmLeaf, numFields := ballotModeLeaf()
 	// Config values stored under their respective keys.
 	// The circuit validates these keys and cross-checks processID and encKey.
 	configValsBI := []*big.Int{
 		processIDBI,      // 0x00 = ProcessID (must match STATETX block header)
-		big.NewInt(0x01), // 0x02 = BallotMode
+		bmLeaf,           // 0x02 = BallotMode (low byte = NumFields, read by guest)
 		encKeyHashBI,     // 0x03 = EncryptionKey (SHA-256 of pubkey coordinates)
 		big.NewInt(0x01), // 0x06 = CensusOrigin
 	}
@@ -186,8 +205,9 @@ func NewElection(nVoters int) (*Election, error) {
 		OldRoot:      oldRoot,
 		configVals:   configValsBI,
 		Results:      newZeroFrAccum(),
-		VotedBallots: make(map[int]*elgamal.Ballot),
+		VotedBallots: make(map[int]wideBallot),
 		CensusOrigin: 1,
+		NumFields:    numFields,
 	}, nil
 }
 
@@ -237,9 +257,10 @@ func NewCSPElection(nVoters int) (*Election, error) {
 	}
 
 	bLen := arbo.HashFunctionSha256.Len()
+	bmLeaf, numFields := ballotModeLeaf()
 	configValsBI := []*big.Int{
 		processIDBI,      // 0x00 = ProcessID
-		big.NewInt(0x01), // 0x02 = BallotMode
+		bmLeaf,           // 0x02 = BallotMode (low byte = NumFields, read by guest)
 		encKeyHashBI,     // 0x03 = EncryptionKey hash
 		big.NewInt(0x04), // 0x06 = CensusOrigin = CSP
 	}
@@ -298,9 +319,10 @@ func NewCSPElection(nVoters int) (*Election, error) {
 		OldRoot:      oldRoot,
 		configVals:   configValsBI,
 		Results:      newZeroFrAccum(),
-		VotedBallots: make(map[int]*elgamal.Ballot),
+		VotedBallots: make(map[int]wideBallot),
 		CspKey:       cspKey,
 		CensusOrigin: 4,
+		NumFields:    numFields,
 	}, nil
 }
 
@@ -379,7 +401,7 @@ func (e *Election) ProcessIDHex() string {
 // Returns the StateTransitionData, the list of overwritten (old) re-encrypted ballots
 // (may be empty), and an error.  e.OldRoot is advanced to the new root on success.
 // reencBallots must have the same length as ballotResults.
-func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*BallotResult, reencBallots []*elgamal.Ballot) (*davinci.StateTransitionData, []*elgamal.Ballot, error) {
+func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*BallotResult, reencBallots []wideBallot) (*davinci.StateTransitionData, []wideBallot, error) {
 	n := len(batchVoters)
 	if n != len(ballotResults) {
 		return nil, nil, fmt.Errorf("voter/result count mismatch: %d vs %d", n, len(ballotResults))
@@ -415,7 +437,7 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 	// a prior ballot triggers an UPDATE.  The stored value is the SHA-256 leaf hash
 	// of the new re-encrypted ballot.
 	var ballotChain []davinci.SmtEntry
-	var overwrittenBallots []*elgamal.Ballot
+	var overwrittenBallots []wideBallot
 	for i, v := range batchVoters {
 		res := ballotResults[i]
 		key := ballotMin + uint64(v.CensusIdx)<<16 + res.AddressLo16
@@ -534,7 +556,7 @@ func (e *Election) BuildCensusProofs(batchVoters []*Voter) ([]davinci.CensusProo
 		proofs[i] = davinci.CensusProof{
 			Root:     bigIntToFr32(root),
 			Leaf:     bigIntToFr32(proof.Leaf),
-			Index:    proof.Index,
+			Index:    proof.LeafIndex,
 			Siblings: sibs,
 		}
 	}
@@ -544,19 +566,36 @@ func (e *Election) BuildCensusProofs(batchVoters []*Voter) ([]davinci.CensusProo
 // BuildReencBlock builds the REENCBLK protocol block for a batch.
 // It re-encrypts each voter's ElGamal ballot with a random k and returns
 // the re-encryption data along with the re-encrypted ballots for tally accumulation.
-func (e *Election) BuildReencBlock(ballotResults []*BallotResult) (*davinci.ReencryptionData, []*elgamal.Ballot, error) {
+func (e *Election) BuildReencBlock(ballotResults []*BallotResult) (*davinci.ReencryptionData, []wideBallot, error) {
 	pkX, pkY := bjjPointToFr32Hex(e.EncKey)
 	entries := make([]davinci.ReencryptionEntry, len(ballotResults))
-	reencBallots := make([]*elgamal.Ballot, len(ballotResults))
+	reencBallots := make([]wideBallot, len(ballotResults))
+
+	nf := e.NumFields // active ciphertext count; slots [nf, NumFields) stay TE identity
+
+	// TE identity (0,1) hex for padded slots. The guest reads num_fields from the
+	// BallotMode leaf, asserts original == reencrypted == identity on every padded
+	// slot, and skips the per-field EC work there.
+	idZeroHex := bigIntToFr32(big.NewInt(0))
+	idOneHex := bigIntToFr32(big.NewInt(1))
+	idEntry := davinci.BjjCiphertext{
+		C1: davinci.BjjPoint{X: idZeroHex, Y: idOneHex},
+		C2: davinci.BjjPoint{X: idZeroHex, Y: idOneHex},
+	}
 
 	for idx, res := range ballotResults {
-		// Reconstruct the elgamal.Ballot from raw ciphertext data.
-		// SetPoint returns a NEW point (doesn't modify in-place), so capture the return value.
+		// Reconstruct the elgamal.Ballot: active fields from the cast ballot,
+		// padded fields as the TE identity (so re-encryption leaves them identity).
+		// SetPoint returns a NEW point (doesn't modify in-place), so capture it.
 		ballot := elgamal.NewBallot(bjjgnark.New())
-		for i := 0; i < 8; i++ {
-			c1 := bjjgnark.New().SetPoint(res.RawBallot.C1X[i], res.RawBallot.C1Y[i])
-			c2 := bjjgnark.New().SetPoint(res.RawBallot.C2X[i], res.RawBallot.C2Y[i])
-			ballot.Ciphertexts[i] = &elgamal.Ciphertext{C1: c1, C2: c2}
+		for i := 0; i < NumFields; i++ {
+			if i < nf {
+				c1 := bjjgnark.New().SetPoint(res.RawBallot.C1X[i], res.RawBallot.C1Y[i])
+				c2 := bjjgnark.New().SetPoint(res.RawBallot.C2X[i], res.RawBallot.C2Y[i])
+				ballot.Ciphertexts[i] = &elgamal.Ciphertext{C1: c1, C2: c2}
+			} else {
+				ballot.Ciphertexts[i] = identityCiphertext()
+			}
 		}
 
 		// Re-encrypt with a random k.
@@ -568,10 +607,28 @@ func (e *Election) BuildReencBlock(ballotResults []*BallotResult) (*davinci.Reen
 		if err != nil {
 			return nil, nil, fmt.Errorf("Reencrypt[%d]: %w", idx, err)
 		}
-		reencBallots[idx] = reencBallot
+
+		// Wide carrier: active re-encrypted fields + TE identity padding.
+		// Padded slots stay identity (not the re-encryption delta) so the state
+		// leaf, results accumulator and reenc block all agree with the guest's
+		// num_fields-aware skip.
+		wide := make(wideBallot, NumFields)
+		for i := 0; i < NumFields; i++ {
+			if i < nf {
+				wide[i] = reencBallot.Ciphertexts[i]
+			} else {
+				wide[i] = identityCiphertext()
+			}
+		}
+		reencBallots[idx] = wide
 
 		entry := davinci.ReencryptionEntry{K: bigIntToFr32(rawK)}
-		for i := 0; i < 8; i++ {
+		for i := 0; i < NumFields; i++ {
+			if i >= nf {
+				entry.Original[i] = idEntry
+				entry.Reencrypted[i] = idEntry
+				continue
+			}
 			origC1x, origC1y := bjjPointToFr32Hex(ballot.Ciphertexts[i].C1)
 			origC2x, origC2y := bjjPointToFr32Hex(ballot.Ciphertexts[i].C2)
 			reencC1x, reencC1y := bjjPointToFr32Hex(reencBallot.Ciphertexts[i].C1)
@@ -593,6 +650,17 @@ func (e *Election) BuildReencBlock(ballotResults []*BallotResult) (*davinci.Reen
 		EncryptionKeyY: pkY,
 		Entries:        entries,
 	}, reencBallots, nil
+}
+
+// identityCiphertext returns the TE identity ElGamal ciphertext ((0,1),(0,1)),
+// used to pad ciphertext slots beyond the declared NumFields. SetZero gives the
+// BJJ identity (0,1); New() would give (0,0), which is off-curve.
+func identityCiphertext() *elgamal.Ciphertext {
+	c1 := bjjgnark.New()
+	c1.SetZero()
+	c2 := bjjgnark.New()
+	c2.SetZero()
+	return &elgamal.Ciphertext{C1: c1, C2: c2}
 }
 
 // BuildKZGBlock builds a KZG blob barycentric evaluation block.
@@ -666,17 +734,19 @@ func NewTallyAccumulator() *TallyAccumulator {
 }
 
 // Add accumulates a batch of re-encrypted ballots into the tally.
-func (ta *TallyAccumulator) Add(ballots []*elgamal.Ballot) {
+// Only the 8 real fields contribute; synthetic fields (i >= 8) are
+// encrypted-zero and irrelevant to the decrypted tally.
+func (ta *TallyAccumulator) Add(ballots []wideBallot) {
 	for _, ballot := range ballots {
 		for i := 0; i < 8; i++ {
-			if ballot.Ciphertexts[i] == nil {
+			if ballot[i] == nil {
 				continue
 			}
 			// sumC1 += c1; sumC2 += c2 (homomorphic ElGamal addition on BJJ).
 			newC1 := bjjgnark.New()
 			newC2 := bjjgnark.New()
-			newC1.Add(ta.sumC1[i], ballot.Ciphertexts[i].C1)
-			newC2.Add(ta.sumC2[i], ballot.Ciphertexts[i].C2)
+			newC1.Add(ta.sumC1[i], ballot[i].C1)
+			newC2.Add(ta.sumC2[i], ballot[i].C2)
 			ta.sumC1[i] = newC1
 			ta.sumC2[i] = newC2
 		}
@@ -687,17 +757,17 @@ func (ta *TallyAccumulator) Add(ballots []*elgamal.Ballot) {
 // Subtract removes a batch of re-encrypted ballots from the tally.
 // This is used to cancel the contributions of ballots that were overwritten
 // by a voter's later submission.
-func (ta *TallyAccumulator) Subtract(ballots []*elgamal.Ballot) {
+func (ta *TallyAccumulator) Subtract(ballots []wideBallot) {
 	for _, ballot := range ballots {
 		for i := 0; i < 8; i++ {
-			if ballot.Ciphertexts[i] == nil {
+			if ballot[i] == nil {
 				continue
 			}
 			// newC1 = sumC1 - c1; newC2 = sumC2 - c2 (twisted-Edwards subtraction).
 			negC1 := bjjgnark.New()
 			negC2 := bjjgnark.New()
-			negC1.Neg(ballot.Ciphertexts[i].C1)
-			negC2.Neg(ballot.Ciphertexts[i].C2)
+			negC1.Neg(ballot[i].C1)
+			negC2.Neg(ballot[i].C2)
 			newC1 := bjjgnark.New()
 			newC2 := bjjgnark.New()
 			newC1.Add(ta.sumC1[i], negC1)
@@ -821,13 +891,13 @@ func encKeyLeafValue(encKey *bjjgnark.BJJ) *big.Int {
 	return new(big.Int).SetBytes(digest[:])
 }
 
-// ballotToFrStrings converts an ElGamal ballot (8 ciphertexts × 4 coordinates)
-// to 32 big-endian hex strings suitable for BallotProofData.
+// ballotToFrStrings converts a wideBallot (NumFields ciphertexts × 4 coordinates)
+// to BallotFields big-endian hex strings suitable for BallotProofData.
 // The order is: for each ciphertext i: C1.X, C1.Y, C2.X, C2.Y (TE coordinates).
-func ballotToFrStrings(b *elgamal.Ballot) []string {
-	out := make([]string, 32)
-	for i := 0; i < 8; i++ {
-		if b.Ciphertexts[i] == nil {
+func ballotToFrStrings(b wideBallot) []string {
+	out := make([]string, BallotFields)
+	for i := 0; i < NumFields; i++ {
+		if b[i] == nil {
 			// Zero ciphertext: identity point (0, 1) in TE
 			out[i*4] = bigIntToFr32(big.NewInt(0))
 			out[i*4+1] = bigIntToFr32(big.NewInt(1))
@@ -835,8 +905,8 @@ func ballotToFrStrings(b *elgamal.Ballot) []string {
 			out[i*4+3] = bigIntToFr32(big.NewInt(1))
 			continue
 		}
-		c1x, c1y := bjjPointToFr32Hex(b.Ciphertexts[i].C1)
-		c2x, c2y := bjjPointToFr32Hex(b.Ciphertexts[i].C2)
+		c1x, c1y := bjjPointToFr32Hex(b[i].C1)
+		c2x, c2y := bjjPointToFr32Hex(b[i].C2)
 		out[i*4] = c1x
 		out[i*4+1] = c1y
 		out[i*4+2] = c2x

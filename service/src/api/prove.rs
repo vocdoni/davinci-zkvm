@@ -4,7 +4,7 @@ use crate::api::AppState;
 use crate::types::{JobKind, ProveRequest, SmtEntryJson};
 use anyhow::{bail, Context};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use davinci_zkvm_input_gen::{census_proof_from_hex, generate_input, write_census_block, write_csp_block, write_kzg_block, write_reenc_block, write_state_block, be_hex32_to_fr_le, address_hex_to_fr_le, BjjCiphertextData, CspBlockData, CspEntryData, KzgData, ReencEntryData, SmtEntry, StateData};
+use davinci_zkvm_input_gen::{census_proof_from_hex, generate_input, write_census_block, write_csp_block, write_kzg_block, write_reenc_block, write_state_block, be_hex32_to_fr_le, address_hex_to_fr_le, BjjCiphertextData, CspBlockData, CspEntryData, KzgData, ReencEntryData, SmtEntry, StateData, NUM_FIELDS};
 use tracing::{debug, error, info, warn};
 
 pub async fn submit_prove(
@@ -154,18 +154,18 @@ pub async fn submit_prove(
                         c2y: be_hex32_to_fr_le(&ct.c2.y)?,
                     })
                 };
-                let mut original_arr = Vec::with_capacity(8);
+                let mut original_arr = Vec::with_capacity(NUM_FIELDS);
                 for (j, ct) in e.original.iter().enumerate() {
                     original_arr.push(parse_ct(ct).with_context(|| format!("reenc original[{}]", j))?);
                 }
-                let original: [BjjCiphertextData; 8] = original_arr.try_into()
-                    .map_err(|_| anyhow::anyhow!("expected 8 original ciphertexts"))?;
-                let mut reenc_arr = Vec::with_capacity(8);
+                let original: [BjjCiphertextData; NUM_FIELDS] = original_arr.try_into()
+                    .map_err(|_| anyhow::anyhow!("expected {} original ciphertexts", NUM_FIELDS))?;
+                let mut reenc_arr = Vec::with_capacity(NUM_FIELDS);
                 for (j, ct) in e.reencrypted.iter().enumerate() {
                     reenc_arr.push(parse_ct(ct).with_context(|| format!("reenc reencrypted[{}]", j))?);
                 }
-                let reencrypted: [BjjCiphertextData; 8] = reenc_arr.try_into()
-                    .map_err(|_| anyhow::anyhow!("expected 8 reencrypted ciphertexts"))?;
+                let reencrypted: [BjjCiphertextData; NUM_FIELDS] = reenc_arr.try_into()
+                    .map_err(|_| anyhow::anyhow!("expected {} reencrypted ciphertexts", NUM_FIELDS))?;
                 entries.push(ReencEntryData { k, original, reencrypted });
             }
             bytes.extend(write_reenc_block(pub_key_x, pub_key_y, &entries)?);

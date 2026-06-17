@@ -1,7 +1,7 @@
 //! Shared types for the davinci-zkvm service.
 
 use chrono::{DateTime, Utc};
-use davinci_zkvm_input_gen::{EcdsaSig, SnarkJsProof, SnarkJsVk};
+use davinci_zkvm_input_gen::{EcdsaSig, SnarkJsProof, SnarkJsVk, NUM_FIELDS};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -96,10 +96,10 @@ pub struct BjjCiphertextJson {
 pub struct ReencryptionEntryJson {
     /// Re-encryption seed (before Poseidon), 32-byte BE hex.
     pub k: String,
-    /// 8 original ciphertexts from the ballot proof.
-    pub original: [BjjCiphertextJson; 8],
-    /// 8 re-encrypted ciphertexts stored in the state tree.
-    pub reencrypted: [BjjCiphertextJson; 8],
+    /// Original ciphertexts from the ballot proof.
+    pub original: [BjjCiphertextJson; NUM_FIELDS],
+    /// Re-encrypted ciphertexts stored in the state tree.
+    pub reencrypted: [BjjCiphertextJson; NUM_FIELDS],
 }
 
 /// Re-encryption verification data for the full batch.

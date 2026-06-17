@@ -262,15 +262,15 @@ func BjjCiphertextFromBigInts(c1x, c1y, c2x, c2y *big.Int) BjjCiphertext {
 // slices of 32 *big.Int in the order produced by elgamal.Ballot.BigInts():
 // [ct0.c1x, ct0.c1y, ct0.c2x, ct0.c2y, ct1.c1x, ct1.c1y, ...]
 func ReencryptionEntryFromBigInts(k *big.Int, original, reencrypted []*big.Int) (ReencryptionEntry, error) {
-	if len(original) != 32 {
-		return ReencryptionEntry{}, fmt.Errorf("original must have 32 values, got %d", len(original))
+	if len(original) != BallotFields {
+		return ReencryptionEntry{}, fmt.Errorf("original must have %d values, got %d", BallotFields, len(original))
 	}
-	if len(reencrypted) != 32 {
-		return ReencryptionEntry{}, fmt.Errorf("reencrypted must have 32 values, got %d", len(reencrypted))
+	if len(reencrypted) != BallotFields {
+		return ReencryptionEntry{}, fmt.Errorf("reencrypted must have %d values, got %d", BallotFields, len(reencrypted))
 	}
 	var entry ReencryptionEntry
 	entry.K = bigIntToHex32BE(k)
-	for i := 0; i < 8; i++ {
+	for i := 0; i < NumFields; i++ {
 		off := i * 4
 		entry.Original[i] = BjjCiphertextFromBigInts(
 			original[off], original[off+1], original[off+2], original[off+3])

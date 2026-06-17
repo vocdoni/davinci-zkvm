@@ -160,9 +160,25 @@ fn main() {
     //     ballot re-encrypted with a deterministic key derived from k_seed.
     //     This ensures votes are blinded (unlinkable to the voter after storage)
     //     while preserving the homomorphic structure for tallying.
+
+    // Read num_fields from the BallotMode config leaf (process_proofs[1],
+    // key 0x02), low byte of the 32-byte LE arbo leaf. Bounds the skip-work
+    // optimization in the re-encryption and results loops.
+    let num_fields: usize = parsed.state.as_ref()
+        .and_then(|s| s.process_proofs.get(1))
+        .map(|p| (p.new_value[0] & 0xFF) as usize)
+        .unwrap_or(crate::types::NUM_FIELDS);
+    let num_fields = if num_fields >= 1 && num_fields <= crate::types::NUM_FIELDS {
+        num_fields
+    } else {
+        fail_mask |= crate::types::FAIL_REENC;
+        crate::types::NUM_FIELDS
+    };
+
     let reenc_ok = babyjubjub::verify_batch_from_parsed(
         &parsed.reenc_pub_key,
         &parsed.reenc_entries,
+        num_fields,
         &mut fail_mask,
     );
 
@@ -171,7 +187,7 @@ fn main() {
     //     - NewResults = OldResults + Σ(all voter ballots) − Σ(overwritten ballots)
     //     This ensures the election tally is correctly maintained across batches.
     let results_ok = match &parsed.state {
-        Some(state) => results::verify_results(state, &mut fail_mask),
+        Some(state) => results::verify_results(state, num_fields, &mut fail_mask),
         None => false, // already caught by FAIL_MISSING_BLOCK above
     };
 

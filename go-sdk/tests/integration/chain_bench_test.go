@@ -40,7 +40,7 @@ type cachedVoter struct {
 	Sig                []byte
 	PublicInputs       []string
 	CensusProof        davinci.CensusProof
-	C1X, C1Y, C2X, C2Y [8]*big.Int
+	C1X, C1Y, C2X, C2Y [NumFields]*big.Int
 }
 
 // ballotCache is a fully pre-generated election: per-voter records are

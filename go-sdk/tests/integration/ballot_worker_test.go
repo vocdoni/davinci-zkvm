@@ -108,7 +108,7 @@ func runBallotWorkerMode() {
 			SigJSON:      string(r.SigJSON),
 		}
 		if r.RawBallot != nil {
-			for j := 0; j < 8; j++ {
+			for j := 0; j < NumFields; j++ {
 				wr.C1X[j] = r.RawBallot.C1X[j].String()
 				wr.C1Y[j] = r.RawBallot.C1Y[j].String()
 				wr.C2X[j] = r.RawBallot.C2X[j].String()

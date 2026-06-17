@@ -67,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
         config.zisk_mpi_procs, config.zisk_mpi_threads, config.zisk_mpi_bind_to
     );
     info!("  proof output: {:?}", config.proof_output_dir);
+    info!("  min-memory:   {} (auto-enabled on retry)", config.zisk_minimal_memory);
     info!("  listen:       {}", config.listen_addr);
 
     let prover = Arc::new(ProverHandle::new(config.clone()));
