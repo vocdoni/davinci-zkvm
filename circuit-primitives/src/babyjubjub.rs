@@ -210,15 +210,21 @@ fn is_on_bjj_curve(x: &BnFr, y: &BnFr) -> bool {
 
 // Public API
 
-/// Verify that `reencrypted[i] = original[i] + encZero(k', pubKey)` for all i.
-/// `k` is the raw re-encryption seed; `k' = poseidon1(k)` is derived inside.
-/// All 8 fields use the same delta since `EncryptedZero` uses the same k' for all fields.
+/// Verify that `reencrypted[i] = original[i] + encZero(k_i, pubKey)` for all
+/// active fields, where each field uses a *distinct* scalar chained through
+/// Poseidon: `k_0 = poseidon1(k)`, `k_{i+1} = poseidon1(k_i)`. This matches
+/// davinci-node `Ballot.Reencrypt`/`EncryptedZero`, which advances the offset
+/// scalar once per field. `k` is the raw re-encryption seed.
+/// Padded fields `i >= num_fields` carry the TE identity on both sides and are
+/// asserted (cheap field compares) rather than re-encrypted, so their per-field
+/// scalar mults are skipped entirely.
 /// `b8_table` / `pk_table` are the fixed-base window tables for B8 and the
 /// (already curve-validated) ElGamal public key.
 fn verify_reencryption(
     k: &FrRaw,
     b8_table: &BjjFixedBase,
     pk_table: &BjjFixedBase,
+    num_fields: usize,
     original: &[BjjCiphertext],
     reencrypted: &[BjjCiphertext],
 ) -> bool {
@@ -226,17 +232,29 @@ fn verify_reencryption(
         return false;
     }
 
-    // k' = poseidon1(k)
-    let k_prime = poseidon1(k);
+    // Per-field offset scalar, chained through Poseidon. k_0 = poseidon1(k).
+    let mut k_i = poseidon1(k);
 
-    // delta1 = k' * B8, delta2 = k' * pubKey
-    let delta1_proj = b8_table.mul(&k_prime);
-    let delta2_proj = pk_table.mul(&k_prime);
-
-    // For each field: newC1 = origC1 + delta1, newC2 = origC2 + delta2.
-    // Compare the expected projective point against the claimed affine one by
-    // cross-multiplication, skipping the per-point field inversion.
+    // For each active field: delta1_i = k_i * B8, delta2_i = k_i * pubKey, then
+    // newC1 = origC1 + delta1_i, newC2 = origC2 + delta2_i. Compare the expected
+    // projective point against the claimed affine one by cross-multiplication,
+    // skipping the per-point field inversion. Advance k_i once per field.
     for i in 0..original.len() {
+        if i >= num_fields {
+            // Padded slot: assert identity on both sides, skip EC work.
+            let o = &original[i];
+            let r = &reencrypted[i];
+            if o.c1x != bn254_fr::ZERO || o.c1y != bn254_fr::ONE
+                || o.c2x != bn254_fr::ZERO || o.c2y != bn254_fr::ONE
+                || r.c1x != bn254_fr::ZERO || r.c1y != bn254_fr::ONE
+                || r.c2x != bn254_fr::ZERO || r.c2y != bn254_fr::ONE {
+                return false;
+            }
+            continue;
+        }
+        let delta1_proj = b8_table.mul(&k_i);
+        let delta2_proj = pk_table.mul(&k_i);
+
         let orig1 = BJJProj::from_affine(original[i].c1x, original[i].c1y);
         let expected1 = orig1.add(&delta1_proj);
         if !expected1.eq_affine(&reencrypted[i].c1x, &reencrypted[i].c1y) {
@@ -248,6 +266,9 @@ fn verify_reencryption(
         if !expected2.eq_affine(&reencrypted[i].c2x, &reencrypted[i].c2y) {
             return false;
         }
+
+        // Advance the offset scalar for the next field.
+        k_i = poseidon1(&k_i);
     }
     true
 }
@@ -259,6 +280,7 @@ fn verify_reencryption(
 pub fn verify_batch_from_parsed(
     reenc_pub_key: &Option<(FrRaw, FrRaw)>,
     reenc_entries: &[ReencEntry],
+    num_fields: usize,
     fail_mask: &mut u32,
 ) -> bool {
     let (pub_key_x, pub_key_y) = match reenc_pub_key {
@@ -283,6 +305,7 @@ pub fn verify_batch_from_parsed(
             &entry.k,
             &b8_table,
             &pk_table,
+            num_fields,
             &entry.original,
             &entry.reencrypted,
         ) {

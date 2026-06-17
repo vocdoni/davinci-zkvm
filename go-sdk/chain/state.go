@@ -180,7 +180,7 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 		reencBallots[idx] = reenc
 
 		entry := davinci.ReencryptionEntry{K: bigIntToFr32(rawK)}
-		for i := 0; i < 8; i++ {
+		for i := 0; i < davinci.NumFields; i++ {
 			oc1x, oc1y := bjjPointToFr32Hex(v.Ballot.Ciphertexts[i].C1)
 			oc2x, oc2y := bjjPointToFr32Hex(v.Ballot.Ciphertexts[i].C2)
 			rc1x, rc1y := bjjPointToFr32Hex(reenc.Ciphertexts[i].C1)
@@ -317,13 +317,13 @@ func (s *State) ResultsPayload(privKey *big.Int) (*davinci.ResultsPayload, []uin
 		return hex.EncodeToString(arbo.BigIntToBytes(32, v))
 	}
 	decryptAcc := func(acc accumBallot) ([]string, []uint64, []davinci.CpProof, error) {
-		coords := make([]string, 32)
+		coords := make([]string, davinci.BallotFields)
 		for i, v := range acc {
 			coords[i] = le32(v)
 		}
-		msgs := make([]uint64, 8)
-		proofs := make([]davinci.CpProof, 8)
-		for i := 0; i < 8; i++ {
+		msgs := make([]uint64, davinci.NumFields)
+		proofs := make([]davinci.CpProof, davinci.NumFields)
+		for i := 0; i < davinci.NumFields; i++ {
 			c1rx, c1ry := format.FromTEtoRTE(acc[i*4], acc[i*4+1])
 			c2rx, c2ry := format.FromTEtoRTE(acc[i*4+2], acc[i*4+3])
 			c1 := s.cfg.EncKey.New().SetPoint(c1rx, c1ry)
@@ -362,7 +362,7 @@ func (s *State) ResultsPayload(privKey *big.Int) (*davinci.ResultsPayload, []uin
 		return nil, nil, err
 	}
 
-	results := make([]uint64, 8)
+	results := make([]uint64, davinci.NumFields)
 	copy(results, msgs)
 	return &davinci.ResultsPayload{
 		Ballot:   coords,
@@ -372,14 +372,14 @@ func (s *State) ResultsPayload(privKey *big.Int) (*davinci.ResultsPayload, []uin
 	}, results, nil
 }
 
-// EncryptedResults returns the net results accumulator as 32 Twisted-Edwards
-// little-endian hex coordinates: 8 ElGamal ciphertexts, [c1x, c1y, c2x, c2y]
-// per field. This is the ciphertext published to the keywarden at election end;
-// decrypting it with the election private key yields the tally. It matches the
-// Ballot field of ResultsPayload, so the keywarden sees exactly what finalize
-// will decrypt.
+// EncryptedResults returns the net results accumulator as BallotFields
+// Twisted-Edwards little-endian hex coordinates: NumFields ElGamal ciphertexts,
+// [c1x, c1y, c2x, c2y] per field. This is the ciphertext published to the
+// keywarden at election end; decrypting it with the election private key yields
+// the tally. It matches the Ballot field of ResultsPayload, so the keywarden
+// sees exactly what finalize will decrypt.
 func (s *State) EncryptedResults() []string {
-	coords := make([]string, 32)
+	coords := make([]string, davinci.BallotFields)
 	for i, v := range s.results {
 		coords[i] = hex.EncodeToString(arbo.BigIntToBytes(32, v))
 	}

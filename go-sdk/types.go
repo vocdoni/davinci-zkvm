@@ -15,6 +15,14 @@ import "encoding/json"
 // and input-gen crate. Change this value in both places when increasing the limit.
 const MaxBatchSize = 256
 
+// NumFields is the number of ElGamal ciphertexts per ballot. Must match the
+// guest's circuit_primitives::types::NUM_FIELDS. BallotFields is the flat
+// width in BN254 Fr coordinates (NumFields ciphertexts × 4 coords each).
+const (
+	NumFields    = 16
+	BallotFields = NumFields * 4
+)
+
 // Output register layout for the ZisK circuit.
 // These constants identify the index of each u32 output register returned
 // by the ZisK emulator / prover and mirror the public inputs of the
@@ -211,10 +219,10 @@ type BjjCiphertext struct {
 type ReencryptionEntry struct {
 	// K is the re-encryption seed (before Poseidon hash), 32-byte BE hex.
 	K string `json:"k"`
-	// Original contains the 8 original ciphertexts from the ballot proof.
-	Original [8]BjjCiphertext `json:"original"`
-	// Reencrypted contains the 8 re-encrypted ciphertexts stored in the state tree.
-	Reencrypted [8]BjjCiphertext `json:"reencrypted"`
+	// Original contains the original ciphertexts from the ballot proof.
+	Original [NumFields]BjjCiphertext `json:"original"`
+	// Reencrypted contains the re-encrypted ciphertexts stored in the state tree.
+	Reencrypted [NumFields]BjjCiphertext `json:"reencrypted"`
 }
 
 // ReencryptionData holds the re-encryption verification data for the full batch.

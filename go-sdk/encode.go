@@ -88,8 +88,8 @@ func EncodeStateBlock(sd *StateTransitionData) ([]byte, error) {
 		bp := sd.BallotProofs
 		buf = appendU64(buf, 1) // has_ballot_data = true
 
-		if len(bp.OldResults) != 32 {
-			return nil, fmt.Errorf("old_results must have 32 elements, got %d", len(bp.OldResults))
+		if len(bp.OldResults) != BallotFields {
+			return nil, fmt.Errorf("old_results must have %d elements, got %d", BallotFields, len(bp.OldResults))
 		}
 		buf, err = appendFrHexSlice(buf, bp.OldResults, beHexToFrLE)
 		if err != nil {
@@ -98,8 +98,8 @@ func EncodeStateBlock(sd *StateTransitionData) ([]byte, error) {
 
 		buf = appendU64(buf, uint64(len(bp.VoterBallots)))
 		for i, vb := range bp.VoterBallots {
-			if len(vb) != 32 {
-				return nil, fmt.Errorf("voter_ballots[%d] must have 32 elements, got %d", i, len(vb))
+			if len(vb) != BallotFields {
+				return nil, fmt.Errorf("voter_ballots[%d] must have %d elements, got %d", i, BallotFields, len(vb))
 			}
 			buf, err = appendFrHexSlice(buf, vb, beHexToFrLE)
 			if err != nil {
@@ -109,8 +109,8 @@ func EncodeStateBlock(sd *StateTransitionData) ([]byte, error) {
 
 		buf = appendU64(buf, uint64(len(bp.OverwrittenBallots)))
 		for i, ob := range bp.OverwrittenBallots {
-			if len(ob) != 32 {
-				return nil, fmt.Errorf("overwritten_ballots[%d] must have 32 elements, got %d", i, len(ob))
+			if len(ob) != BallotFields {
+				return nil, fmt.Errorf("overwritten_ballots[%d] must have %d elements, got %d", i, BallotFields, len(ob))
 			}
 			buf, err = appendFrHexSlice(buf, ob, beHexToFrLE)
 			if err != nil {

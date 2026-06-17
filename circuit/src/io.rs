@@ -236,9 +236,9 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
             reenc_entries.reserve(n_voters);
             for _ in 0..n_voters {
                 let k = read_fr!(&mut off);
-                let mut original: [BjjCiphertext; 8] = Default::default();
-                let mut reencrypted: [BjjCiphertext; 8] = Default::default();
-                for j in 0..8 {
+                let mut original: [BjjCiphertext; NUM_FIELDS] = Default::default();
+                let mut reencrypted: [BjjCiphertext; NUM_FIELDS] = Default::default();
+                for j in 0..NUM_FIELDS {
                     original[j] = BjjCiphertext {
                         c1x: read_fr!(&mut off),
                         c1y: read_fr!(&mut off),
@@ -246,7 +246,7 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
                         c2y: read_fr!(&mut off),
                     };
                 }
-                for j in 0..8 {
+                for j in 0..NUM_FIELDS {
                     reencrypted[j] = BjjCiphertext {
                         c1x: read_fr!(&mut off),
                         c1y: read_fr!(&mut off),
@@ -397,17 +397,17 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
     // Result accumulator ballot data
     // has_ballot_data: 0 = absent (zeros), 1 = present
     let has_ballot_data = read1!(0) != 0;
-    let zero_ballot: [FrRaw; 32] = [ZERO_FR; 32];
+    let zero_ballot: [FrRaw; BALLOT_FIELDS] = [ZERO_FR; BALLOT_FIELDS];
     let (old_results, voter_ballots, overwritten_ballots) = if has_ballot_data {
-        let mut old_r = [ZERO_FR; 32];
-        for i in 0..32 { old_r[i] = read_fr!(); }
+        let mut old_r = [ZERO_FR; BALLOT_FIELDS];
+        for i in 0..BALLOT_FIELDS { old_r[i] = read_fr!(); }
 
         let n_vb = read1!(0) as usize;
         if n_vb > 4096 { *fail_mask |= 1 << 31; }
         let mut vb = Vec::with_capacity(n_vb);
         for _ in 0..n_vb {
-            let mut b = [ZERO_FR; 32];
-            for i in 0..32 { b[i] = read_fr!(); }
+            let mut b = [ZERO_FR; BALLOT_FIELDS];
+            for i in 0..BALLOT_FIELDS { b[i] = read_fr!(); }
             vb.push(b);
         }
 
@@ -415,8 +415,8 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
         if n_ob > 4096 { *fail_mask |= 1 << 31; }
         let mut ob = Vec::with_capacity(n_ob);
         for _ in 0..n_ob {
-            let mut b = [ZERO_FR; 32];
-            for i in 0..32 { b[i] = read_fr!(); }
+            let mut b = [ZERO_FR; BALLOT_FIELDS];
+            for i in 0..BALLOT_FIELDS { b[i] = read_fr!(); }
             ob.push(b);
         }
         (old_r, vb, ob)

@@ -52,6 +52,11 @@ pub const ZERO_FR: FrRaw = [0, 0, 0, 0];
 #[allow(dead_code)]
 pub const ONE_FR: FrRaw = [1, 0, 0, 0];
 
+/// Number of ElGamal ciphertexts per ballot.
+pub const NUM_FIELDS: usize = 16;
+/// Flat ballot width: NUM_FIELDS ciphertexts × 4 BN254 Fr coordinates.
+pub const BALLOT_FIELDS: usize = NUM_FIELDS * 4;
+
 /// Maximum number of ballot proofs per batch.
 /// Must be a power of two. Increase here to support larger batches.
 pub const MAX_BATCH_SIZE: usize = 256;
@@ -175,10 +180,10 @@ pub struct BjjCiphertext {
 pub struct ReencEntry {
     /// The re-encryption seed k (before Poseidon hash).
     pub k: FrRaw,
-    /// Original 8 ciphertexts from the voter's ballot proof.
-    pub original: [BjjCiphertext; 8],
-    /// Re-encrypted 8 ciphertexts stored in the state tree.
-    pub reencrypted: [BjjCiphertext; 8],
+    /// Original ciphertexts from the voter's ballot proof.
+    pub original: [BjjCiphertext; NUM_FIELDS],
+    /// Re-encrypted ciphertexts stored in the state tree.
+    pub reencrypted: [BjjCiphertext; NUM_FIELDS],
 }
 
 /// One lean-IMT Poseidon membership proof for a census voter.
@@ -221,10 +226,10 @@ pub struct CspBlock {
     pub entries: Vec<CspEntry>,
 }
 
-/// A ballot is 8 ElGamal ciphertexts × 4 BN254 Fr coordinates = 32 field elements.
-/// Layout: [C1.x, C1.y, C2.x, C2.y] for each of the 8 ciphertexts, sequentially.
+/// A ballot is NUM_FIELDS ElGamal ciphertexts × 4 BN254 Fr coordinates.
+/// Layout: [C1.x, C1.y, C2.x, C2.y] for each ciphertext, sequentially.
 /// This matches `elgamal.Ballot.BigInts()` in davinci-node.
-pub type BallotData = [FrRaw; 32];
+pub type BallotData = [FrRaw; BALLOT_FIELDS];
 
 /// Full DAVINCI state-transition data, parsed from the STATETX binary block.
 /// Present when the prover includes a `state` field in the ProveRequest.

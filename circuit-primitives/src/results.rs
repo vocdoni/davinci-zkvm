@@ -15,11 +15,8 @@
 
 use crate::babyjubjub::BjjAccumulator;
 use crate::hash;
-use crate::types::{BallotData, FrRaw, StateBlock, ZERO_FR, FAIL_RESULT_ACCUM, FAIL_LEAF_HASH};
+use crate::types::{BallotData, FrRaw, StateBlock, ZERO_FR, BALLOT_FIELDS, NUM_FIELDS, FAIL_RESULT_ACCUM, FAIL_LEAF_HASH};
 use crate::bn254_fr::ONE;
-
-/// Number of Fr elements per ballot (8 ciphertexts × 4 coordinates).
-const BALLOT_FIELDS: usize = 32;
 
 /// The identity ballot: every point is the TE identity (0, 1). Matches
 /// davinci-node `elgamal.NewBallot` and is the genesis Results leaf value.
@@ -36,8 +33,14 @@ pub fn zero_ballot() -> BallotData {
 /// Homomorphic net sum `init + Σ add_terms − Σ sub_terms` with the 16 point
 /// accumulators kept projective across the whole chain: one field inversion
 /// per coordinate pair total, instead of one per added/subtracted ballot.
-fn ballot_net(init: &BallotData, add_terms: &[BallotData], sub_terms: &[BallotData]) -> BallotData {
-    let mut accs: Vec<BjjAccumulator> = (0..BALLOT_FIELDS / 2)
+fn ballot_net(
+    init: &BallotData,
+    add_terms: &[BallotData],
+    sub_terms: &[BallotData],
+    num_fields: usize,
+) -> BallotData {
+    let limit = num_fields * 2;
+    let mut accs: Vec<BjjAccumulator> = (0..limit)
         .map(|i| BjjAccumulator::new(&(init[i * 2], init[i * 2 + 1])))
         .collect();
     for t in add_terms {
@@ -56,7 +59,29 @@ fn ballot_net(init: &BallotData, add_terms: &[BallotData], sub_terms: &[BallotDa
         out[i * 2] = p.0;
         out[i * 2 + 1] = p.1;
     }
+    // Padded accumulators: emit identity, skip all add/sub work.
+    let mut i = limit;
+    while i < BALLOT_FIELDS / 2 {
+        out[i * 2] = ZERO_FR;
+        out[i * 2 + 1] = ONE;
+        i += 1;
+    }
     out
+}
+
+// Padded ciphertext slots (index >= num_fields) must hold the identity
+// point, else a prover could stash data in columns the accumulator skips.
+fn padded_is_identity(b: &BallotData, num_fields: usize) -> bool {
+    let mut f = num_fields;
+    while f < NUM_FIELDS {
+        let o = f * 4;
+        if b[o] != ZERO_FR || b[o + 1] != ONE
+            || b[o + 2] != ZERO_FR || b[o + 3] != ONE {
+            return false;
+        }
+        f += 1;
+    }
+    true
 }
 
 /// Serialize a ballot into bytes for hashing: each Fr element is written as 32 bytes
@@ -144,11 +169,11 @@ mod tests {
                 expected[i * 2 + 1] = p.1;
             }
         }
-        assert_eq!(ballot_net(&init, &add_terms, &sub_terms), expected);
+        assert_eq!(ballot_net(&init, &add_terms, &sub_terms, NUM_FIELDS), expected);
     }
 }
 
-pub fn verify_results(state: &StateBlock, fail_mask: &mut u32) -> bool {
+pub fn verify_results(state: &StateBlock, num_fields: usize, fail_mask: &mut u32) -> bool {
     // When no voter ballots are provided and no voters exist, nothing to check.
     // When voters exist but ballot data is absent, that's a protocol violation.
     if state.voter_ballots.is_empty() && state.overwritten_ballots.is_empty() {
@@ -169,6 +194,27 @@ pub fn verify_results(state: &StateBlock, fail_mask: &mut u32) -> bool {
     }
 
     let mut ok = true;
+
+    // Soundness guard: padded slots of every accumulated ballot and the old
+    // results must be identity, since the accumulator skips them above.
+    for b in &state.voter_ballots {
+        if !padded_is_identity(b, num_fields) {
+            *fail_mask |= FAIL_RESULT_ACCUM;
+            ok = false;
+            break;
+        }
+    }
+    for b in &state.overwritten_ballots {
+        if !padded_is_identity(b, num_fields) {
+            *fail_mask |= FAIL_RESULT_ACCUM;
+            ok = false;
+            break;
+        }
+    }
+    if !padded_is_identity(&state.old_results, num_fields) {
+        *fail_mask |= FAIL_RESULT_ACCUM;
+        ok = false;
+    }
 
     // Ballot leaf hash verification
     // Each voter_ballots[i] must match ballot_chain[i].new_value via SHA-256.
@@ -209,7 +255,7 @@ pub fn verify_results(state: &StateBlock, fail_mask: &mut u32) -> bool {
     // Net Results accumulation
     // NewResults = OldResults + Σ(all voter ballots) − Σ(overwritten ballots)
     if let Some(ref r) = state.results {
-        let net = ballot_net(&state.old_results, &state.voter_ballots, &state.overwritten_ballots);
+        let net = ballot_net(&state.old_results, &state.voter_ballots, &state.overwritten_ballots, num_fields);
         let expected_new_hash = ballot_leaf_hash(&net);
         if expected_new_hash != r.new_value {
             *fail_mask |= FAIL_RESULT_ACCUM;
