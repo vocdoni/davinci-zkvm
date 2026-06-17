@@ -35,9 +35,15 @@ decryption verification + results inclusion + PLONK wrap).
   throughput ~12–25% over the previous sweep (64: 1.33→1.49, 128:
   1.68→1.95, 256: 1.80→2.25 v/s) even with the added process-config
   inclusion-proof verification now in-circuit.
-- **256 is the maximum batch size** (`MAX_BATCH_SIZE`): the circuit
-  rejects any batch with more than 256 proofs. Pick a batch ≤ 256 and
-  fold more often for larger elections.
+- **128 is the maximum batch size** (`MAX_BATCH_SIZE`): the circuit
+  rejects any batch with more than 128 proofs. Pick a batch ≤ 128 and
+  fold more often for larger elections. **Lowered from 256 to 128 for
+  GPU-memory safety** (see the per-batch section below): batch 256 at full
+  ballot capacity peaks ~31.3 GB even under `--minimal-memory`, leaving no
+  headroom on the 32 GB GPU. The chained-mode tables above (and the 5120 /
+  20000 rows below) were measured under the previous 256 cap and at the
+  8-field era; they are retained as historical references — production now
+  caps at 128.
 
 ## Scaling — 5120 votes measured, 20000 projected
 
@@ -81,20 +87,26 @@ the 16-field max (sweep with `BALLOT_NUM_FIELDS`):
 |---:|---:|---:|---:|
 |  64 |  38 s |    83 s | ~0.3–0.5 s |
 | 128 |  73 s |   164 s | ~0.5 s |
-| 256 | 102 s | 289 s (min-mem) | ~0.3 s |
+| ~~256~~ | 102 s | 289 s (min-mem) | ~0.3 s |
 
-`proofBytes` is 768 B / `publicValues` 256 B regardless of batch or field
-count. At num_fields=16 the per-field chained reencryption makes the
-`ArithEq` trace large enough that batch 256 overflows the 32 GB GPU under
-the default schedule. The prover worker auto-escalates to
-`cargo-zisk prove --minimal-memory` on retry (force from the first attempt
-with `ZISK_MINIMAL_MEMORY=1`), which holds the witness footprint at a
-~31.3 GB peak and proves+verifies in ~289 s. `--minimal-memory` only
-reschedules witness storage — it doesn't change the circuit, constraints, or
-the proven statement, so the result still verifies and soundness is
-unaffected. The speed cost is small: a matched A/B on one batch-128
-num_fields=16 input measured 138.4 s plain vs 142.1 s with `--minimal-memory`
-(+2.7%); on a lighter input it was +0.7%.
+128 is the `MAX_BATCH_SIZE` cap; the 256 row is retained as the corner that
+motivated it. `proofBytes` is 768 B / `publicValues` 256 B regardless of
+batch or field count.
+
+**Why the cap is 128.** At num_fields=16 the per-field chained reencryption
+makes the `ArithEq` trace large enough that batch 256 overflows the 32 GB GPU
+under the default schedule (deterministic SIGKILL during inner-proof
+generation). `cargo-zisk prove --minimal-memory` reschedules witness storage
+and holds the footprint at a ~31.3 GB peak, proving+verifying in ~289 s — but
+that is within ~0.7 GB of the ceiling with no softer knob left, so any future
+circuit growth would push batch 256 over with no recovery path. We capped
+`MAX_BATCH_SIZE` at 128, which proves comfortably. `--minimal-memory` stays
+wired as a backstop (auto-escalated on retry; force from the first attempt
+with `ZISK_MINIMAL_MEMORY=1`): it only reschedules witness storage — it
+doesn't change the circuit, constraints, or the proven statement, so the
+result still verifies and soundness is unaffected. The speed cost is small: a
+matched A/B on one batch-128 num_fields=16 input measured 138.4 s plain vs
+142.1 s with `--minimal-memory` (+2.7%); on a lighter input it was +0.7%.
 
 ## Comparing the modes
 

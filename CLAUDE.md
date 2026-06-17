@@ -217,13 +217,18 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
 - **`verify_zisk_proof_c` + the vadcop blob layout are ZisK v0.18.0
   internals**, not stable API — pin the ZisK version;
   `service/src/prover/recursion.rs` asserts the layout.
-- **256 is the maximum batch size** (`MAX_BATCH_SIZE` in
+- **128 is the maximum batch size** (`MAX_BATCH_SIZE` in
   `circuit-primitives/src/types.rs`, mirrored in `input-gen` and
-  `go-sdk/types.go`): the circuit rejects any batch with more than 256
+  `go-sdk/types.go`): the circuit rejects any batch with more than 128
   proofs. Raising it means changing all three constants and rebuilding
-  both ELFs (new program_vk). Note batch 256 at num_fields=16 needs
-  `--minimal-memory` to fit the 32 GB GPU (auto-enabled on retry; see
-  Performance baseline).
+  both ELFs (new program_vk). **Lowered from 256 to 128 for GPU-memory
+  safety:** batch 256 at full ballot capacity (`num_fields = 16`) peaks at
+  ~31.3 GB even with `--minimal-memory`, within ~0.7 GB of the 32 GB GPU
+  ceiling and with no softer knob left — so any future circuit growth would
+  push it over with no recovery path. 128 keeps a comfortable margin. Before
+  raising the cap again, re-measure peak GPU memory at the new worst case
+  (`batch × num_fields = 16`); `--minimal-memory` is still auto-enabled on
+  retry as a backstop (see Performance baseline).
 - **Ballot capacity is `NUM_FIELDS = 16`** (`circuit-primitives/src/types.rs`,
   mirrored in `input-gen/src/lib.rs` and `go-sdk/types.go`;
   davinci-node calls it `FieldsPerBallot`). The fixed-size gnark/circom
@@ -237,10 +242,15 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   before skipping its reencryption-verify and accumulator EC adds
   (`verify_reencryption` / `ballot_net` in `circuit-primitives/src/`). The
   SHA-256 ballot leaf still covers all 16 coords. Reencryption uses a
-  distinct Poseidon-chained offset scalar per field (`k_0 = poseidon1(k)`,
-  `k_{i+1} = poseidon1(k_i)`), matching davinci-node v0.3.0.
-  `TestCheatTamperPaddedSlot` guards the skip; sweep configs in tests with
-  `BALLOT_NUM_FIELDS`.
+  distinct offset scalar per field, chained with SHA-256:
+  `k_0 = H(k)`, `k_{i+1} = H(k_i)` where `H(x) = sha256(x_be32) mod r`
+  (`sha256_to_scalar` in `circuit-primitives/src/babyjubjub.rs`, mirrored by
+  the producer in davinci-node `crypto/elgamal/ballot.go::reencryptScalar`).
+  SHA-256 keeps the k-chain on the `sha256f` precompile instead of the ArithEq
+  state machine (one `arith256_mod` row per step for the Fr reduction); this
+  diverges from davinci-node's own gnark circuit, which is acceptable since the
+  zkVM is the production prover. `TestCheatTamperPaddedSlot` guards the skip;
+  sweep configs in tests with `BALLOT_NUM_FIELDS`.
 
 ## Performance baseline (RTX 5090, ZisK v0.18.0)
 
@@ -255,29 +265,32 @@ the *declared* field count, not the 16-field maximum. PLONK SNARK time
 |---:|---:|---:|---:|
 |  64 |   38 s |    83 s | ~0.3–0.5 s |
 | 128 |   73 s |   164 s | ~0.5 s |
-| 256 |  102 s | 289 s (min-mem) | ~0.3 s |
+| ~~256~~ |  102 s | 289 s (min-mem) | ~0.3 s |
 
-SNARK size is 768 B `proofBytes` / 256 B `publicValues`, invariant across
-batch size and field count (the on-chain interface does not change with
-`num_fields`). On-chain verify is field-count independent.
+128 is now the `MAX_BATCH_SIZE` cap; the 256 row is retained for context
+(it is the corner that motivated the cap — see below). SNARK size is 768 B
+`proofBytes` / 256 B `publicValues`, invariant across batch size and field
+count (the on-chain interface does not change with `num_fields`). On-chain
+verify is field-count independent.
 
-**Batch 256 at num_fields=16 needs `--minimal-memory`.** The per-field
-chained reencryption (davinci-node v0.3.0 uses a distinct Poseidon-chained
-offset scalar per ciphertext field) means ~16 EC scalar-muls per ballot at
-full capacity; at 256 ballots the default GPU schedule overflows 32 GB during
-inner-proof generation (deterministic SIGKILL, not a transient flake). The
-worker auto-escalates to `cargo-zisk prove --minimal-memory` on any retry,
-which keeps the witness footprint under the GPU ceiling (peak ~31.3 GB) and
-proves+verifies in ~289 s. `--minimal-memory` only reschedules witness
-storage — it doesn't touch the circuit, constraints, or the proven statement,
-so the result still verifies and soundness is unaffected (the proof bytes
-themselves differ run-to-run anyway: the PLONK wrap is zero-knowledge). The
-speed cost is small: a matched A/B on one batch-128 num_fields=16 input
-measured 138.4 s plain vs 142.1 s with `--minimal-memory` (+2.7%); on a
-lighter input where memory isn't the bottleneck it was +0.7%. Set
-`ZISK_MINIMAL_MEMORY=1` to force it from the first attempt and skip the doomed
-default-schedule attempt for workloads known to run batch 256 at high
-`num_fields`.
+**Why the cap is 128: batch 256 at num_fields=16 sits at the GPU edge.**
+The per-field chained reencryption (a distinct SHA-256-chained offset scalar
+per ciphertext field) means ~16 EC scalar-muls per ballot at full capacity;
+at 256 ballots the default GPU schedule overflows
+32 GB during inner-proof generation (deterministic SIGKILL, not a transient
+flake). `cargo-zisk prove --minimal-memory` reschedules witness storage and
+keeps the footprint under the ceiling (peak ~31.3 GB), proving+verifying in
+~289 s — but that leaves only ~0.7 GB of headroom and no softer knob below it,
+so any future circuit growth would OOM 256 with no recovery path. We therefore
+capped `MAX_BATCH_SIZE` at 128, which proves comfortably. `--minimal-memory`
+stays wired as a backstop: it only reschedules witness storage — it doesn't
+touch the circuit, constraints, or the proven statement, so the result still
+verifies and soundness is unaffected (the proof bytes differ run-to-run anyway:
+the PLONK wrap is zero-knowledge). The speed cost is small: a matched A/B on
+one batch-128 num_fields=16 input measured 138.4 s plain vs 142.1 s with
+`--minimal-memory` (+2.7%); on a lighter input it was +0.7%. The worker
+auto-escalates to it on any retry, and `ZISK_MINIMAL_MEMORY=1` forces it from
+the first attempt — relevant only if the cap is ever raised back toward 256.
 
 Chained-mode numbers (STARK batches + folds + one final PLONK) live in
 `BENCHMARK.md`.

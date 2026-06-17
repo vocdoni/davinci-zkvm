@@ -148,7 +148,6 @@ pub fn exp5(x: &BnFr) -> BnFr {
 /// Reduce a raw 256-bit value modulo p.
 /// Use for values that may be ≥ p (e.g. hash outputs interpreted as integers).
 #[inline]
-#[allow(dead_code)]
 pub fn reduce(a: &BnFr) -> BnFr {
     muladd(a, &ONE, &ZERO)
 }

@@ -13,7 +13,11 @@ import "encoding/json"
 // MaxBatchSize is the maximum number of voter ballots per ProveBatch call.
 // Must be a power of two. Matches the MAX_BATCH_SIZE constant in the circuit
 // and input-gen crate. Change this value in both places when increasing the limit.
-const MaxBatchSize = 256
+//
+// Capped at 128 for GPU-memory safety: batch 256 at full ballot capacity
+// (num_fields=16) peaks ~31.3 GB even under --minimal-memory, leaving no
+// headroom on a 32 GB GPU.
+const MaxBatchSize = 128
 
 // NumFields is the number of ElGamal ciphertexts per ballot. Must match the
 // guest's circuit_primitives::types::NUM_FIELDS. BallotFields is the flat

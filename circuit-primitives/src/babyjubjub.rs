@@ -9,21 +9,44 @@
 //!
 //! ## Re-encryption verification
 //!
-//! `reencryptionK = poseidon1(k)`
-//! For each field i: `newC1[i] = origC1[i] + k'*B8`, `newC2[i] = origC2[i] + k'*pubKey`
-//!
-//! Since all 8 fields use the same k', only 2 scalar multiplications are needed per voter.
+//! Per-field offset scalar chained through SHA-256: `k_0 = H(k)`,
+//! `k_{i+1} = H(k_i)`, where `H(x) = sha256(x_be32) mod r`.
+//! For each field i: `newC1[i] = origC1[i] + k_i*B8`, `newC2[i] = origC2[i] + k_i*pubKey`.
 //!
 //! ## Hardware acceleration
 //!
 //! All BN254 Fr field operations are backed by the ZisK `arith256_mod` precompile
 //! via the `bn254_fr` module.  Re-encryption scalar muls use 4-bit fixed-base
 //! window tables (built once per batch for B8 and the election public key),
-//! cutting each 256-bit mul from ~384 point ops to at most 63 additions.
+//! cutting each 256-bit mul from ~384 point ops to at most 63 additions.  The
+//! per-field offset scalar is chained with SHA-256 (`sha256f` precompile) rather
+//! than Poseidon, keeping the k-chain off the ArithEq state machine; the only
+//! ArithEq cost is one `arith256_mod` row per step to reduce into Fr.
 
 use crate::bn254_fr::{self, BnFr};
-use crate::poseidon::poseidon1;
+use crate::hash::sha256_once;
 use crate::types::{FrRaw, BjjCiphertext, ReencEntry, FAIL_REENC};
+
+/// One step of the re-encryption offset-scalar chain: `sha256(k_be32)` read as a
+/// big-endian 256-bit integer, reduced into BN254 Fr. Mirrors the producer
+/// (davinci-node `elgamal` re-encryption). Replaces the former Poseidon chain to
+/// move the work onto the `sha256f` precompile.
+fn sha256_to_scalar(k: &FrRaw) -> FrRaw {
+    // k (< r) → 32-byte big-endian.
+    let mut buf = [0u8; 32];
+    for i in 0..4 {
+        let off = (3 - i) * 8;
+        buf[off..off + 8].copy_from_slice(&k[i].to_be_bytes());
+    }
+    let digest = sha256_once(&buf);
+    // 32-byte big-endian digest → raw [u64; 4] LE limbs (may be ≥ r).
+    let mut raw = [0u64; 4];
+    for i in 0..4 {
+        let off = (3 - i) * 8;
+        raw[i] = u64::from_be_bytes(digest[off..off + 8].try_into().unwrap());
+    }
+    bn254_fr::reduce(&raw)
+}
 
 // Curve constants
 
@@ -212,9 +235,9 @@ fn is_on_bjj_curve(x: &BnFr, y: &BnFr) -> bool {
 
 /// Verify that `reencrypted[i] = original[i] + encZero(k_i, pubKey)` for all
 /// active fields, where each field uses a *distinct* scalar chained through
-/// Poseidon: `k_0 = poseidon1(k)`, `k_{i+1} = poseidon1(k_i)`. This matches
-/// davinci-node `Ballot.Reencrypt`/`EncryptedZero`, which advances the offset
-/// scalar once per field. `k` is the raw re-encryption seed.
+/// SHA-256: `k_0 = H(k)`, `k_{i+1} = H(k_i)` with `H(x) = sha256(x_be32) mod r`.
+/// This matches davinci-node `Ballot.Reencrypt`/`EncryptedZero`, which advances
+/// the offset scalar once per field. `k` is the raw re-encryption seed.
 /// Padded fields `i >= num_fields` carry the TE identity on both sides and are
 /// asserted (cheap field compares) rather than re-encrypted, so their per-field
 /// scalar mults are skipped entirely.
@@ -232,8 +255,8 @@ fn verify_reencryption(
         return false;
     }
 
-    // Per-field offset scalar, chained through Poseidon. k_0 = poseidon1(k).
-    let mut k_i = poseidon1(k);
+    // Per-field offset scalar, chained through SHA-256. k_0 = H(k).
+    let mut k_i = sha256_to_scalar(k);
 
     // For each active field: delta1_i = k_i * B8, delta2_i = k_i * pubKey, then
     // newC1 = origC1 + delta1_i, newC2 = origC2 + delta2_i. Compare the expected
@@ -268,7 +291,7 @@ fn verify_reencryption(
         }
 
         // Advance the offset scalar for the next field.
-        k_i = poseidon1(&k_i);
+        k_i = sha256_to_scalar(&k_i);
     }
     true
 }
