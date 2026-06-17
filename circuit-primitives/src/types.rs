@@ -59,7 +59,15 @@ pub const BALLOT_FIELDS: usize = NUM_FIELDS * 4;
 
 /// Maximum number of ballot proofs per batch.
 /// Must be a power of two. Increase here to support larger batches.
-pub const MAX_BATCH_SIZE: usize = 256;
+///
+/// Capped at 128 for GPU-memory safety. At full ballot capacity
+/// (num_fields = NUM_FIELDS = 16) the per-field chained reencryption makes the
+/// ArithEq trace large enough that batch 256 peaks at ~31.3 GB even with
+/// `cargo-zisk prove --minimal-memory` — within ~0.7 GB of the 32 GB GPU
+/// ceiling, with no softer knob left. 128 keeps a comfortable margin and leaves
+/// headroom for future circuit growth. Raise only after re-measuring peak GPU
+/// memory at the new worst case (and bump input-gen + go-sdk to match).
+pub const MAX_BATCH_SIZE: usize = 128;
 
 // Fail-mask bit constants
 // See the module-level table for a complete description of each bit.

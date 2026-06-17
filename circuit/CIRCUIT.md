@@ -489,16 +489,20 @@ preserving the homomorphic structure needed for tallying.
 
 #### Algorithm
 
-For each voter, the re-encryption uses a deterministic key derived via Poseidon:
+For each voter, the re-encryption uses a per-field offset scalar chained with
+SHA-256: `H(x) = sha256(x_be32) mod r`, advanced once per ciphertext.
 
 ```
-k'  = poseidon1(k)                          // derive re-encryption scalar
-δ₁  = k' · B8                               // delta for C1 (BabyJubJub generator)
-δ₂  = k' · pubKey                           // delta for C2 (election public key)
-
-For each ciphertext i in [0..8):
+k₀ = H(k)                                   // first re-encryption scalar
+For each active ciphertext i in [0..num_fields):
+  δ₁ = kᵢ · B8                              // delta for C1 (BabyJubJub generator)
+  δ₂ = kᵢ · pubKey                          // delta for C2 (election public key)
   newC1[i] = origC1[i] + δ₁                 // twisted Edwards point addition
   newC2[i] = origC2[i] + δ₂
+  kᵢ₊₁ = H(kᵢ)                              // advance the chain
+
+For each padded ciphertext i in [num_fields..16):
+  assert origC*[i] == newC*[i] == identity  // (0,1); EC work skipped
 ```
 
 #### Constraint checks

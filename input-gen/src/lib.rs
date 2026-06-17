@@ -30,7 +30,11 @@ const STATE_MAGIC: u64 = u64::from_le_bytes(*b"STATETX!");
 
 /// Maximum number of ballot proofs per batch. Must match the circuit constant.
 /// Change this value to support larger or smaller batch sizes.
-pub const MAX_BATCH_SIZE: usize = 256;
+///
+/// Capped at 128 for GPU-memory safety: batch 256 at full ballot capacity
+/// (num_fields=16) peaks ~31.3 GB even under `--minimal-memory`, leaving no
+/// headroom on a 32 GB GPU. Keep in sync with circuit-primitives + go-sdk.
+pub const MAX_BATCH_SIZE: usize = 128;
 
 /// One Arbo-compatible SMT state-transition entry for binary encoding.
 /// All `[u64; 4]` fields use little-endian word order (word[0] = least-significant 64 bits),
