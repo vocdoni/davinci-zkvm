@@ -107,7 +107,7 @@ pub async fn submit_prove(
                 new_state_root: davinci_zkvm_input_gen::hex32_to_smt_fr(&st.new_state_root)?,
                 vote_id_chain: smt_entries_from_json(&st.vote_id_smt)?,
                 ballot_chain: smt_entries_from_json(&st.ballot_smt)?,
-                results: st.results_smt.as_ref().map(|e| smt_entry_from_json(e)).transpose()?,
+                results: st.results_smt.as_ref().map(smt_entry_from_json).transpose()?,
                 process_proofs: smt_entries_from_json(&st.process_smt)?,
                 ballot_proof_data: st.ballot_proofs.as_ref().map(ballot_proof_data_from_json).transpose()?,
             };

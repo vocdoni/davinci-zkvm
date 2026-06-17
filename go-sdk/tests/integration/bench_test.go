@@ -49,10 +49,10 @@ func TestPlonkBenchmark(t *testing.T) {
 	sizes := []int{64, 128, 256}
 
 	type result struct {
-		size      int
-		proofMs   int64
-		wallMs    int64
-		verifyMs  int64
+		size     int
+		proofMs  int64
+		wallMs   int64
+		verifyMs int64
 	}
 	results := make([]result, 0, len(sizes))
 

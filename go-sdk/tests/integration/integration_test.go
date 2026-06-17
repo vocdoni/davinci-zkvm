@@ -252,6 +252,7 @@ func TestChainedStateTransitions(t *testing.T) {
 //   - overwrite specs (VoterStart≥0) replace earlier votes for those voter indices
 //   - each ballot has 6 non-zero fields; values are unique within a ballot
 //   - field f, voter seed s: first (s+f*1000+attempt)%16 not already used in that ballot
+//
 // Only the LAST ballot cast by each voter is counted.
 func expectedTally(batches []batchSpec) [8]int64 {
 	// lastFields maps voter index → their most recently cast ballot fields.

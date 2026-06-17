@@ -48,8 +48,7 @@ pub struct SmtEntry {
     pub siblings: Vec<[u64; 4]>,
 }
 
-/// Parse a 0x-prefixed 32-byte big-endian hex string into `[u64; 4]` (LE word order).
-/// Convert a 0x-prefixed **little-endian** hex string to `[u64; 4]` LE words.
+/// Parse a 0x-prefixed **little-endian** 32-byte hex string into `[u64; 4]` LE words.
 /// Arbo stores all values (keys, values, roots, siblings) in little-endian byte
 /// order (`BigIntToBytes` = LE), so the hex bytes map directly to LE words.
 pub fn hex32_to_smt_fr(s: &str) -> Result<[u64; 4]> {
@@ -215,19 +214,6 @@ fn write_smt_entry_body(buf: &mut Vec<u8>, e: &SmtEntry) {
         write_u64_slice(buf, sib);
     }
 }
-
-/// Write a zero-filled SMT entry (for padding).
-#[allow(dead_code)]
-fn write_zero_smt_entry(buf: &mut Vec<u8>, n_levels: usize) {
-    let zero = [0u64; 4];
-    for _ in 0..4 { write_u64_slice(buf, &zero); } // old_root, new_root, old_key, old_value
-    buf.extend_from_slice(&0u64.to_le_bytes()); // is_old0
-    for _ in 0..2 { write_u64_slice(buf, &zero); } // new_key, new_value
-    buf.extend_from_slice(&0u64.to_le_bytes()); // fnc0
-    buf.extend_from_slice(&0u64.to_le_bytes()); // fnc1
-    for _ in 0..n_levels { write_u64_slice(buf, &zero); }
-}
-
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct EcdsaSig {
@@ -442,14 +428,14 @@ fn compute_r_shift(proofs: &[Proof<Bn254>], public_inputs: &[Vec<Fr>]) -> Fr {
             h[..32].copy_from_slice(&digest);
             h[32..40].copy_from_slice(&counter.to_be_bytes());
             h[40] = 0u8;
-            Sha256::digest(&h).into()
+            Sha256::digest(h).into()
         };
         let d1: [u8; 32] = {
             let mut h = [0u8; 41];
             h[..32].copy_from_slice(&digest);
             h[32..40].copy_from_slice(&counter.to_be_bytes());
             h[40] = 1u8;
-            Sha256::digest(&h).into()
+            Sha256::digest(h).into()
         };
         let mut wide = [0u8; 64];
         wide[..32].copy_from_slice(&d0);
@@ -611,11 +597,11 @@ fn hex32_to_u64x4(s: &str) -> Result<[u64; 4]> {
     if bytes.len() != 32 {
         bail!("expected 32-byte hex, got {} bytes: {}", bytes.len(), s);
     }
-    // Input is big-endian; convert to little-endian u64 words (lowest word = bytes[24..32])
+    // Input is big-endian: word 0 (LSB) is bytes[24..32]. rchunks_exact(8)
+    // walks the bytes high-to-low, yielding word 0 first.
     let mut out = [0u64; 4];
-    for i in 0..4 {
-        let start = 24 - i * 8; // big-endian: word 0 = bytes[24..32]
-        out[i] = u64::from_be_bytes(bytes[start..start + 8].try_into().unwrap());
+    for (i, word) in bytes.rchunks_exact(8).enumerate() {
+        out[i] = u64::from_be_bytes(word.try_into().unwrap());
     }
     Ok(out)
 }

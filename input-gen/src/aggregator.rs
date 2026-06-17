@@ -192,7 +192,7 @@ pub fn vadcop_blob_from_proof_bin(bytes: &[u8]) -> Result<VadcopBlob> {
 fn frame(out: &mut Vec<u8>, data: &[u8]) {
     out.extend_from_slice(&(data.len() as u64).to_le_bytes());
     out.extend_from_slice(data);
-    while out.len() % 8 != 0 {
+    while !out.len().is_multiple_of(8) {
         out.push(0);
     }
 }

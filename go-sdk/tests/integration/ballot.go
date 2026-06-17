@@ -26,9 +26,9 @@ import (
 type sigJSON struct {
 	PublicKeyX string `json:"public_key_x"` // 0x-prefixed 32-byte big-endian hex
 	PublicKeyY string `json:"public_key_y"` // 0x-prefixed 32-byte big-endian hex
-	SignatureR string `json:"signature_r"`   // 0x-prefixed 32-byte big-endian hex
-	SignatureS string `json:"signature_s"`   // 0x-prefixed 32-byte big-endian hex
-	SignatureV byte   `json:"signature_v"`   // recovery bit (debug only)
+	SignatureR string `json:"signature_r"`  // 0x-prefixed 32-byte big-endian hex
+	SignatureS string `json:"signature_s"`  // 0x-prefixed 32-byte big-endian hex
+	SignatureV byte   `json:"signature_v"`  // recovery bit (debug only)
 	VoteID     uint64 `json:"vote_id"`
 	Address    string `json:"address"` // decimal uint160
 }
@@ -225,19 +225,17 @@ func extractBallotRaw(res *ballotprooftest.BallotProofResult) *ballotRaw {
 	return raw
 }
 
-
 // injectCurveField adds the "curve" key to a snarkjs proof JSON if it is absent.
 // rapidsnark v0.0.12 omits this field; gen-input requires it.
 func injectCurveField(proofJSON string, curve string) (string, error) {
-var m map[string]json.RawMessage
-if err := json.Unmarshal([]byte(proofJSON), &m); err != nil {
-return "", err
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(proofJSON), &m); err != nil {
+		return "", err
+	}
+	if _, ok := m["curve"]; !ok {
+		curveJSON, _ := json.Marshal(curve)
+		m["curve"] = json.RawMessage(curveJSON)
+	}
+	out, err := json.Marshal(m)
+	return string(out), err
 }
-if _, ok := m["curve"]; !ok {
-curveJSON, _ := json.Marshal(curve)
-m["curve"] = json.RawMessage(curveJSON)
-}
-out, err := json.Marshal(m)
-return string(out), err
-}
-

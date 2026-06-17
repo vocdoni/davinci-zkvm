@@ -25,18 +25,30 @@ func NewClient(baseURL string) *Client {
 	}
 }
 
-// Health calls GET /health and returns the response.
-func (c *Client) Health() (*HealthResponse, error) {
-	resp, err := c.httpClient.Get(c.baseURL + "/health")
+// get performs a GET against path and returns the response body, requiring
+// HTTP 200. The returned error already carries the path and status, so callers
+// surface it directly without re-wrapping.
+func (c *Client) get(path string) ([]byte, error) {
+	resp, err := c.httpClient.Get(c.baseURL + path)
 	if err != nil {
-		return nil, fmt.Errorf("GET /health: %w", err)
+		return nil, fmt.Errorf("GET %s: %w", path, err)
 	}
 	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET /health: status %d", resp.StatusCode)
+		return nil, fmt.Errorf("GET %s: status %d: %s", path, resp.StatusCode, body)
+	}
+	return body, nil
+}
+
+// Health calls GET /health and returns the response.
+func (c *Client) Health() (*HealthResponse, error) {
+	body, err := c.get("/health")
+	if err != nil {
+		return nil, err
 	}
 	var h HealthResponse
-	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
+	if err := json.Unmarshal(body, &h); err != nil {
 		return nil, fmt.Errorf("decode /health: %w", err)
 	}
 	return &h, nil
@@ -66,17 +78,9 @@ func (c *Client) SubmitProve(req *ProveRequest) (string, error) {
 
 // GetJob calls GET /jobs/{id} and returns the job status.
 func (c *Client) GetJob(jobID string) (*JobResponse, error) {
-	resp, err := c.httpClient.Get(c.baseURL + "/jobs/" + jobID)
+	body, err := c.get("/jobs/" + jobID)
 	if err != nil {
-		return nil, fmt.Errorf("GET /jobs/%s: %w", jobID, err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("job %s not found", jobID)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET /jobs/%s: status %d: %s", jobID, resp.StatusCode, body)
+		return nil, err
 	}
 	var job JobResponse
 	if err := json.Unmarshal(body, &job); err != nil {
@@ -113,14 +117,9 @@ func (c *Client) WaitForJob(jobID string, timeout time.Duration) (*JobResponse, 
 // [PlonkSnark] ready to feed to the on-chain `ZiskVerifier.verifySnarkProof`
 // contract.
 func (c *Client) FetchSnark(jobID string) (*PlonkSnark, error) {
-	resp, err := c.httpClient.Get(fmt.Sprintf("%s/jobs/%s/snark", c.baseURL, jobID))
+	body, err := c.get(fmt.Sprintf("/jobs/%s/snark", jobID))
 	if err != nil {
-		return nil, fmt.Errorf("GET /jobs/%s/snark: %w", jobID, err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET /jobs/%s/snark: status %d: %s", jobID, resp.StatusCode, body)
+		return nil, err
 	}
 	var p plonkSnarkJSON
 	if err := json.Unmarshal(body, &p); err != nil {
@@ -179,14 +178,9 @@ func (c *Client) SubmitFinalize(req *FinalizeRequest) (string, error) {
 
 // FetchStarkInfo returns the program_vk / zisk_vk of a completed STARK job.
 func (c *Client) FetchStarkInfo(jobID string) (*StarkInfo, error) {
-	resp, err := c.httpClient.Get(fmt.Sprintf("%s/jobs/%s/stark", c.baseURL, jobID))
+	body, err := c.get(fmt.Sprintf("/jobs/%s/stark", jobID))
 	if err != nil {
-		return nil, fmt.Errorf("GET /jobs/%s/stark: %w", jobID, err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET /jobs/%s/stark: status %d: %s", jobID, resp.StatusCode, body)
+		return nil, err
 	}
 	var info StarkInfo
 	if err := json.Unmarshal(body, &info); err != nil {
@@ -198,16 +192,7 @@ func (c *Client) FetchStarkInfo(jobID string) (*StarkInfo, error) {
 // FetchStarkProof downloads the raw vadcop-final STARK blob of a completed
 // STARK job (debug / archival; folding happens server-side from job IDs).
 func (c *Client) FetchStarkProof(jobID string) ([]byte, error) {
-	resp, err := c.httpClient.Get(fmt.Sprintf("%s/jobs/%s/proof/stark", c.baseURL, jobID))
-	if err != nil {
-		return nil, fmt.Errorf("GET /jobs/%s/proof/stark: %w", jobID, err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET /jobs/%s/proof/stark: status %d: %s", jobID, resp.StatusCode, body)
-	}
-	return body, nil
+	return c.get(fmt.Sprintf("/jobs/%s/proof/stark", jobID))
 }
 
 // FetchStarkRaw downloads the raw bincode `proof.bin` of a completed STARK
@@ -215,16 +200,7 @@ func (c *Client) FetchStarkProof(jobID string) ([]byte, error) {
 // loader expects; ship it to another worker with [Client.ImportStark] to fold
 // a scattered batch on a single fold worker.
 func (c *Client) FetchStarkRaw(jobID string) ([]byte, error) {
-	resp, err := c.httpClient.Get(fmt.Sprintf("%s/jobs/%s/snark/raw", c.baseURL, jobID))
-	if err != nil {
-		return nil, fmt.Errorf("GET /jobs/%s/snark/raw: %w", jobID, err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET /jobs/%s/snark/raw: status %d: %s", jobID, resp.StatusCode, body)
-	}
-	return body, nil
+	return c.get(fmt.Sprintf("/jobs/%s/snark/raw", jobID))
 }
 
 // ImportStark uploads a raw STARK `proof.bin` (POST /jobs/import) and returns
@@ -251,30 +227,12 @@ func (c *Client) ImportStark(proofBin []byte) (string, error) {
 // FetchPublics downloads the raw committed publics of a completed job
 // (256 bytes: the guest's u32 output registers, little-endian).
 func (c *Client) FetchPublics(jobID string) ([]byte, error) {
-	resp, err := c.httpClient.Get(fmt.Sprintf("%s/jobs/%s/publics", c.baseURL, jobID))
-	if err != nil {
-		return nil, fmt.Errorf("GET /jobs/%s/publics: %w", jobID, err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET /jobs/%s/publics: status %d: %s", jobID, resp.StatusCode, body)
-	}
-	return body, nil
+	return c.get(fmt.Sprintf("/jobs/%s/publics", jobID))
 }
 
 // FetchInputs downloads the raw `input.bin` blob the SNARK was generated
 // over. Useful for audit, re-proving, or off-chain bookkeeping; not
 // required for on-chain verification.
 func (c *Client) FetchInputs(jobID string) ([]byte, error) {
-	resp, err := c.httpClient.Get(fmt.Sprintf("%s/jobs/%s/inputs", c.baseURL, jobID))
-	if err != nil {
-		return nil, fmt.Errorf("GET /jobs/%s/inputs: %w", jobID, err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET /jobs/%s/inputs: status %d: %s", jobID, resp.StatusCode, body)
-	}
-	return body, nil
+	return c.get(fmt.Sprintf("/jobs/%s/inputs", jobID))
 }

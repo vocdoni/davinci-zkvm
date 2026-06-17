@@ -107,11 +107,11 @@ type VerificationKey struct {
 	Protocol string
 	Curve    string
 	NPublic  int
-	Alpha1   [3]string     // vk_alpha_1: G1
-	Beta2    [3][2]string  // vk_beta_2: G2
-	Gamma2   [3][2]string  // vk_gamma_2: G2
-	Delta2   [3][2]string  // vk_delta_2: G2
-	IC       [][3]string   // IC: array of G1 points
+	Alpha1   [3]string    // vk_alpha_1: G1
+	Beta2    [3][2]string // vk_beta_2: G2
+	Gamma2   [3][2]string // vk_gamma_2: G2
+	Delta2   [3][2]string // vk_delta_2: G2
+	IC       [][3]string  // IC: array of G1 points
 }
 
 // MarshalJSON produces snarkjs-compatible VK JSON.

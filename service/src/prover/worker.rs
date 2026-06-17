@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::types::{Job, JobKind, JobStatus};
 use chrono::Utc;
 use dashmap::DashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::process::Command;
@@ -52,7 +52,7 @@ impl ProverHandle {
     pub async fn submit(
         &self,
         input_bytes: Vec<u8>,
-        proof_output_dir: &PathBuf,
+        proof_output_dir: &Path,
         kind: JobKind,
         elf_path: PathBuf,
         parent_job_ids: Vec<Uuid>,

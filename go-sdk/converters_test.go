@@ -3,6 +3,7 @@ package davinci
 import (
 	"encoding/json"
 	"math/big"
+	"strings"
 	"testing"
 )
 
@@ -461,7 +462,7 @@ func TestPublicOutputsString(t *testing.T) {
 	if s == "" {
 		t.Error("String() returned empty")
 	}
-	if !contains(s, "PASS") {
+	if !strings.Contains(s, "PASS") {
 		t.Errorf("expected PASS in %q", s)
 	}
 }
@@ -504,17 +505,4 @@ func TestNewStateTransitionData(t *testing.T) {
 	if st.ResultsSmt == nil {
 		t.Error("ResultsSmt should not be nil")
 	}
-}
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsHelper(s, sub))
-}
-
-func containsHelper(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

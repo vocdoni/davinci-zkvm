@@ -134,15 +134,10 @@ func (o *PublicOutputs) ABIEncode() []byte {
 
 	buf := make([]byte, 256) // 8 × 32 bytes
 	for i, v := range values {
-		if v == nil {
-			continue // slot stays zero
-		}
-		b := v.Bytes()
-		offset := i*32 + (32 - len(b))
-		if len(b) <= 32 {
-			copy(buf[offset:], b)
-		} else {
-			copy(buf[i*32:], b[len(b)-32:])
+		if v != nil {
+			// FillBytes zero-extends v into the slot; panics if it overflows
+			// uint256, which is a caller bug worth surfacing loudly.
+			v.FillBytes(buf[i*32 : (i+1)*32])
 		}
 	}
 	return buf
