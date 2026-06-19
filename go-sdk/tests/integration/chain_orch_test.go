@@ -14,22 +14,30 @@ import (
 	"os"
 	"testing"
 
-	bjjgnark "github.com/vocdoni/davinci-node/crypto/ecc/bjj_gnark"
-	"github.com/vocdoni/davinci-node/crypto/elgamal"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/chain"
+	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/bjj_gnark"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/elgamal"
 	davinciSolidity "github.com/vocdoni/davinci-zkvm/go-sdk/solidity"
 )
 
 // chainVotes converts a generated ballot batch to chain.Vote values,
-// rebuilding each elgamal.Ballot from the raw RTE ciphertext data.
+// rebuilding each elgamal.Ballot from the raw RTE ciphertext data. Active
+// fields come from the cast ballot; padded slots [nf, NumFields) carry the TE
+// identity so re-encryption leaves them identity (matching the guest's
+// num_fields-aware skip).
 func chainVotes(voters []*Voter, results []*BallotResult) []chain.Vote {
+	_, nf := ballotModeLeaf()
 	votes := make([]chain.Vote, len(results))
 	for idx, res := range results {
 		ballot := elgamal.NewBallot(bjjgnark.New())
-		for i := 0; i < 8; i++ {
-			c1 := bjjgnark.New().SetPoint(res.RawBallot.C1X[i], res.RawBallot.C1Y[i])
-			c2 := bjjgnark.New().SetPoint(res.RawBallot.C2X[i], res.RawBallot.C2Y[i])
-			ballot.Ciphertexts[i] = &elgamal.Ciphertext{C1: c1, C2: c2}
+		for i := 0; i < NumFields; i++ {
+			if i < nf {
+				c1 := bjjgnark.New().SetPoint(res.RawBallot.C1X[i], res.RawBallot.C1Y[i])
+				c2 := bjjgnark.New().SetPoint(res.RawBallot.C2X[i], res.RawBallot.C2Y[i])
+				ballot.Ciphertexts[i] = &elgamal.Ciphertext{C1: c1, C2: c2}
+			} else {
+				ballot.Ciphertexts[i] = identityCiphertext()
+			}
 		}
 		votes[idx] = chain.Vote{
 			CensusIdx:   voters[idx].CensusIdx,
@@ -64,9 +72,10 @@ func TestChainOrchestrator(t *testing.T) {
 		t.Fatal("census tree has no root")
 	}
 
+	bmLeaf, _ := ballotModeLeaf()
 	seq, err := chain.NewSequencer(client, chain.Config{
 		ProcessID:    new(big.Int).SetBytes(election.ProcessID[:]),
-		BallotMode:   big.NewInt(0x01),
+		BallotMode:   bmLeaf,
 		EncKey:       election.EncKey,
 		CensusOrigin: uint64(election.CensusOrigin),
 		CensusRoot:   censusRoot,

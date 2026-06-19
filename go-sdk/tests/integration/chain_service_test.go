@@ -19,9 +19,9 @@ import (
 	"testing"
 
 	arbo "github.com/vocdoni/arbo"
-	"github.com/vocdoni/davinci-node/crypto/ecc/format"
-	"github.com/vocdoni/davinci-node/crypto/elgamal"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/format"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/elgamal"
 	davinciSolidity "github.com/vocdoni/davinci-zkvm/go-sdk/solidity"
 )
 
