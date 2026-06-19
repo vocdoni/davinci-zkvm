@@ -35,7 +35,8 @@
 //   [13..21] state_root (last root_after)
 //   [21..29] batch_vk
 //   [29..37] fold_vk
-//   [37..53] plaintext results (finalize only, zero otherwise)
+//   [37..53] plaintext results (finalize only, zero otherwise): 16 u32 field
+//            tallies, one per ballot field (each < 2^32)
 //
 // VK binding: batch_vk / fold_vk arrive as input and are committed in the
 // digest. After PLONK verification the host checks publics.fold_vk ==
@@ -168,32 +169,32 @@ fn u32x8_to_fr(v: &[u32; 8]) -> FrRaw {
 
 /// Finalize mode: parse and verify the results frame against the chain's
 /// final `state_root` and the config's encryption key, filling
-/// `results_u32` with the plaintext tally (8 x u64 as 16 LE u32 words).
+/// `results_u32` with the plaintext tally (16 x u32, one per field; each < 2^32).
 /// The single net accumulator decrypts straight to the result; non-negativity
 /// is inherent in the bounded discrete-log recovery, so no add−sub guard is
 /// needed. Panics on any invalid proof.
 fn verify_results(frame: &[u8], cfg: &Config, state_root: &[u32; 8], results_u32: &mut [u32; 16]) {
-    const BALLOT_BYTES: usize = 32 * 32;
+    const BALLOT_BYTES: usize = 64 * 32;
     const CP_BYTES: usize = 160;
-    let fixed = BALLOT_BYTES + 64 + 8 * CP_BYTES + 8;
+    let fixed = BALLOT_BYTES + 128 + 16 * CP_BYTES + 8;
     assert!(frame.len() >= fixed, "results frame too short");
     let fr_at = |off: usize| le_to_fr(frame[off..off + 32].try_into().unwrap());
     let u64_at = |off: usize| u64::from_le_bytes(frame[off..off + 8].try_into().unwrap());
 
-    let mut ballot = [ZERO_FR; 32];
-    for i in 0..32 {
+    let mut ballot = [ZERO_FR; 64];
+    for i in 0..64 {
         ballot[i] = fr_at(i * 32);
     }
     let mut off = BALLOT_BYTES;
-    let mut results = [0u64; 8];
-    for i in 0..8 {
+    let mut results = [0u64; 16];
+    for i in 0..16 {
         results[i] = u64_at(off + i * 8);
     }
-    off += 64;
+    off += 128;
 
     // Chaum-Pedersen decryption proofs: one per ciphertext.
     let enc_key = (cfg.enc_x, cfg.enc_y);
-    for i in 0..8 {
+    for i in 0..16 {
         let p = off + i * CP_BYTES;
         let proof = CpProof {
             a1: (fr_at(p), fr_at(p + 32)),
@@ -207,7 +208,7 @@ fn verify_results(frame: &[u8], cfg: &Config, state_root: &[u32; 8], results_u32
             "CP proof {} failed", i
         );
     }
-    off += 8 * CP_BYTES;
+    off += 16 * CP_BYTES;
 
     // SMT inclusion of the net Results leaf under the final state root.
     // An identity update (fnc=(0,1), old == new) through the processor
@@ -232,10 +233,9 @@ fn verify_results(frame: &[u8], cfg: &Config, state_root: &[u32; 8], results_u32
     };
     assert!(verify_transition(&t), "results leaf 0x04 inclusion failed");
 
-    for i in 0..8 {
-        let r = results[i];
-        results_u32[i * 2] = (r & 0xFFFF_FFFF) as u32;
-        results_u32[i * 2 + 1] = (r >> 32) as u32;
+    for i in 0..16 {
+        assert!(results[i] <= u32::MAX as u64, "result {} overflows u32 digest slot", i);
+        results_u32[i] = results[i] as u32;
     }
 }
 

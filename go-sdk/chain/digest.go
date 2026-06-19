@@ -36,7 +36,9 @@ type Digest struct {
 	StateRoot        []byte // 32 bytes, arbo LE
 	BatchVK          string // 0x-prefixed BE hex
 	FoldVK           string // 0x-prefixed BE hex
-	Results          [8]uint64
+	// Results are 16 per-field plaintext tallies (one u32 each); the guest
+	// asserts each fits in u32 before committing it to the digest.
+	Results [16]uint32
 }
 
 // ParseDigest decodes the public values blob of a fold or finalize job.
@@ -66,8 +68,8 @@ func ParseDigest(publics []byte) (*Digest, error) {
 		BatchVK:          vkHex(21),
 		FoldVK:           vkHex(29),
 	}
-	for i := 0; i < 8; i++ {
-		d.Results[i] = uint64(w(37+i*2)) | uint64(w(37+i*2+1))<<32
+	for i := 0; i < 16; i++ {
+		d.Results[i] = w(37 + i)
 	}
 	return d, nil
 }

@@ -257,9 +257,10 @@ func BjjCiphertextFromBigInts(c1x, c1y, c2x, c2y *big.Int) BjjCiphertext {
 }
 
 // ReencryptionEntryFromBigInts builds a ReencryptionEntry from raw big.Int
-// coordinates. Each ballot is 32 big.Int values (8 ciphertexts × 4 coords).
-// k is the re-encryption random seed. original and reencrypted are each
-// slices of 32 *big.Int in the order produced by elgamal.Ballot.BigInts():
+// coordinates. Each ballot is BallotFields big.Int values (NumFields
+// ciphertexts × 4 coords). k is the re-encryption random seed. original and
+// reencrypted are each slices of BallotFields *big.Int in the order produced
+// by elgamal.Ballot.BigInts():
 // [ct0.c1x, ct0.c1y, ct0.c2x, ct0.c2y, ct1.c1x, ct1.c1y, ...]
 func ReencryptionEntryFromBigInts(k *big.Int, original, reencrypted []*big.Int) (ReencryptionEntry, error) {
 	if len(original) != BallotFields {

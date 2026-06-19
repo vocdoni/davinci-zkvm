@@ -258,9 +258,9 @@ func TestCensusProofFromBigInts(t *testing.T) {
 
 func TestReencryptionEntryFromBigInts(t *testing.T) {
 	k := big.NewInt(999)
-	orig := make([]*big.Int, 32)
-	reenc := make([]*big.Int, 32)
-	for i := 0; i < 32; i++ {
+	orig := make([]*big.Int, BallotFields)
+	reenc := make([]*big.Int, BallotFields)
+	for i := 0; i < BallotFields; i++ {
 		orig[i] = big.NewInt(int64(i))
 		reenc[i] = big.NewInt(int64(100 + i))
 	}
@@ -278,7 +278,7 @@ func TestReencryptionEntryFromBigInts(t *testing.T) {
 	}
 
 	// Wrong length
-	_, err = ReencryptionEntryFromBigInts(k, make([]*big.Int, 31), reenc)
+	_, err = ReencryptionEntryFromBigInts(k, make([]*big.Int, BallotFields-1), reenc)
 	if err == nil {
 		t.Error("expected error for wrong original length")
 	}
