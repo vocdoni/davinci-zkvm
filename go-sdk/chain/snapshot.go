@@ -13,7 +13,8 @@ import (
 
 	arbo "github.com/vocdoni/arbo"
 	"github.com/vocdoni/arbo/memdb"
-	"github.com/vocdoni/davinci-node/crypto/elgamal"
+	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/elgamal"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -69,8 +70,8 @@ func RestoreState(cfg Config, blob []byte) (*State, error) {
 	if err := cbor.Unmarshal(blob, &snap); err != nil {
 		return nil, fmt.Errorf("decode snapshot: %w", err)
 	}
-	if len(snap.Results) != 32 {
-		return nil, fmt.Errorf("snapshot results: want 32 coords, got %d", len(snap.Results))
+	if len(snap.Results) != davinci.BallotFields {
+		return nil, fmt.Errorf("snapshot results: want %d coords, got %d", davinci.BallotFields, len(snap.Results))
 	}
 
 	tree, err := arbo.NewTree(arbo.Config{

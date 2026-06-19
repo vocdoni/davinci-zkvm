@@ -13,9 +13,9 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/vocdoni/davinci-node/circuits/ballotproof"
-	bjjgnark "github.com/vocdoni/davinci-node/crypto/ecc/bjj_gnark"
-	"github.com/vocdoni/davinci-node/types"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/circuits/ballotproof"
+	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/bjj_gnark"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/types"
 )
 
 // ---- wire types ----
@@ -38,11 +38,11 @@ type ballotWorkerOutput struct {
 }
 
 type workerBallotResult struct {
-	VoteID       uint64    `json:"vote_id"`
-	AddressLo16  uint64    `json:"address_lo16"`
-	ProofJSON    string    `json:"proof_json"`
-	PublicInputs []string  `json:"public_inputs"`
-	SigJSON      string    `json:"sig_json"`
+	VoteID       uint64            `json:"vote_id"`
+	AddressLo16  uint64            `json:"address_lo16"`
+	ProofJSON    string            `json:"proof_json"`
+	PublicInputs []string          `json:"public_inputs"`
+	SigJSON      string            `json:"sig_json"`
 	C1X          [NumFields]string `json:"c1x"`
 	C1Y          [NumFields]string `json:"c1y"`
 	C2X          [NumFields]string `json:"c2x"`

@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/vocdoni/davinci-node/circuits/ballotproof"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/circuits/ballotproof"
 )
 
 func TestChainInputDiff(t *testing.T) {

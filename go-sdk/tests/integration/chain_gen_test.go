@@ -21,9 +21,9 @@ import (
 	"testing"
 
 	arbo "github.com/vocdoni/arbo"
-	"github.com/vocdoni/davinci-node/circuits/ballotproof"
-	"github.com/vocdoni/davinci-node/crypto/ecc/format"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/circuits/ballotproof"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/format"
 )
 
 func envInt(name string, def int) int {

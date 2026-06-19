@@ -24,10 +24,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/vocdoni/davinci-node/circuits/ballotproof"
-	"github.com/vocdoni/davinci-node/crypto/blobs"
-	"github.com/vocdoni/davinci-node/types"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/circuits/ballotproof"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/blobs"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/types"
 )
 
 // Fail-mask bit constants => must match circuit/src/types.rs.

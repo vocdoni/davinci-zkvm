@@ -8,8 +8,8 @@ import (
 	"encoding/hex"
 	"math/big"
 
-	"github.com/vocdoni/davinci-node/crypto/ecc/format"
-	"github.com/vocdoni/davinci-node/crypto/elgamal"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/format"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/elgamal"
 
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 )

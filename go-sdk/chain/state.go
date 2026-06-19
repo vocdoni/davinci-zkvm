@@ -13,10 +13,10 @@ import (
 
 	arbo "github.com/vocdoni/arbo"
 	"github.com/vocdoni/arbo/memdb"
-	bjjgnark "github.com/vocdoni/davinci-node/crypto/ecc/bjj_gnark"
-	"github.com/vocdoni/davinci-node/crypto/ecc/format"
-	"github.com/vocdoni/davinci-node/crypto/elgamal"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
+	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/bjj_gnark"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/format"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/elgamal"
 )
 
 const (
@@ -165,6 +165,7 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 
 	// Re-encryption block first: the state tree stores the re-encrypted
 	// ballot leaf hashes.
+	nf := s.cfg.numFields()
 	pkX, pkY := bjjPointToFr32Hex(s.cfg.EncKey)
 	reencEntries := make([]davinci.ReencryptionEntry, n)
 	reencBallots := make([]*elgamal.Ballot, n)
@@ -176,6 +177,14 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 		reenc, _, err := v.Ballot.Reencrypt(s.cfg.EncKey, rawK)
 		if err != nil {
 			return nil, nil, fmt.Errorf("reencrypt[%d]: %w", idx, err)
+		}
+		// Padded slots [nf, NumFields) must stay the TE identity end-to-end.
+		// Re-encrypting the identity yields a non-identity Enc(0, k_i), but the
+		// guest asserts each padded slot is identity before skipping its
+		// per-field work, so reset them here. Keeps the reenc block, ballot
+		// leaf and results accumulator aligned with the guest's num_fields skip.
+		for i := nf; i < davinci.NumFields; i++ {
+			reenc.Ciphertexts[i] = identityCiphertext()
 		}
 		reencBallots[idx] = reenc
 
@@ -411,6 +420,25 @@ func (s *State) leafSiblings(key uint64) ([]string, error) {
 		out[i] = hex.EncodeToString(pad32(sib))
 	}
 	return out, nil
+}
+
+// numFields returns the declared active ballot field count, read from the low
+// 8 bits of the packed BallotMode leaf — the same bits the guest uses to drive
+// its per-field reencryption/accumulator skip. Slots [numFields, NumFields)
+// are identity-padded.
+func (c Config) numFields() int {
+	return int(new(big.Int).And(c.BallotMode, big.NewInt(0xff)).Int64())
+}
+
+// identityCiphertext returns the TE identity ElGamal ciphertext ((0,1),(0,1)),
+// used to pad ciphertext slots beyond the declared num_fields. SetZero gives
+// the BJJ identity (0,1); New() would give (0,0), which is off-curve.
+func identityCiphertext() *elgamal.Ciphertext {
+	c1 := bjjgnark.New()
+	c1.SetZero()
+	c2 := bjjgnark.New()
+	c2.SetZero()
+	return &elgamal.Ciphertext{C1: c1, C2: c2}
 }
 
 // encKeyLeafValue computes the config leaf for the encryption key:
