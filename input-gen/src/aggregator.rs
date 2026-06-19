@@ -234,14 +234,14 @@ pub fn build_fold_input(
 /// Decrypted-results payload for the finalize step. All 32-byte fields are
 /// little-endian hex (arbo/FrRaw convention, same as [`ChainConfig`]). Ballot
 /// coordinates are Twisted Edwards, ciphertext order
-/// `[c1x, c1y, c2x, c2y] x 8`.
+/// `[c1x, c1y, c2x, c2y] x 16`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultsPayload {
-    /// Net Results accumulator (state key 0x04): 32 TE coordinates.
+    /// Net Results accumulator (state key 0x04): 64 TE coordinates.
     pub ballot: Vec<String>,
     /// Claimed plaintexts of the net accumulator.
     pub results: Vec<u64>,
-    /// 8 Chaum-Pedersen proofs, one per ciphertext.
+    /// 16 Chaum-Pedersen proofs, one per ciphertext.
     pub cp_proofs: Vec<CpProofJson>,
     /// Inclusion siblings for the Results leaf, root→leaf, zero-padded.
     pub siblings: Vec<String>,
@@ -260,20 +260,20 @@ pub struct CpProofJson {
 impl ResultsPayload {
     /// Encode to the guest results frame (see circuit-aggregator main.rs).
     pub fn encode(&self) -> Result<Vec<u8>> {
-        if self.ballot.len() != 32 {
-            bail!("ballot must have 32 coordinates");
+        if self.ballot.len() != 64 {
+            bail!("ballot must have 64 coordinates");
         }
-        if self.results.len() != 8 {
-            bail!("results must have 8 values");
+        if self.results.len() != 16 {
+            bail!("results must have 16 values");
         }
-        if self.cp_proofs.len() != 8 {
-            bail!("expected 8 CP proofs, got {}", self.cp_proofs.len());
+        if self.cp_proofs.len() != 16 {
+            bail!("expected 16 CP proofs, got {}", self.cp_proofs.len());
         }
         if self.siblings.is_empty() {
             bail!("sibling list must be non-empty");
         }
         let n_levels = self.siblings.len();
-        let mut out = Vec::with_capacity(1024 + 64 + 8 * 160 + 8 + n_levels * 32);
+        let mut out = Vec::with_capacity(2048 + 128 + 16 * 160 + 8 + n_levels * 32);
         for (i, c) in self.ballot.iter().enumerate() {
             out.extend_from_slice(&hex32_le(&format!("ballot[{}]", i), c)?);
         }
@@ -328,7 +328,7 @@ pub struct AggDigest {
     pub state_root: [u32; 8],
     pub batch_vk: [u64; 4],
     pub fold_vk: [u64; 4],
-    pub results: [u64; 8],
+    pub results: [u32; 16],
 }
 
 pub fn parse_agg_digest(bytes: &[u8]) -> Result<AggDigest> {
@@ -350,9 +350,9 @@ pub fn parse_agg_digest(bytes: &[u8]) -> Result<AggDigest> {
         }
         v
     };
-    let mut results = [0u64; 8];
-    for i in 0..8 {
-        results[i] = w[37 + i * 2] as u64 | ((w[37 + i * 2 + 1] as u64) << 32);
+    let mut results = [0u32; 16];
+    for i in 0..16 {
+        results[i] = w[37 + i];
     }
     Ok(AggDigest {
         mode: w[1],

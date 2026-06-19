@@ -6,7 +6,7 @@ import (
 )
 
 // buildPublics assembles a synthetic 53-word digest blob.
-func buildPublics(mode, steps, voters, overwrites uint32, batchVK, foldVK [4]uint64, results [8]uint64) []byte {
+func buildPublics(mode, steps, voters, overwrites uint32, batchVK, foldVK [4]uint64, results [16]uint32) []byte {
 	b := make([]byte, digestWords*4)
 	copy(b[0:4], "DAG1")
 	put := func(i int, v uint32) { binary.LittleEndian.PutUint32(b[i*4:], v) }
@@ -27,8 +27,7 @@ func buildPublics(mode, steps, voters, overwrites uint32, batchVK, foldVK [4]uin
 	putVK(21, batchVK)
 	putVK(29, foldVK)
 	for i, r := range results {
-		put(37+i*2, uint32(r))
-		put(37+i*2+1, uint32(r>>32))
+		put(37+i, r)
 	}
 	return b
 }
@@ -36,7 +35,7 @@ func buildPublics(mode, steps, voters, overwrites uint32, batchVK, foldVK [4]uin
 func TestParseDigest(t *testing.T) {
 	batchVK := [4]uint64{0x1122334455667788, 0x99aabbccddeeff00, 1, 2}
 	foldVK := [4]uint64{0xdeadbeefcafe0123, 3, 4, 5}
-	results := [8]uint64{50, 18, 38, 22, 26, 26, 0, 1 << 40}
+	results := [16]uint32{50, 18, 38, 22, 26, 26, 0, 1 << 31, 7, 8, 9, 10, 11, 12, 13, 14}
 	pub := buildPublics(ModeFinalize, 7, 14, 2, batchVK, foldVK, results)
 
 	d, err := ParseDigest(pub)

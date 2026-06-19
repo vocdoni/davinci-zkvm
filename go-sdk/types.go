@@ -309,13 +309,13 @@ type FinalizeRequest struct {
 
 // ResultsPayload carries the decrypted results for the finalize step. All
 // 32-byte fields are arbo little-endian hex; ballot coordinates are Twisted
-// Edwards, ciphertext order [c1x, c1y, c2x, c2y] x 8.
+// Edwards, ciphertext order [c1x, c1y, c2x, c2y] x 16.
 type ResultsPayload struct {
-	// Ballot is the net Results accumulator (state key 0x04): 32 coords.
+	// Ballot is the net Results accumulator (state key 0x04): 64 coords.
 	Ballot []string `json:"ballot"`
-	// Results are the claimed plaintexts (8 values).
+	// Results are the claimed plaintexts (16 values).
 	Results []uint64 `json:"results"`
-	// CpProofs are 8 Chaum-Pedersen proofs, one per ciphertext.
+	// CpProofs are 16 Chaum-Pedersen proofs, one per ciphertext.
 	CpProofs []CpProof `json:"cp_proofs"`
 	// Siblings are inclusion siblings root→leaf, zero-padded.
 	Siblings []string `json:"siblings"`

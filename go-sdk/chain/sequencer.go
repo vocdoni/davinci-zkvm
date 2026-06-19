@@ -289,7 +289,7 @@ func (s *Sequencer) Finalize(privKey *big.Int) (*FinalResult, error) {
 		return nil, err
 	}
 	for i, r := range results {
-		if digest.Results[i] != r {
+		if uint64(digest.Results[i]) != r {
 			return nil, fmt.Errorf("digest result[%d] = %d, want %d", i, digest.Results[i], r)
 		}
 	}
