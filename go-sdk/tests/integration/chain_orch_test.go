@@ -79,6 +79,7 @@ func TestChainOrchestrator(t *testing.T) {
 		EncKey:       election.EncKey,
 		CensusOrigin: uint64(election.CensusOrigin),
 		CensusRoot:   censusRoot,
+		BallotVKHash: ballotVKLeaf(),
 	}, foldEvery, proofTimeout())
 	if err != nil {
 		t.Fatalf("NewSequencer: %v", err)

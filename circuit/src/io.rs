@@ -64,6 +64,9 @@ pub struct ParsedInput {
     pub reenc_entries: Vec<ReencEntry>,
     /// KZG barycentric evaluation block (KZGBLK!! magic). None if absent.
     pub kzg: Option<KZGBlock>,
+    /// SHA-256 of the raw VK wire bytes (arbo leaf convention). Bound to the
+    /// state tree's config key 0x07 by main.rs so the VK is pinned per process.
+    pub vk_hash: FrRaw,
     /// Number of bytes consumed (equals `input.len()` on success).
     pub bytes_consumed: usize,
 }
@@ -106,6 +109,7 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
     if n_public > 256                              { *fail_mask |= 1 << 31; }
 
     // --- Verification key ---
+    let vk_start = off;
     let vk_alpha_g1 = read_g1!(&mut off);
     let vk_beta_g2  = read_g2!(&mut off);
     let vk_gamma_g2 = read_g2!(&mut off);
@@ -118,6 +122,9 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
     for _ in 0..gamma_abc_len {
         vk_gamma_abc.push(read_g1!(&mut off));
     }
+    // read_words_le never advances past input.len(), so the slice is in bounds;
+    // on truncation fail_mask bit 31 is already set and the hash is irrelevant.
+    let vk_hash = crate::hash::hash_vk_bytes(&input[vk_start..off]);
 
     // --- Proofs ---
     let nproofs_check = read1!(&mut off, 0) as usize;
@@ -297,6 +304,7 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
         proofs, scaled_a, neg_alpha_rsum, neg_g_ic, neg_acc_c,
         ecdsa, state, census_proofs, csp_block,
         reenc_pub_key, reenc_entries, kzg,
+        vk_hash,
         bytes_consumed: off,
     }
 }
@@ -382,9 +390,9 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
         None
     };
 
-    // Process read-proofs: n (0 or 4), then n_levels + entries only when n>0.
+    // Process read-proofs: n (0 or 5), then n_levels + entries only when n>0.
     let process_n = read1!(0) as usize;
-    if process_n != 0 && process_n != 4 { *fail_mask |= 1 << 31; }
+    if process_n != 0 && process_n != 5 { *fail_mask |= 1 << 31; }
     let mut process_proofs = Vec::with_capacity(process_n);
     if process_n > 0 {
         let process_n_levels = read1!(0) as usize;

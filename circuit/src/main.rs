@@ -232,12 +232,23 @@ fn main() {
     // process proof value, ensuring the re-encryption key is the one
     // authorized by the election configuration.
     if let (Some((pub_x, pub_y)), Some(state)) = (&parsed.reenc_pub_key, &parsed.state) {
-        if state.process_proofs.len() == 4 {
+        if state.process_proofs.len() == 5 {
             let enc_key_hash = hash_enc_key(pub_x, pub_y);
             if enc_key_hash != state.process_proofs[2].new_value {
                 fail_mask |= crate::types::FAIL_BINDING;
                 binding_ok = false;
             }
+        }
+    }
+
+    // Ballot VK <=> process config VK hash (key 0x07). The state tree pins
+    // sha256(VK wire bytes) at genesis, so a batch proved against any other
+    // Groth16 VK fails here — the VK is immutable for the process lifetime.
+    // (process_proofs.len() != 5 already trips FAIL_SMT_PROCESS.)
+    if let Some(state) = &parsed.state {
+        if state.process_proofs.len() == 5 && parsed.vk_hash != state.process_proofs[4].new_value {
+            fail_mask |= crate::types::FAIL_BINDING;
+            binding_ok = false;
         }
     }
 
@@ -301,6 +312,87 @@ fn main() {
                         || leaf_addr[1] != proof_addr[1]
                         || (leaf_addr[2] & 0xFFFFFFFF) != (proof_addr[2] & 0xFFFFFFFF)
                     {
+                        fail_mask |= crate::types::FAIL_BINDING;
+                        binding_ok = false;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Ballot proof <=> re-encryption <=> state binding.
+    // Each Groth16 ballot proof commits to public_inputs[2] = inputsHash =
+    // PoseidonMultiHash(processID, ballotMode, encKeyX, encKeyY, address,
+    // voteID, 64 original-ballot TE coords, weight). Recomputing it in-guest
+    // binds reenc_entries[i].original to the voter's proof — without this a
+    // malicious sequencer could pair a valid proof with an arbitrary
+    // "original" ballot. Comparing reencrypted against state.voter_ballots[i]
+    // then binds the SMT ballot leaf and results accumulator to the verified
+    // re-encryption. Also enforces proofs.len() == n_voters (batch Groth16
+    // verification alone accepts an empty proof list).
+    if let Some(state) = &parsed.state {
+        if state.n_voters > 0 {
+            let bindable = parsed.proofs.len() == state.n_voters
+                && parsed.n_public >= 3
+                && parsed.reenc_entries.len() == state.n_voters
+                && state.voter_ballots.len() == state.n_voters
+                && state.process_proofs.len() == 5
+                && parsed.reenc_pub_key.is_some();
+            if !bindable {
+                fail_mask |= crate::types::FAIL_BINDING;
+                binding_ok = false;
+            } else {
+                let (pub_x, pub_y) = parsed.reenc_pub_key.as_ref().unwrap();
+                let ballot_mode = &state.process_proofs[1].new_value;
+                for i in 0..state.n_voters {
+                    let entry = &parsed.reenc_entries[i];
+
+                    // Weight: Merkle leaf = (address << 88) | weight, so the
+                    // low 88 bits; CSP entries carry it explicitly.
+                    let weight = if census_origin == crate::types::CENSUS_ORIGIN_CSP {
+                        parsed.csp_block.as_ref()
+                            .and_then(|c| c.entries.get(i))
+                            .map(|e| e.weight)
+                            .unwrap_or(ZERO_FR)
+                    } else {
+                        parsed.census_proofs.get(i)
+                            .map(|cp| [cp.leaf[0], cp.leaf[1] & 0xFF_FFFF, 0, 0])
+                            .unwrap_or(ZERO_FR)
+                    };
+
+                    let mut ballot = [ZERO_FR; crate::types::BALLOT_FIELDS];
+                    for f in 0..crate::types::NUM_FIELDS {
+                        ballot[f * 4] = entry.original[f].c1x;
+                        ballot[f * 4 + 1] = entry.original[f].c1y;
+                        ballot[f * 4 + 2] = entry.original[f].c2x;
+                        ballot[f * 4 + 3] = entry.original[f].c2y;
+                    }
+                    let pubs = &parsed.proofs[i].public_inputs;
+                    let h = poseidon::ballot_inputs_hash(
+                        &state.process_id, ballot_mode, pub_x, pub_y,
+                        &pubs[0], &pubs[1], &ballot, &weight, num_fields,
+                    );
+                    if h != pubs[2] {
+                        fail_mask |= crate::types::FAIL_BINDING;
+                        binding_ok = false;
+                        break;
+                    }
+
+                    // Re-encrypted ballot must equal the state's voter ballot
+                    // (SHA-256-hashed into the SMT leaf and accumulated).
+                    let vb = &state.voter_ballots[i];
+                    let mut same = true;
+                    for f in 0..crate::types::NUM_FIELDS {
+                        let r = &entry.reencrypted[f];
+                        if r.c1x != vb[f * 4] || r.c1y != vb[f * 4 + 1]
+                            || r.c2x != vb[f * 4 + 2] || r.c2y != vb[f * 4 + 3]
+                        {
+                            same = false;
+                            break;
+                        }
+                    }
+                    if !same {
                         fail_mask |= crate::types::FAIL_BINDING;
                         binding_ok = false;
                         break;

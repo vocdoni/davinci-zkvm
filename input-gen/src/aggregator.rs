@@ -4,7 +4,7 @@
 //! Input frames (each framed for `read_input_slice`: u64 LE length prefix,
 //! data padded to 8 bytes):
 //!   1. header: 12 u64 LE = [magic, mode, has_prev, n_batch, batch_vk[4], fold_vk[4]]
-//!   2. config: 168 bytes (see [`ChainConfig::encode`])
+//!   2. config: 200 bytes (see [`ChainConfig::encode`])
 //!   3. (if has_prev) previous fold proof blob
 //!   4. n_batch vote-batch proof blobs
 //!
@@ -40,6 +40,8 @@ pub struct ChainConfig {
     pub census_origin: u64,
     /// Census root every batch must use, 32 bytes LE, hex.
     pub census_root: String,
+    /// sha256 of the ballot Groth16 VK wire bytes (key 0x07), 32 bytes LE, hex.
+    pub ballot_vk_hash: String,
 }
 
 fn hex32_le(field: &str, s: &str) -> Result<[u8; 32]> {
@@ -52,15 +54,16 @@ fn hex32_le(field: &str, s: &str) -> Result<[u8; 32]> {
 }
 
 impl ChainConfig {
-    /// Encode to the 168-byte guest config frame.
+    /// Encode to the 200-byte guest config frame.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(168);
+        let mut out = Vec::with_capacity(200);
         out.extend_from_slice(&hex32_le("process_id", &self.process_id)?);
         out.extend_from_slice(&hex32_le("ballot_mode", &self.ballot_mode)?);
         out.extend_from_slice(&hex32_le("enc_x", &self.enc_x)?);
         out.extend_from_slice(&hex32_le("enc_y", &self.enc_y)?);
         out.extend_from_slice(&self.census_origin.to_le_bytes());
         out.extend_from_slice(&hex32_le("census_root", &self.census_root)?);
+        out.extend_from_slice(&hex32_le("ballot_vk_hash", &self.ballot_vk_hash)?);
         Ok(out)
     }
 }

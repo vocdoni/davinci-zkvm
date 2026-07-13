@@ -42,7 +42,19 @@ pub fn hash_enc_key(x: &FrRaw, y: &FrRaw) -> FrRaw {
         buf[dst..dst + 8].copy_from_slice(&bytes);
     }
     let digest = sha256_once(&buf);
-    // 32-byte hash (big-endian) → FrRaw [u64;4] LE limbs
+    digest_to_fr(&digest)
+}
+
+/// Compute the arbo leaf value for the ballot verification key: SHA-256 over the
+/// raw VK wire bytes (alpha_g1 ‖ beta_g2 ‖ gamma_g2 ‖ delta_g2 ‖ gamma_abc_len ‖
+/// gamma_abc[..], LE u64 limbs as they appear in the batch input) → FrRaw.
+/// Stored in the state tree at config key 0x07 so the VK is pinned per process.
+pub fn hash_vk_bytes(vk_bytes: &[u8]) -> FrRaw {
+    digest_to_fr(&sha256_once(vk_bytes))
+}
+
+/// 32-byte hash (big-endian) → FrRaw [u64;4] LE limbs.
+fn digest_to_fr(digest: &[u8; 32]) -> FrRaw {
     let mut fr = ZERO_FR;
     for i in 0..4 {
         let off = (3 - i) * 8;

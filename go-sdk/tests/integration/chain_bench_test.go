@@ -228,6 +228,7 @@ func TestChainBenchmark(t *testing.T) {
 		EncKey:       encKey,
 		CensusOrigin: cache.CensusOrigin,
 		CensusRoot:   cache.CensusRoot,
+		BallotVKHash: ballotVKLeaf(),
 	}, 0, proofTimeout())
 	if err != nil {
 		t.Fatalf("NewSequencer: %v", err)

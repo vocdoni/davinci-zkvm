@@ -38,6 +38,7 @@ func testConfig(encKey *bjjgnark.BJJ) Config {
 		EncKey:       encKey,
 		CensusOrigin: 1,
 		CensusRoot:   big.NewInt(0x1234),
+		BallotVKHash: big.NewInt(0x77),
 	}
 }
 

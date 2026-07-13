@@ -133,11 +133,11 @@ pub fn write_state_block(sd: &StateData) -> Result<Vec<u8>> {
     // Net Results transition (0 or 1)
     write_optional_smt(&mut buf, sd.results.as_ref())?;
 
-    // Process read-proofs: write n (0 or 4), then n_levels + entries only when n>0.
-    if !sd.process_proofs.is_empty() && sd.process_proofs.len() != 4 {
-        bail!("process_proofs must have exactly 4 entries, got {}", sd.process_proofs.len());
+    // Process read-proofs: write n (0 or 5), then n_levels + entries only when n>0.
+    if !sd.process_proofs.is_empty() && sd.process_proofs.len() != 5 {
+        bail!("process_proofs must have exactly 5 entries, got {}", sd.process_proofs.len());
     }
-    buf.extend_from_slice(&(sd.process_proofs.len() as u64).to_le_bytes()); // 0 or 4
+    buf.extend_from_slice(&(sd.process_proofs.len() as u64).to_le_bytes()); // 0 or 5
     if !sd.process_proofs.is_empty() {
         let proc_n_levels = sd.process_proofs[0].siblings.len();
         buf.extend_from_slice(&(proc_n_levels as u64).to_le_bytes());

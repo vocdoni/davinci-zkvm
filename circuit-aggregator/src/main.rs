@@ -8,8 +8,9 @@
 //
 // Input frames (each one a `read_input_slice` frame):
 //   1. header: 12 u64 LE = [magic, mode, has_prev, n_batch, batch_vk[4], fold_vk[4]]
-//   2. config: 168 bytes = process_id(32 LE) | ballot_mode(32 LE) | enc_x(32 LE)
-//      | enc_y(32 LE) | census_origin(u64 LE) | census_root(32 LE)
+//   2. config: 200 bytes = process_id(32 LE) | ballot_mode(32 LE) | enc_x(32 LE)
+//      | enc_y(32 LE) | census_origin(u64 LE) | census_root(32 LE) |
+//      ballot_vk_hash(32 LE)
 //   3. (if has_prev == 1) previous fold proof blob
 //   4. fold: n_batch vote-batch proof blobs
 //      finalize: one results frame (see RESULTS FRAME below)
@@ -71,7 +72,7 @@ const ROOTC: [u64; 4] = [
     0x050baba5381c7b7d,
 ];
 
-const CONFIG_LEN: usize = 168;
+const CONFIG_LEN: usize = 200;
 const DIGEST_WORDS: usize = 53;
 
 // Proof blob word offsets.
@@ -86,6 +87,7 @@ struct Config {
     enc_y: FrRaw,
     census_origin: u64,
     census_root: FrRaw,
+    ballot_vk_hash: FrRaw,
 }
 
 fn parse_config(frame: &[u8]) -> Config {
@@ -98,6 +100,7 @@ fn parse_config(frame: &[u8]) -> Config {
         enc_y: fr_at(96),
         census_origin: u64::from_le_bytes(frame[128..136].try_into().unwrap()),
         census_root: fr_at(136),
+        ballot_vk_hash: fr_at(168),
     }
 }
 
@@ -134,16 +137,17 @@ fn subtree_root(leaves: &[(FrRaw, FrRaw)], level: usize) -> FrRaw {
     }
 }
 
-/// Genesis state root: the 5 reserved config leaves in an otherwise empty
+/// Genesis state root: the 6 reserved config leaves in an otherwise empty
 /// arbo SHA-256 SMT. Mirrors davinci-node `state.Initialize()`.
 fn genesis_root(cfg: &Config) -> FrRaw {
     let zero_results = ballot_leaf_hash(&circuit_primitives::results::zero_ballot());
-    let leaves: [(FrRaw, FrRaw); 5] = [
+    let leaves: [(FrRaw, FrRaw); 6] = [
         ([0x00, 0, 0, 0], cfg.process_id),                       // ProcessID
         ([0x02, 0, 0, 0], cfg.ballot_mode),                      // BallotMode
         ([0x03, 0, 0, 0], hash_enc_key(&cfg.enc_x, &cfg.enc_y)), // EncryptionKey
         ([0x04, 0, 0, 0], zero_results),                         // Results (net)
         ([0x06, 0, 0, 0], [cfg.census_origin, 0, 0, 0]),         // CensusOrigin
+        ([0x07, 0, 0, 0], cfg.ballot_vk_hash),                   // BallotVKHash
     ];
     subtree_root(&leaves, 0)
 }

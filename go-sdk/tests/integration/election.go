@@ -17,6 +17,7 @@ import (
 	arbo "github.com/vocdoni/arbo"
 	"github.com/vocdoni/arbo/memdb"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/circuits/ballotproof"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/blobs"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc"
 	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/bjj_gnark"
@@ -41,7 +42,17 @@ const (
 
 // configKeys are the process config keys stored in the state tree at election setup.
 // These are read-only per batch (verified via process read-proofs in the circuit).
-var configKeys = []uint64{0x00, 0x02, 0x03, 0x06}
+var configKeys = []uint64{0x00, 0x02, 0x03, 0x06, 0x07}
+
+// ballotVKLeaf returns the BallotVKHash config leaf (key 0x07) for the
+// embedded circom ballot VK.
+func ballotVKLeaf() *big.Int {
+	v, err := davinci.BallotVKLeaf(ballotproof.CircomVerificationKey)
+	if err != nil {
+		panic(fmt.Sprintf("ballot VK leaf: %v", err))
+	}
+	return v
+}
 
 // ballotModeLeaf returns the packed BallotMode value stored at config key 0x02
 // and its declared NumFields. The guest reads num_fields from the low byte of
@@ -135,6 +146,7 @@ func NewElection(nVoters int) (*Election, error) {
 		bmLeaf,           // 0x02 = BallotMode (low byte = NumFields, read by guest)
 		encKeyHashBI,     // 0x03 = EncryptionKey (SHA-256 of pubkey coordinates)
 		big.NewInt(0x01), // 0x06 = CensusOrigin
+		ballotVKLeaf(),   // 0x07 = BallotVKHash (sha256 of VK wire bytes)
 	}
 	for i, k := range configKeys {
 		if err := procTree.Add(
@@ -263,6 +275,7 @@ func NewCSPElection(nVoters int) (*Election, error) {
 		bmLeaf,           // 0x02 = BallotMode (low byte = NumFields, read by guest)
 		encKeyHashBI,     // 0x03 = EncryptionKey hash
 		big.NewInt(0x04), // 0x06 = CensusOrigin = CSP
+		ballotVKLeaf(),   // 0x07 = BallotVKHash (sha256 of VK wire bytes)
 	}
 	for i, k := range configKeys {
 		if err := procTree.Add(

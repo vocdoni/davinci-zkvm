@@ -16,7 +16,7 @@ import (
 )
 
 // configFrameLen is the byte length of the guest config frame.
-const configFrameLen = 168
+const configFrameLen = 200
 
 // hex32 decodes a 32-byte arbo-LE hex field (with or without 0x). The bytes are
 // used verbatim, exactly as the guest's parse_config consumes them.
@@ -32,7 +32,7 @@ func hex32(name, s string) ([]byte, error) {
 	return b, nil
 }
 
-// ConfigFrame encodes the 168-byte guest config frame from the wire ChainConfig,
+// ConfigFrame encodes the 200-byte guest config frame from the wire ChainConfig,
 // byte-identical to input-gen's ChainConfig::encode.
 func ConfigFrame(c *davinci.ChainConfig) ([]byte, error) {
 	frame := make([]byte, 0, configFrameLen)
@@ -49,11 +49,16 @@ func ConfigFrame(c *davinci.ChainConfig) ([]byte, error) {
 		frame = append(frame, b...)
 	}
 	frame = binary.LittleEndian.AppendUint64(frame, c.CensusOrigin)
-	cr, err := hex32("census_root", c.CensusRoot)
-	if err != nil {
-		return nil, err
+	for _, f := range []struct{ name, hex string }{
+		{"census_root", c.CensusRoot},
+		{"ballot_vk_hash", c.BallotVKHash},
+	} {
+		b, err := hex32(f.name, f.hex)
+		if err != nil {
+			return nil, err
+		}
+		frame = append(frame, b...)
 	}
-	frame = append(frame, cr...)
 	if len(frame) != configFrameLen {
 		return nil, fmt.Errorf("config frame: got %d bytes, want %d", len(frame), configFrameLen)
 	}
