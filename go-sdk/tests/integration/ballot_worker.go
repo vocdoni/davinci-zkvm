@@ -15,8 +15,119 @@ import (
 
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/circuits/ballotproof"
 	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/bjj_gnark"
+	nodesig "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/signatures/ethereum"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/types"
 )
+
+// RunBallotWorkerIfRequested runs the child (worker) side of subprocess-based
+// ballot generation and exits, when BALLOT_WORKER_MODE=1 is set. Any test
+// binary whose tests call GenerateBallotBatch with >16 voters must invoke this
+// at the top of its TestMain, before any other setup: the parent side spawns
+// the *current* test binary as the worker subprocess.
+func RunBallotWorkerIfRequested() {
+	if os.Getenv("BALLOT_WORKER_MODE") != "1" {
+		return
+	}
+	runBallotWorkerMode()
+	os.Exit(0)
+}
+
+func runBallotWorkerMode() {
+	inputPath := os.Getenv("BALLOT_WORKER_INPUT")
+	outputPath := os.Getenv("BALLOT_WORKER_OUTPUT")
+	if inputPath == "" || outputPath == "" {
+		fmt.Fprintln(os.Stderr, "ballot worker: missing BALLOT_WORKER_INPUT/OUTPUT env vars")
+		os.Exit(1)
+	}
+
+	raw, err := os.ReadFile(inputPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ballot worker: read input: %v\n", err)
+		os.Exit(1)
+	}
+	var inp ballotWorkerInput
+	if err := json.Unmarshal(raw, &inp); err != nil {
+		fmt.Fprintf(os.Stderr, "ballot worker: parse input: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Reconstruct processID
+	var processID types.ProcessID
+	copy(processID[:], inp.ProcessID)
+
+	// Reconstruct encryption key from decimal big.Int strings
+	x, ok1 := new(big.Int).SetString(inp.EncKeyX, 10)
+	y, ok2 := new(big.Int).SetString(inp.EncKeyY, 10)
+	if !ok1 || !ok2 {
+		fmt.Fprintln(os.Stderr, "ballot worker: bad enc key coords")
+		os.Exit(1)
+	}
+	encKey := bjjgnark.New().(*bjjgnark.BJJ).SetPoint(x, y).(*bjjgnark.BJJ)
+
+	// Reconstruct voters deterministically from CensusIdx (same seed formula as NewElection)
+	voters := make([]*Voter, len(inp.Voters))
+	for i, wv := range inp.Voters {
+		seed := make([]byte, 32)
+		for j := range seed {
+			seed[j] = byte((wv.CensusIdx*7 + j*3 + 42) % 256)
+		}
+		signer, err := nodesig.NewSignerFromSeed(seed)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ballot worker: voter %d signer: %v\n", i, err)
+			os.Exit(1)
+		}
+		addrBytes := signer.Address().Bytes()
+		weight, ok := new(big.Int).SetString(wv.WeightStr, 10)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "ballot worker: voter %d weight parse\n", i)
+			os.Exit(1)
+		}
+		voters[i] = &Voter{
+			Signer:        signer,
+			AddressBytes:  addrBytes,
+			AddressBigInt: new(big.Int).SetBytes(addrBytes),
+			CensusIdx:     wv.CensusIdx,
+			Weight:        weight,
+		}
+	}
+
+	batch, err := GenerateBallotBatch(processID, encKey, voters, inp.SeedBase)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ballot worker: GenerateBallotBatch: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Serialize output
+	wo := ballotWorkerOutput{Results: make([]workerBallotResult, len(batch.Results))}
+	for i, r := range batch.Results {
+		wr := workerBallotResult{
+			VoteID:       r.VoteID,
+			AddressLo16:  r.AddressLo16,
+			ProofJSON:    string(r.ProofJSON),
+			PublicInputs: r.PublicInputs,
+			SigJSON:      string(r.SigJSON),
+		}
+		if r.RawBallot != nil {
+			for j := 0; j < NumFields; j++ {
+				wr.C1X[j] = r.RawBallot.C1X[j].String()
+				wr.C1Y[j] = r.RawBallot.C1Y[j].String()
+				wr.C2X[j] = r.RawBallot.C2X[j].String()
+				wr.C2Y[j] = r.RawBallot.C2Y[j].String()
+			}
+		}
+		wo.Results[i] = wr
+	}
+
+	outData, err := json.Marshal(wo)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ballot worker: marshal output: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(outputPath, outData, 0600); err != nil {
+		fmt.Fprintf(os.Stderr, "ballot worker: write output: %v\n", err)
+		os.Exit(1)
+	}
+}
 
 // ---- wire types ----
 
