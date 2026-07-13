@@ -13,9 +13,9 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/circuits/ballotproof"
-	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/bjj_gnark"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/types"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/circuits/ballotproof"
+	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/bjj_gnark"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/types"
 )
 
 // ---- wire types ----

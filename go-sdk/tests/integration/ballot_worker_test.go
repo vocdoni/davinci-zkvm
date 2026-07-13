@@ -16,9 +16,9 @@ import (
 	"os"
 	"testing"
 
-	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/bjj_gnark"
-	nodesig "github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/signatures/ethereum"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/types"
+	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/bjj_gnark"
+	nodesig "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/signatures/ethereum"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/types"
 )
 
 // TestMain intercepts the worker mode before any test framework setup.

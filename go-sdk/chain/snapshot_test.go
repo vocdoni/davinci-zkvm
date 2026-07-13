@@ -5,9 +5,9 @@ import (
 	"testing"
 
 	qt "github.com/frankban/quicktest"
-	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/bjj_gnark"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/elgamal"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/spec/params"
+	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/bjj_gnark"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/elgamal"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/spec/params"
 )
 
 // testEncKey returns a fresh BabyJubJub ElGamal key pair for tests.

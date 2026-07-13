@@ -25,8 +25,8 @@ import (
 
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/chain"
-	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/bjj_gnark"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/elgamal"
+	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/bjj_gnark"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/elgamal"
 	davinciSolidity "github.com/vocdoni/davinci-zkvm/go-sdk/solidity"
 )
 

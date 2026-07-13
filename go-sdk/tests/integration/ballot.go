@@ -13,13 +13,13 @@ import (
 	"os"
 
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/circuits/ballotproof"
-	ballotprooftest "github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/circuits/test/ballotproof"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc"
-	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/bjj_gnark"
-	nodesig "github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/signatures/ethereum"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/types"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/circuits/ballotproof"
+	ballotprooftest "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/circuits/test/ballotproof"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc"
+	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/bjj_gnark"
+	nodesig "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/signatures/ethereum"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/types"
 )
 
 // sigJSON is the on-disk format expected by input-gen for ECDSA signatures.

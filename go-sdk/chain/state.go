@@ -14,9 +14,9 @@ import (
 	arbo "github.com/vocdoni/arbo"
 	"github.com/vocdoni/arbo/memdb"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
-	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/bjj_gnark"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/format"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/elgamal"
+	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/bjj_gnark"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/format"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/elgamal"
 )
 
 const (

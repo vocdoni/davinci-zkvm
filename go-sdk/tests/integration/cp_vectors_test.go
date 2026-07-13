@@ -19,10 +19,10 @@ import (
 	"testing"
 
 	"github.com/iden3/go-iden3-crypto/poseidon"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc"
-	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/bjj_gnark"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/format"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/elgamal"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc"
+	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/bjj_gnark"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/format"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/elgamal"
 )
 
 type cpPoint struct {
