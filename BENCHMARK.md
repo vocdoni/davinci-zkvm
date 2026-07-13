@@ -43,7 +43,28 @@ decryption verification + results inclusion + PLONK wrap).
   headroom on the 32 GB GPU. The chained-mode tables above (and the 5120 /
   20000 rows below) were measured under the previous 256 cap and at the
   8-field era; they are retained as historical references — production now
-  caps at 128.
+  caps at 128. A current 16-field measurement is below.
+
+### 16-field refresh — 1024 votes through the davinci-fold orchestrator
+
+Same GPU, measured end-to-end through the davinci-fold orchestrator
+(ingest → seal → scatter batch STARKs → import onto the fold worker →
+fold chain → keywarden handshake → finalize PLONK, verified on a
+simulated on-chain verifier) with a single worker. The clock runs from
+vote submission to published verified results; ballot pre-generation is
+excluded as above.
+
+| votes | batch | fold every | folds | stark avg / batch | fold avg | finalize | total | votes/s |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1024 | 128 | 4 | 2 | 1m40s | 27.5s | 25.4s | 14m39s | 1.17 |
+
+- The 16-field ballot (vs 8 at the historical rows) puts the batch STARK
+  at ~1.7x the old 128 row (95s steady; 1m40s avg includes the
+  scatter/import round-trip). Folds and finalize are unchanged:
+  bootstrap fold 35.0s, steady fold 20.0s, finalize 25.4s.
+- Orchestrator overhead (HTTP, proof export/import between workers) is
+  included, so this is the deliverable pipeline number, not a
+  raw-sequencer bound.
 
 ## Scaling — 5120 votes measured, 20000 projected
 
