@@ -25,9 +25,9 @@ import (
 	"testing"
 
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/circuits/ballotproof"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/blobs"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/types"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/circuits/ballotproof"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/blobs"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/types"
 )
 
 // Fail-mask bit constants => must match circuit/src/types.rs.

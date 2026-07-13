@@ -15,7 +15,7 @@ import (
 	"testing"
 
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/circuits/ballotproof"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/circuits/ballotproof"
 )
 
 func TestChainInputDiff(t *testing.T) {

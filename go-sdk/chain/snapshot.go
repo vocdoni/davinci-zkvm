@@ -14,7 +14,7 @@ import (
 	arbo "github.com/vocdoni/arbo"
 	"github.com/vocdoni/arbo/memdb"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/elgamal"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/elgamal"
 
 	"github.com/fxamacker/cbor/v2"
 )

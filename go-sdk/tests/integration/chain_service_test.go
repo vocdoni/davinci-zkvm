@@ -20,8 +20,8 @@ import (
 
 	arbo "github.com/vocdoni/arbo"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/ecc/format"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/internal/vocdoni/crypto/elgamal"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/format"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/elgamal"
 	davinciSolidity "github.com/vocdoni/davinci-zkvm/go-sdk/solidity"
 )
 
