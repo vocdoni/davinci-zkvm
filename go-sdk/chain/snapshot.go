@@ -63,8 +63,8 @@ func (s *State) Snapshot() ([]byte, error) {
 // The Config must match the one the snapshot was taken under; the restored
 // root is checked against the rebuilt arbo tree to catch a mismatch.
 func RestoreState(cfg Config, blob []byte) (*State, error) {
-	if cfg.ProcessID == nil || cfg.BallotMode == nil || cfg.EncKey == nil || cfg.CensusRoot == nil {
-		return nil, fmt.Errorf("chain.Config: ProcessID, BallotMode, EncKey and CensusRoot are required")
+	if cfg.ProcessID == nil || cfg.BallotMode == nil || cfg.EncKey == nil || cfg.CensusRoot == nil || cfg.BallotVKHash == nil {
+		return nil, fmt.Errorf("chain.Config: ProcessID, BallotMode, EncKey, CensusRoot and BallotVKHash are required")
 	}
 	var snap stateSnapshot
 	if err := cbor.Unmarshal(blob, &snap); err != nil {
@@ -95,7 +95,7 @@ func RestoreState(cfg Config, blob []byte) (*State, error) {
 		return nil, fmt.Errorf("restored root %s != snapshot root %s", root, snap.Root)
 	}
 
-	// Anchor the snapshot to the election config: verify the four immutable
+	// Anchor the snapshot to the election config: verify the five immutable
 	// config leaves in the restored tree match cfg. Without this, a snapshot
 	// taken under a different config (different process_id, encryption key,
 	// census_root, etc.) restores without detection, and Finalize would
@@ -111,6 +111,7 @@ func RestoreState(cfg Config, blob []byte) (*State, error) {
 		{0x02, cfg.BallotMode},
 		{0x03, encKeyLeafValue(cfg.EncKey)},
 		{0x06, new(big.Int).SetUint64(cfg.CensusOrigin)},
+		{0x07, cfg.BallotVKHash},
 	}
 	for _, leaf := range expectedLeaves {
 		keyBytes := arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(leaf.key))

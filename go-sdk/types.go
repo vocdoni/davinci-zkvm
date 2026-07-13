@@ -124,8 +124,9 @@ type StateTransitionData struct {
 	// Nil if no accumulator update (e.g. all dummy votes).
 	ResultsSmt *SmtEntry `json:"results_smt,omitempty"`
 
-	// ProcessSmt holds exactly 4 read-proofs for config entries in OldStateRoot.
-	// Order: processID (0x0), ballotMode (0x2), encryptionKey (0x3), censusOrigin (0x6).
+	// ProcessSmt holds exactly 5 read-proofs for config entries in OldStateRoot.
+	// Order: processID (0x0), ballotMode (0x2), encryptionKey (0x3),
+	// censusOrigin (0x6), ballotVKHash (0x7).
 	ProcessSmt []SmtEntry `json:"process_smt"`
 
 	// BallotProofs holds the result accumulator and leaf hash verification data.
@@ -280,6 +281,9 @@ type ChainConfig struct {
 	EncY         string `json:"enc_y"`
 	CensusOrigin uint64 `json:"census_origin"`
 	CensusRoot   string `json:"census_root"`
+	// BallotVKHash is sha256 over the ballot Groth16 VK wire bytes
+	// (state tree key 0x07); see BallotVKLeaf.
+	BallotVKHash string `json:"ballot_vk_hash"`
 }
 
 // FoldRequest is the HTTP request body for POST /fold.

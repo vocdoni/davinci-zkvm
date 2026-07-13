@@ -28,11 +28,12 @@ func wireConfig() *davinci.ChainConfig {
 		EncY:         h32(0xa0),
 		CensusOrigin: 0x0102030405060708,
 		CensusRoot:   h32(0xc0),
+		BallotVKHash: h32(0xe0),
 	}
 }
 
-// TestConfigFrameLayout pins the 168-byte frame layout: four 32-byte LE fields,
-// then census_origin as u64 LE, then census_root.
+// TestConfigFrameLayout pins the 200-byte frame layout: four 32-byte LE fields,
+// then census_origin as u64 LE, then census_root and ballot_vk_hash.
 func TestConfigFrameLayout(t *testing.T) {
 	c := wireConfig()
 	frame, err := ConfigFrame(c)
@@ -50,6 +51,7 @@ func TestConfigFrameLayout(t *testing.T) {
 	want = append(want, dec(c.EncY)...)
 	want = binary.LittleEndian.AppendUint64(want, c.CensusOrigin)
 	want = append(want, dec(c.CensusRoot)...)
+	want = append(want, dec(c.BallotVKHash)...)
 	if !bytesEqual(frame, want) {
 		t.Fatalf("frame mismatch:\n got %x\nwant %x", frame, want)
 	}

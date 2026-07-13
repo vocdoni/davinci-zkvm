@@ -118,6 +118,25 @@ impl BJJProj {
         BJJProj { x: x3, y: y3, z: z3 }
     }
 
+    /// Mixed addition `self + (ax, ay)` with implicit Z2 = 1 (madd-2008-bbjlp).
+    /// One field mul cheaper than `add`: A = Z1*Z2 collapses to Z1.
+    fn add_affine(&self, ax: &BnFr, ay: &BnFr) -> BJJProj {
+        let b = bn254_fr::sqr(&self.z);
+        let c = bn254_fr::mul(&self.x, ax);
+        let d = bn254_fr::mul(&self.y, ay);
+        let e = bn254_fr::mul(&CURVE_D, &bn254_fr::mul(&c, &d));
+        let f = bn254_fr::sub(&b, &e);
+        let g = bn254_fr::add(&b, &e);
+        let mut h = bn254_fr::mul(&bn254_fr::add(&self.x, &self.y), &bn254_fr::add(ax, ay));
+        h = bn254_fr::sub(&h, &c);
+        h = bn254_fr::sub(&h, &d);
+        let x3 = bn254_fr::mul(&self.z, &bn254_fr::mul(&f, &h));
+        let ac = bn254_fr::mul(&CURVE_A, &c);
+        let y3 = bn254_fr::mul(&self.z, &bn254_fr::mul(&g, &bn254_fr::sub(&d, &ac)));
+        let z3 = bn254_fr::mul(&f, &g);
+        BJJProj { x: x3, y: y3, z: z3 }
+    }
+
     /// Projective twisted Edwards doubling (dbl-2008-bbjlp formula).
     /// Cheaper than `add(self, self)`: ~14 field ops vs ~19.
     /// https://hyperelliptic.org/EFD/g1p/auto-twisted-projective.html#doubling-dbl-2008-bbjlp
@@ -176,47 +195,84 @@ fn scalar_mult(point: &BJJProj, scalar: &FrRaw) -> BJJProj {
     result
 }
 
-/// Precomputed 4-bit window table for a fixed base point.
+/// Precomputed window table for a fixed base point (4- or 8-bit windows).
 ///
-/// `windows[w][v-1] = (v << 4w) * P` for w in 0..64, v in 1..=15, so a
-/// 256-bit scalar mul is at most 63 point additions (zero nibbles skipped)
-/// with no doublings.  Building the table costs ~960 adds + 256 dbls, paid
-/// once per batch; each re-encryption entry then saves ~2x256 dbls + adds,
-/// so it amortizes after ~2 entries.
+/// `windows[w][v-1] = (v << bits*w) * P`, so a 256-bit scalar mul is at most
+/// `256/bits - 1` point additions (zero windows skipped) with no doublings.
+/// 4-bit: 64x15 table, ~960 point ops to build, ~60 adds per mul.
+/// 8-bit: 32x255 table, ~8160 point ops to build, ~32 adds per mul.
+/// Breakeven is ~256 muls per table, so `new` picks the width from the
+/// expected mul count for the batch.
 struct BjjFixedBase {
-    windows: Vec<[BJJProj; 15]>,
+    bits: u32,
+    windows: Vec<Vec<BJJProj>>,
 }
 
 impl BjjFixedBase {
-    fn new(x: &FrRaw, y: &FrRaw) -> Self {
-        let mut windows = Vec::with_capacity(64);
+    fn new(x: &FrRaw, y: &FrRaw, expected_muls: usize) -> Self {
+        // ponytail: only 4 and 8 — both divide 64, so windows never straddle limbs.
+        let bits: u32 = if expected_muls >= 256 { 8 } else { 4 };
+        let vmax = (1usize << bits) - 1;
+        let nwin = 256 / bits as usize;
+        let mut windows = Vec::with_capacity(nwin);
         let mut base = BJJProj::from_affine(*x, *y);
-        for _ in 0..64 {
-            let mut acc = BJJProj::identity();
-            let entries: [BJJProj; 15] = core::array::from_fn(|_| {
-                acc = acc.add(&base);
-                acc.clone()
-            });
+        for w in 0..nwin {
+            let mut entries: Vec<BJJProj> = Vec::with_capacity(vmax);
+            for v in 1..=vmax {
+                let e = if v == 1 {
+                    base.clone()
+                } else if v % 2 == 0 {
+                    entries[v / 2 - 1].dbl() // ~3 syscalls cheaper than add
+                } else {
+                    entries[v - 2].add(&base)
+                };
+                entries.push(e);
+            }
             windows.push(entries);
-            base = base.dbl().dbl().dbl().dbl();
+            if w + 1 < nwin {
+                for _ in 0..bits {
+                    base = base.dbl();
+                }
+            }
         }
-        BjjFixedBase { windows }
+        BjjFixedBase { bits, windows }
     }
 
     fn mul(&self, scalar: &FrRaw) -> BJJProj {
+        let mask = (1u64 << self.bits) - 1;
+        let per_limb = (64 / self.bits) as usize;
         let mut result = BJJProj::identity();
         for i in 0..4 {
             let mut word = scalar[i];
-            for j in 0..16 {
-                let nib = (word & 0xF) as usize;
-                if nib != 0 {
-                    result = result.add(&self.windows[i * 16 + j][nib - 1]);
+            for j in 0..per_limb {
+                let v = (word & mask) as usize;
+                if v != 0 {
+                    result = result.add(&self.windows[i * per_limb + j][v - 1]);
                 }
-                word >>= 4;
+                word >>= self.bits;
             }
         }
         result
     }
+}
+
+/// Fixed-base mul `scalar * B8` via the compile-time 8-bit affine window
+/// table (`b8_table.rs`): mixed adds, zero windows skipped, no runtime
+/// table build.
+fn b8_mul(scalar: &FrRaw) -> BJJProj {
+    let mut result = BJJProj::identity();
+    for i in 0..4 {
+        let mut word = scalar[i];
+        for j in 0..8 {
+            let v = (word & 0xFF) as usize;
+            if v != 0 {
+                let e = &crate::b8_table::B8_WINDOWS[(i * 8 + j) * 255 + v - 1];
+                result = result.add_affine(&e[0], &e[1]);
+            }
+            word >>= 8;
+        }
+    }
+    result
 }
 
 // Curve membership
@@ -241,11 +297,10 @@ fn is_on_bjj_curve(x: &BnFr, y: &BnFr) -> bool {
 /// Padded fields `i >= num_fields` carry the TE identity on both sides and are
 /// asserted (cheap field compares) rather than re-encrypted, so their per-field
 /// scalar mults are skipped entirely.
-/// `b8_table` / `pk_table` are the fixed-base window tables for B8 and the
-/// (already curve-validated) ElGamal public key.
+/// `pk_table` is the fixed-base window table for the (already
+/// curve-validated) ElGamal public key; B8 uses the compile-time table.
 fn verify_reencryption(
     k: &FrRaw,
-    b8_table: &BjjFixedBase,
     pk_table: &BjjFixedBase,
     num_fields: usize,
     original: &[BjjCiphertext],
@@ -275,7 +330,7 @@ fn verify_reencryption(
             }
             continue;
         }
-        let delta1_proj = b8_table.mul(&k_i);
+        let delta1_proj = b8_mul(&k_i);
         let delta2_proj = pk_table.mul(&k_i);
 
         let orig1 = BJJProj::from_affine(original[i].c1x, original[i].c1y);
@@ -298,8 +353,8 @@ fn verify_reencryption(
 
 /// Verify all re-encryption entries from the ParsedInput REENCBLK.
 /// Returns true if all are valid (or if the block is absent).
-/// The public key is curve-checked once and the fixed-base window tables
-/// for B8 and the public key are built once, shared by all entries.
+/// The public key is curve-checked once and its fixed-base window table
+/// built once, shared by all entries; B8 uses the compile-time table.
 pub fn verify_batch_from_parsed(
     reenc_pub_key: &Option<(FrRaw, FrRaw)>,
     reenc_entries: &[ReencEntry],
@@ -321,12 +376,11 @@ pub fn verify_batch_from_parsed(
         *fail_mask |= FAIL_REENC;
         return false;
     }
-    let b8_table = BjjFixedBase::new(&B8X_LE, &B8Y_LE);
-    let pk_table = BjjFixedBase::new(pub_key_x, pub_key_y);
+    let expected_muls = reenc_entries.len() * num_fields;
+    let pk_table = BjjFixedBase::new(pub_key_x, pub_key_y, expected_muls);
     for entry in reenc_entries {
         if !verify_reencryption(
             &entry.k,
-            &b8_table,
             &pk_table,
             num_fields,
             &entry.original,
@@ -420,11 +474,62 @@ mod tests {
 
     #[test]
     fn fixed_base_matches_double_and_add() {
-        let table = BjjFixedBase::new(&B8X_LE, &B8Y_LE);
+        let b8 = BJJProj::from_affine(B8X_LE, B8Y_LE);
+        // 0 muls -> 4-bit table, 4096 muls -> 8-bit table.
+        for expected in [0usize, 4096] {
+            let table = BjjFixedBase::new(&B8X_LE, &B8Y_LE, expected);
+            for s in &SCALARS {
+                assert_eq!(table.mul(s).to_affine(), scalar_mult(&b8, s).to_affine());
+            }
+        }
+    }
+
+    #[test]
+    fn b8_const_table_matches_runtime_build() {
+        let table = BjjFixedBase::new(&B8X_LE, &B8Y_LE, 4096); // 8-bit
+        for w in 0..32 {
+            for v in 1..=255usize {
+                let e = &crate::b8_table::B8_WINDOWS[w * 255 + v - 1];
+                assert!(table.windows[w][v - 1].eq_affine(&e[0], &e[1]), "w={w} v={v}");
+            }
+        }
+    }
+
+    #[test]
+    fn b8_mul_matches_double_and_add() {
         let b8 = BJJProj::from_affine(B8X_LE, B8Y_LE);
         for s in &SCALARS {
-            assert_eq!(table.mul(s).to_affine(), scalar_mult(&b8, s).to_affine());
+            assert_eq!(b8_mul(s).to_affine(), scalar_mult(&b8, s).to_affine());
         }
+    }
+
+    /// Regenerates `src/b8_table.rs`. Run manually after changing the layout:
+    /// `cargo test -p circuit-primitives --release gen_b8_table -- --ignored`
+    #[test]
+    #[ignore]
+    fn gen_b8_table() {
+        use std::fmt::Write as _;
+        let table = BjjFixedBase::new(&B8X_LE, &B8Y_LE, 4096); // force 8-bit
+        let mut out = String::with_capacity(1 << 21);
+        out.push_str(
+            "//! Generated by `gen_b8_table` in babyjubjub.rs - do not edit.\n\
+             //! 8-bit window table for the BabyJubJub base B8, affine coordinates:\n\
+             //! `B8_WINDOWS[w * 255 + v - 1] = [x, y]` limbs of `(v << 8w) * B8`.\n\n\
+             pub static B8_WINDOWS: [[[u64; 4]; 2]; 8160] = [\n",
+        );
+        for w in 0..32 {
+            for e in &table.windows[w] {
+                let (x, y) = e.to_affine();
+                writeln!(
+                    out,
+                    "[[{:#x},{:#x},{:#x},{:#x}],[{:#x},{:#x},{:#x},{:#x}]],",
+                    x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3]
+                )
+                .unwrap();
+            }
+        }
+        out.push_str("];\n");
+        std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/src/b8_table.rs"), out).unwrap();
     }
 
     #[test]

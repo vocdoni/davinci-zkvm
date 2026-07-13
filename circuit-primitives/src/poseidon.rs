@@ -893,3 +893,220 @@ pub fn poseidon12(inputs: &[FrRaw; 12]) -> FrRaw {
 
     state[0]
 }
+
+// -- Generic width (t=17, t=8, t=6) -------------------------------------------
+// Same optimized iden3 algorithm as poseidon12, parameterized over the state
+// width. Used by the ballot inputs hash (MultiPoseidon with 16-wide chunks).
+
+use crate::poseidon_wide_constants::{
+    POSEIDON17_C, POSEIDON17_M, POSEIDON17_P, POSEIDON17_S,
+    POSEIDON8_C, POSEIDON8_M, POSEIDON8_P, POSEIDON8_S,
+    POSEIDON6_C, POSEIDON6_M, POSEIDON6_P, POSEIDON6_S,
+};
+
+fn ark_w<const TW: usize>(state: &mut [BnFr; TW], c: &[[u64; 4]], it: usize) {
+    for i in 0..TW {
+        state[i] = bn254_fr::add(&state[i], &c[it + i]);
+    }
+}
+
+fn mix_w<const TW: usize>(state: &mut [BnFr; TW], m: &[[[u64; 4]; TW]; TW]) {
+    let mut ns = [bn254_fr::ZERO; TW];
+    for i in 0..TW {
+        for j in 0..TW {
+            ns[i] = bn254_fr::muladd(&m[j][i], &state[j], &ns[i]);
+        }
+    }
+    *state = ns;
+}
+
+fn poseidon_wide<const TW: usize>(
+    inputs: &[FrRaw],
+    c: &[[u64; 4]],
+    s: &[[u64; 4]],
+    m: &[[[u64; 4]; TW]; TW],
+    p: &[[[u64; 4]; TW]; TW],
+    n_rounds_p: usize,
+) -> FrRaw {
+    debug_assert_eq!(inputs.len(), TW - 1);
+    let mut state = [bn254_fr::ZERO; TW];
+    state[1..].copy_from_slice(inputs);
+
+    ark_w(&mut state, c, 0);
+
+    for i in 0..(N_ROUNDS_F / 2 - 1) {
+        for j in 0..TW { state[j] = exp5(&state[j]); }
+        ark_w(&mut state, c, (i + 1) * TW);
+        mix_w(&mut state, m);
+    }
+
+    for j in 0..TW { state[j] = exp5(&state[j]); }
+    ark_w(&mut state, c, (N_ROUNDS_F / 2) * TW);
+    mix_w(&mut state, p);
+
+    for i in 0..n_rounds_p {
+        state[0] = exp5(&state[0]);
+        state[0] = bn254_fr::add(&state[0], &c[(N_ROUNDS_F / 2 + 1) * TW + i]);
+
+        let base = (TW * 2 - 1) * i;
+        let mut new0 = bn254_fr::ZERO;
+        for j in 0..TW {
+            new0 = bn254_fr::muladd(&s[base + j], &state[j], &new0);
+        }
+        for k in 1..TW {
+            state[k] = bn254_fr::muladd(&s[base + TW + k - 1], &state[0], &state[k]);
+        }
+        state[0] = new0;
+    }
+
+    for i in 0..(N_ROUNDS_F / 2 - 1) {
+        for j in 0..TW { state[j] = exp5(&state[j]); }
+        ark_w(&mut state, c, (N_ROUNDS_F / 2 + 1) * TW + n_rounds_p + i * TW);
+        mix_w(&mut state, m);
+    }
+
+    for j in 0..TW { state[j] = exp5(&state[j]); }
+    mix_w(&mut state, m);
+
+    state[0]
+}
+
+/// iden3 Poseidon hash of 16 BN254 Fr elements (t=17, nRoundsF=8, nRoundsP=68).
+pub fn poseidon16(inputs: &[FrRaw; 16]) -> FrRaw {
+    poseidon_wide::<17>(inputs, &POSEIDON17_C, &POSEIDON17_S, &POSEIDON17_M, &POSEIDON17_P, 68)
+}
+
+/// iden3 Poseidon hash of 7 BN254 Fr elements (t=8, nRoundsF=8, nRoundsP=64).
+pub fn poseidon7(inputs: &[FrRaw; 7]) -> FrRaw {
+    poseidon_wide::<8>(inputs, &POSEIDON8_C, &POSEIDON8_S, &POSEIDON8_M, &POSEIDON8_P, 64)
+}
+
+/// iden3 Poseidon hash of 5 BN254 Fr elements (t=6, nRoundsF=8, nRoundsP=60).
+pub fn poseidon5(inputs: &[FrRaw; 5]) -> FrRaw {
+    poseidon_wide::<6>(inputs, &POSEIDON6_C, &POSEIDON6_S, &POSEIDON6_M, &POSEIDON6_P, 60)
+}
+
+/// poseidon16 of the pattern [0,1,0,1,...]: the value of any 16-input chunk
+/// whose ballot coords all come from TE-identity-padded fields ((0,1),(0,1)).
+/// Chunks 1-3 of the multihash start on an x coord, so all three collapse to
+/// this one constant. Pinned as a literal (guarded by
+/// `padded_chunk_constant_matches`) so fully-padded chunks skip the
+/// permutation entirely.
+const PADDED_CHUNK_HASH: FrRaw =
+    [0x680ddcafcc64f35b, 0x0c7e3629ade546ad, 0x62d4d7bcbe417f2f, 0x163bca3fea04438d];
+
+/// davinci-node `BallotInputsHash`: the third public signal of the ballot
+/// proof circuit. Poseidon multihash (16-wide chunks, matching
+/// `spec/hash.PoseidonMultiHash`) over
+/// `[processID, ballotModePacked, encKeyX_TE, encKeyY_TE, address, voteID,
+///   64 ballot ciphertext TE coords (c1x,c1y,c2x,c2y per field), weight]`
+/// = 71 inputs -> 4x poseidon16 + 1x poseidon7 -> poseidon5.
+///
+/// Chunk i (1..4) covers ballot fields starting at 4i-2; when
+/// `num_fields <= 4i-2` every coord in it belongs to an identity-padded
+/// field, so `PADDED_CHUNK_HASH` substitutes for the permutation. Sound only
+/// because `verify_reencryption` asserts padded slots of the original ballot
+/// are identity — a non-identity padded slot trips FAIL_REENC and the batch
+/// fails regardless of this hash.
+pub fn ballot_inputs_hash(
+    process_id: &FrRaw,
+    ballot_mode: &FrRaw,
+    enc_x: &FrRaw,
+    enc_y: &FrRaw,
+    address: &FrRaw,
+    vote_id: &FrRaw,
+    ballot: &[FrRaw; 64],
+    weight: &FrRaw,
+    num_fields: usize,
+) -> FrRaw {
+    let mut inputs = [bn254_fr::ZERO; 71];
+    inputs[0] = *process_id;
+    inputs[1] = *ballot_mode;
+    inputs[2] = *enc_x;
+    inputs[3] = *enc_y;
+    inputs[4] = *address;
+    inputs[5] = *vote_id;
+    inputs[6..70].copy_from_slice(ballot);
+    inputs[70] = *weight;
+
+    let mut inter = [bn254_fr::ZERO; 5];
+    inter[0] = poseidon16(inputs[0..16].try_into().unwrap());
+    for i in 1..4 {
+        inter[i] = if num_fields <= 4 * i - 2 {
+            PADDED_CHUNK_HASH
+        } else {
+            poseidon16(inputs[i * 16..(i + 1) * 16].try_into().unwrap())
+        };
+    }
+    inter[4] = poseidon7(inputs[64..71].try_into().unwrap());
+    poseidon5(&inter)
+}
+
+#[cfg(test)]
+mod wide_tests {
+    use super::*;
+
+    fn seq(n: usize) -> std::vec::Vec<FrRaw> {
+        (1..=n as u64).map(|v| [v, 0, 0, 0]).collect()
+    }
+
+    // Reference values from go-iden3-crypto v0.0.17 poseidon.Hash(1..n).
+    #[test]
+    fn poseidon16_matches_reference() {
+        let expected: FrRaw = [0xde2ffb96b919b765, 0xae08afd7f1f2ec06, 0x8281a48099fff949, 0x16159a551cbb6610];
+        assert_eq!(poseidon16(seq(16).as_slice().try_into().unwrap()), expected);
+    }
+
+    #[test]
+    fn poseidon7_matches_reference() {
+        let expected: FrRaw = [0x2e9df45b4921c318, 0x4a9a85fcfc6533ec, 0xebb9ada49abdbc37, 0x1c2f3482dbb140c4];
+        assert_eq!(poseidon7(seq(7).as_slice().try_into().unwrap()), expected);
+    }
+
+    #[test]
+    fn poseidon5_matches_reference() {
+        let expected: FrRaw = [0x18125f8feeb123c0, 0x8b2174d305a316c9, 0x15224c0b15a49d59, 0x0dab9449e4a1398a];
+        assert_eq!(poseidon5(seq(5).as_slice().try_into().unwrap()), expected);
+    }
+
+    // PoseidonMultiHash(1..71) from go-iden3-crypto (16-wide chunking).
+    #[test]
+    fn ballot_inputs_hash_matches_multihash() {
+        let all = seq(71);
+        let ballot: [FrRaw; 64] = all[6..70].try_into().unwrap();
+        let h = ballot_inputs_hash(&all[0], &all[1], &all[2], &all[3], &all[4], &all[5], &ballot, &all[70], 16);
+        let expected: FrRaw = [0x766291e2382e3ef5, 0x2c3d2b8c7b372e69, 0x0fdddd04802ddbe4, 0x057bfc2b042c3647];
+        assert_eq!(h, expected);
+    }
+
+    #[test]
+    fn padded_chunk_constant_matches() {
+        let mut pat = [bn254_fr::ZERO; 16];
+        for i in (1..16).step_by(2) {
+            pat[i] = bn254_fr::ONE;
+        }
+        assert_eq!(PADDED_CHUNK_HASH, poseidon16(&pat), "PADDED_CHUNK_HASH literal is stale");
+    }
+
+    // Skip path == full path on an identity-padded ballot, for every nf.
+    #[test]
+    fn ballot_inputs_hash_skip_equals_full() {
+        let all = seq(71);
+        for nf in 1..=16usize {
+            let mut ballot = [bn254_fr::ZERO; 64];
+            for f in 0..16 {
+                if f < nf {
+                    for c in 0..4 {
+                        ballot[f * 4 + c] = all[6 + f * 4 + c];
+                    }
+                } else {
+                    ballot[f * 4 + 1] = bn254_fr::ONE;
+                    ballot[f * 4 + 3] = bn254_fr::ONE;
+                }
+            }
+            let skip = ballot_inputs_hash(&all[0], &all[1], &all[2], &all[3], &all[4], &all[5], &ballot, &all[70], nf);
+            let full = ballot_inputs_hash(&all[0], &all[1], &all[2], &all[3], &all[4], &all[5], &ballot, &all[70], 16);
+            assert_eq!(skip, full, "nf={nf}");
+        }
+    }
+}

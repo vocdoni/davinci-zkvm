@@ -66,11 +66,11 @@ func EncodeStateBlock(sd *StateTransitionData) ([]byte, error) {
 		buf = append(buf, e...)
 	}
 
-	// Process read-proofs: write n (0 or 4), then n_levels + entries only when n>0.
-	if len(sd.ProcessSmt) != 0 && len(sd.ProcessSmt) != 4 {
-		return nil, fmt.Errorf("process_smt must have 0 or 4 entries, got %d", len(sd.ProcessSmt))
+	// Process read-proofs: write n (0 or 5), then n_levels + entries only when n>0.
+	if len(sd.ProcessSmt) != 0 && len(sd.ProcessSmt) != 5 {
+		return nil, fmt.Errorf("process_smt must have 0 or 5 entries, got %d", len(sd.ProcessSmt))
 	}
-	buf = appendU64(buf, uint64(len(sd.ProcessSmt))) // 0 or 4
+	buf = appendU64(buf, uint64(len(sd.ProcessSmt))) // 0 or 5
 	if len(sd.ProcessSmt) > 0 {
 		procNLevels := len(sd.ProcessSmt[0].Siblings)
 		buf = appendU64(buf, uint64(procNLevels))

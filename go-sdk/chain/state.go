@@ -30,7 +30,7 @@ const (
 
 // configKeys are the process config keys inserted at genesis, in the
 // order the aggregator guest recomputes the genesis root.
-var configKeys = []uint64{0x00, 0x02, 0x03, 0x06}
+var configKeys = []uint64{0x00, 0x02, 0x03, 0x06, 0x07}
 
 // Config is the immutable election configuration. The aggregator guest
 // recomputes the genesis state root from these values and commits their
@@ -48,6 +48,10 @@ type Config struct {
 	// CensusRoot is the census commitment checked against every batch
 	// proof's publics.
 	CensusRoot *big.Int
+	// BallotVKHash is sha256 over the ballot Groth16 VK wire bytes
+	// (key 0x07), from davinci.BallotVKLeaf. Pins the VK for the
+	// lifetime of the process.
+	BallotVKHash *big.Int
 }
 
 // Vote is one validated ballot ready for state application. Ballot proof
@@ -77,12 +81,12 @@ type State struct {
 	overwrites   uint64
 }
 
-// NewState builds the genesis state tree from cfg: the four config
+// NewState builds the genesis state tree from cfg: the five config
 // leaves plus the identity net Results leaf. The resulting root
 // matches the aggregator guest's in-circuit genesis computation.
 func NewState(cfg Config) (*State, error) {
-	if cfg.ProcessID == nil || cfg.BallotMode == nil || cfg.EncKey == nil || cfg.CensusRoot == nil {
-		return nil, fmt.Errorf("chain.Config: ProcessID, BallotMode, EncKey and CensusRoot are required")
+	if cfg.ProcessID == nil || cfg.BallotMode == nil || cfg.EncKey == nil || cfg.CensusRoot == nil || cfg.BallotVKHash == nil {
+		return nil, fmt.Errorf("chain.Config: ProcessID, BallotMode, EncKey, CensusRoot and BallotVKHash are required")
 	}
 	tree, err := arbo.NewTree(arbo.Config{
 		Database:     memdb.New(),
@@ -99,6 +103,7 @@ func NewState(cfg Config) (*State, error) {
 		cfg.BallotMode,
 		encKeyLeafValue(cfg.EncKey),
 		new(big.Int).SetUint64(cfg.CensusOrigin),
+		cfg.BallotVKHash,
 	}
 	for i, k := range configKeys {
 		if err := tree.Add(
@@ -149,6 +154,7 @@ func (s *State) ChainConfig() *davinci.ChainConfig {
 		EncY:         le32(ty),
 		CensusOrigin: s.cfg.CensusOrigin,
 		CensusRoot:   le32(s.cfg.CensusRoot),
+		BallotVKHash: le32(s.cfg.BallotVKHash),
 	}
 }
 

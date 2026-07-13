@@ -568,17 +568,19 @@ pub fn verify_state(
     }
 
     // Process read-proofs: inclusion in OldStateRoot (no mutation)
-    // Exactly 4 proofs are required, one per config key in fixed order:
+    // Exactly 5 proofs are required, one per config key in fixed order:
     //   [0] key=0x00 (ProcessID), [1] key=0x02 (BallotMode),
-    //   [2] key=0x03 (EncryptionKey), [3] key=0x06 (CensusOrigin).
+    //   [2] key=0x03 (EncryptionKey), [3] key=0x06 (CensusOrigin),
+    //   [4] key=0x07 (BallotVKHash).
     // Each proof must be read-only (old_root == new_root == old_state_root).
-    const EXPECTED_KEYS: [FrRaw; 4] = [
+    const EXPECTED_KEYS: [FrRaw; 5] = [
         [0x00, 0, 0, 0], // StateKeyProcessID
         [0x02, 0, 0, 0], // StateKeyBallotMode
         [0x03, 0, 0, 0], // StateKeyEncryptionKey
         [0x06, 0, 0, 0], // StateKeyCensusOrigin
+        [0x07, 0, 0, 0], // StateKeyBallotVKHash
     ];
-    if state.process_proofs.len() != 4 {
+    if state.process_proofs.len() != 5 {
         *fail_mask |= FAIL_SMT_PROCESS;
         ok = false;
     } else {
