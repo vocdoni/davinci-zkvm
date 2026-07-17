@@ -140,11 +140,14 @@ pub fn sub(a: &BlsFrRaw, b: &BlsFrRaw) -> BlsFrRaw {
 /// Returns `ZERO` when `a` is `ZERO`.
 #[inline]
 pub fn neg(a: &BlsFrRaw) -> BlsFrRaw {
-    if a == &ZERO {
+    // Reduce first: attacker-controlled values may be non-canonical (≥ p),
+    // and `sub_256` underflows on such input. Same fix as `bn254_fr::neg`.
+    let a = muladd(a, &ONE, &ZERO);
+    if a == ZERO {
         return ZERO;
     }
     // p - a: since 0 < a < p, no underflow.
-    sub_256(&BLS_FR_MOD, a)
+    sub_256(&BLS_FR_MOD, &a)
 }
 
 /// Compute `a^(-1) mod p`.

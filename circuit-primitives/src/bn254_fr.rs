@@ -84,10 +84,14 @@ pub fn sub(a: &BnFr, b: &BnFr) -> BnFr {
 }
 
 /// `-a mod p = p - a`.  Returns `ZERO` for `a = 0`.
+/// The input is reduced first: attacker-controlled FrRaw may be non-canonical
+/// (≥ p), and `sub_256` underflows on such input, silently producing the wrong
+/// group element downstream (e.g. in the results-accumulator subtraction).
 #[inline]
 pub fn neg(a: &BnFr) -> BnFr {
-    if a == &ZERO { return ZERO; }
-    sub_256(&BN254_FR_MOD, a)
+    let a = reduce(a);
+    if a == ZERO { return ZERO; }
+    sub_256(&BN254_FR_MOD, &a)
 }
 
 /// Compute `a^(-1) mod p`.
@@ -141,6 +145,43 @@ pub fn exp5(x: &BnFr) -> BnFr {
     let x2 = sqr(x);
     let x4 = sqr(&x2);
     mul(&x4, x)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn neg_matches_reference() {
+        for v in [[0u64, 0, 0, 0], [1, 0, 0, 0], [0xDEADBEEF, 0x12345, 0xFFF, 0x1],
+                  BN254_FR_MOD] {
+            let a = reduce(&v);
+            let expected = if a == ZERO { ZERO } else { sub_256(&BN254_FR_MOD, &a) };
+            assert_eq!(neg(&v), expected);
+        }
+    }
+
+    #[test]
+    fn neg_reduces_noncanonical_input() {
+        // p + 5 (non-canonical encoding of 5) must negate like 5: neg = p - 5.
+        let mut nc = BN254_FR_MOD;
+        nc[0] += 5;
+        let expected = sub_256(&BN254_FR_MOD, &[5, 0, 0, 0]);
+        assert_eq!(neg(&nc), expected);
+        // 2^256 - 1 (worst-case non-canonical) must not underflow.
+        let max = [u64::MAX; 4];
+        let r = reduce(&max);
+        let expected = if r == ZERO { ZERO } else { sub_256(&BN254_FR_MOD, &r) };
+        assert_eq!(neg(&max), expected);
+    }
+
+    #[test]
+    fn sub_tolerates_noncanonical_rhs() {
+        let a = [7u64, 0, 0, 0];
+        let mut b = BN254_FR_MOD;
+        b[0] += 3; // non-canonical encoding of 3
+        assert_eq!(sub(&a, &b), [4, 0, 0, 0]);
+    }
 }
 
 // Conversion

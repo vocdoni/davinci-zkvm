@@ -15,6 +15,7 @@
 package integration
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -46,6 +47,7 @@ const (
 	failKZG         = uint32(1 << 18) // KZG barycentric evaluation mismatch
 	failResultAccum = uint32(1 << 20) // net Results accumulator leaf mismatch
 	failLeafHash    = uint32(1 << 21) // ballot SMT leaf hash mismatch
+	failBinding     = uint32(1 << 22) // cross-block binding mismatch
 
 	// failSMTAny covers any SMT-related failure (bits 10–13).
 	failSMTAny = failSMTVoteID | failSMTBallot | failSMTResults | failSMTProcess
@@ -633,4 +635,54 @@ func TestCheatInflatedResults(t *testing.T) {
 	tampered = append(tampered, base.reencBlock...)
 	tampered = append(tampered, base.kzgBlock...)
 	assertCircuitFails(t, tampered, failResultAccum|failSMTResults, "inflated_results")
+}
+
+// proofsSectionOffset parses the gen-input header/VK to locate the proofs
+// section of baseBin. Layout: header(32B) | alpha(64) beta(128) gamma(128)
+// delta(128) | gamma_abc_len(8) | gamma_abc(len*64) | nproofs_check(8).
+func proofsSectionOffset(t *testing.T, baseBin []byte) (off, nproofs, nPublic int) {
+	t.Helper()
+	u64at := func(w int) uint64 { return binary.LittleEndian.Uint64(baseBin[w*8:]) }
+	if u64at(0) != 0x423631484f545247 {
+		t.Fatalf("bad magic in baseBin")
+	}
+	nproofs = int(u64at(2))
+	nPublic = int(u64at(3))
+	gammaAbcLen := int(u64at(4 + 8 + 16 + 16 + 16))
+	off = 32 + 448 + 8 + gammaAbcLen*64 + 8
+	return off, nproofs, nPublic
+}
+
+// TestCheatForgedPubs tampers a ballot proof's inputsHash public input and
+// verifies the batch pairing equation fails (FAIL_PAIRING). Regression guard
+// for the Groth16 hint bypass: public inputs must be bound into the pairing
+// check by the in-guest MSM, not taken on trust from host hints.
+func TestCheatForgedPubs(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+	off, _, nPublic := proofsSectionOffset(t, base.baseBin)
+	full := base.fullInput()
+	// pubs of proof 0 start after a(64)+b(128)+c(64); flip one byte of the
+	// last public input (inputsHash) so all curve checks still pass but the
+	// pairing equation (and the inputsHash binding) break.
+	pubsOff := off + 64 + 128 + 64 + (nPublic-1)*32
+	full[pubsOff] ^= 0x01
+	assertCircuitFails(t, full, failPairing, "forged-pubs")
+}
+
+// TestCheatSwappedProofs swaps the first two proof records (a, b, c, pubs).
+// Both remain individually valid proofs, so the pairing still passes — the
+// rejection must come from the per-index bindings (ECDSA address, census /
+// consistency, inputsHash) that align proof i with voter i.
+func TestCheatSwappedProofs(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+	off, nproofs, nPublic := proofsSectionOffset(t, base.baseBin)
+	if nproofs < 2 {
+		t.Fatalf("need >= 2 proofs, got %d", nproofs)
+	}
+	recLen := 64 + 128 + 64 + nPublic*32
+	full := base.fullInput()
+	rec0 := append([]byte(nil), full[off:off+recLen]...)
+	copy(full[off:off+recLen], full[off+recLen:off+2*recLen])
+	copy(full[off+recLen:off+2*recLen], rec0)
+	assertCircuitFails(t, full, failECDSA|failBinding, "swapped-proofs")
 }

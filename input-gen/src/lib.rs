@@ -5,13 +5,12 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use ark_bn254::{Bn254, Fq, Fq2, Fr, G1Affine, G2Affine};
-use ark_ec::{AffineRepr, CurveGroup};
-use ark_ff::{BigInt as ArkBigInt, Field, PrimeField};
+use ark_ec::AffineRepr;
+use ark_ff::{BigInt as ArkBigInt, PrimeField};
 use ark_groth16::{prepare_verifying_key, Groth16, Proof, VerifyingKey};
 use ark_snark::SNARK;
 use num_bigint::BigUint;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -390,14 +389,16 @@ fn fq_to_u64x4(x: &Fq) -> [u64; 4] { x.into_bigint().0 }
 fn fr_to_u64x4(x: &Fr) -> [u64; 4] { x.into_bigint().0 }
 
 fn g1_to_raw(p: &G1Affine) -> [u64; 8] {
-    if p.is_zero() { let mut id = [0u64; 8]; id[4] = 1; return id; }
+    // Infinity is encoded as all-zeros, matching zisklib's G1_IDENTITY (the
+    // encoding the pairing precompile actually treats as 𝒪).
+    if p.is_zero() { return [0u64; 8]; }
     let x = fq_to_u64x4(&p.x);
     let y = fq_to_u64x4(&p.y);
     [x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3]]
 }
 
 fn g2_to_raw(p: &G2Affine) -> [u64; 16] {
-    if p.is_zero() { let mut id = [0u64; 16]; id[8] = 1; return id; }
+    if p.is_zero() { return [0u64; 16]; }
     let xc0 = fq_to_u64x4(&p.x.c0);
     let xc1 = fq_to_u64x4(&p.x.c1);
     let yc0 = fq_to_u64x4(&p.y.c0);
@@ -408,53 +409,6 @@ fn g2_to_raw(p: &G2Affine) -> [u64; 16] {
 
 fn write_u64_slice(buf: &mut Vec<u8>, words: &[u64]) {
     for w in words { buf.extend_from_slice(&w.to_le_bytes()); }
-}
-
-/// Compute Fiat-Shamir challenge r_shift from all proof data (must match guest's transcript).
-/// Scheme (must stay in sync with circuit/src/main.rs):
-///   digest  = SHA256("groth16-batch-v1" || A_0||B_0||C_0||pub_0 || ... )
-///   d0      = SHA256(digest || counter(8B) || 0x00)
-///   d1      = SHA256(digest || counter(8B) || 0x01)
-///   r_shift = Fr::from_random_bytes(d0 || d1)   (retry with counter++ if not invertible)
-/// Pre-hashing the 36KB transcript to 32 bytes before the retry loop avoids re-hashing
-/// the full transcript on each retry attempt.
-fn compute_r_shift(proofs: &[Proof<Bn254>], public_inputs: &[Vec<Fr>]) -> Fr {
-    let mut data = Vec::<u8>::new();
-    data.extend_from_slice(b"groth16-batch-v1");
-    for (proof, pubs) in proofs.iter().zip(public_inputs.iter()) {
-        for w in g1_to_raw(&proof.a) { data.extend_from_slice(&w.to_le_bytes()); }
-        for w in g2_to_raw(&proof.b) { data.extend_from_slice(&w.to_le_bytes()); }
-        for w in g1_to_raw(&proof.c) { data.extend_from_slice(&w.to_le_bytes()); }
-        for pub_val in pubs {
-            for w in fr_to_u64x4(pub_val) { data.extend_from_slice(&w.to_le_bytes()); }
-        }
-    }
-    // Pre-hash full transcript to 32 bytes to avoid re-hashing on retries.
-    let digest: [u8; 32] = Sha256::digest(&data).into();
-    let mut counter = 0u64;
-    loop {
-        let d0: [u8; 32] = {
-            let mut h = [0u8; 41];
-            h[..32].copy_from_slice(&digest);
-            h[32..40].copy_from_slice(&counter.to_be_bytes());
-            h[40] = 0u8;
-            Sha256::digest(h).into()
-        };
-        let d1: [u8; 32] = {
-            let mut h = [0u8; 41];
-            h[..32].copy_from_slice(&digest);
-            h[32..40].copy_from_slice(&counter.to_be_bytes());
-            h[40] = 1u8;
-            Sha256::digest(h).into()
-        };
-        let mut wide = [0u8; 64];
-        wide[..32].copy_from_slice(&d0);
-        wide[32..].copy_from_slice(&d1);
-        if let Some(v) = Fr::from_random_bytes(&wide) {
-            if v.inverse().is_some() { return v; }
-        }
-        counter += 1;
-    }
 }
 
 /// Generate ZisK binary input from a snarkjs VK and an array of proofs + public inputs.
@@ -495,32 +449,10 @@ pub fn generate_input(vk: &SnarkJsVk, proofs_json: &[SnarkJsProof], public_input
         ark_public_inputs.push(pubs);
     }
 
-    // Compute Fiat-Shamir challenge
-    let r_shift = compute_r_shift(&ark_proofs, &ark_public_inputs);
-    let mut r_powers: Vec<Fr> = Vec::with_capacity(num_proofs);
-    r_powers.push(Fr::ONE);
-    for i in 1..num_proofs { r_powers.push(r_powers[i - 1] * r_shift); }
-
-    // Precompute hints
-    let scaled_a: Vec<G1Affine> = ark_proofs.iter().zip(r_powers.iter())
-        .map(|(p, r)| p.a.mul_bigint(r.into_bigint()).into_affine())
-        .collect();
-    let r_sum: Fr = r_powers.iter().sum();
-    let neg_alpha_rsum = (ark_vk.alpha_g1.mul_bigint((-r_sum).into_bigint())).into_affine();
-    let mut g_ic = ark_vk.gamma_abc_g1[0].mul_bigint(r_sum.into_bigint());
-    for j in 0..n_public {
-        let coeff: Fr = ark_public_inputs.iter().zip(r_powers.iter())
-            .map(|(pubs, r)| pubs[j] * r)
-            .sum();
-        g_ic += ark_vk.gamma_abc_g1[j + 1].mul_bigint(coeff.into_bigint());
-    }
-    let neg_g_ic = (-g_ic).into_affine();
-    let acc_c_proj: ark_ec::short_weierstrass::Projective<ark_bn254::g1::Config> = ark_proofs.iter().zip(r_powers.iter())
-        .map(|(p, r)| p.c.mul_bigint(r.into_bigint()))
-        .sum();
-    let neg_acc_c = (-acc_c_proj).into_affine();
-
-    // Serialize to binary
+    // Serialize to binary.
+    // NOTE: no batch-verification hints are emitted — the guest computes the
+    // Fiat-Shamir challenge and the whole random linear combination in-circuit
+    // (host-supplied aggregates are unverifiable; see circuit/src/groth16.rs).
     let log_n = (num_proofs as f64).log2() as u64;
     let mut buf: Vec<u8> = Vec::new();
     // Header
@@ -540,12 +472,6 @@ pub fn generate_input(vk: &SnarkJsVk, proofs_json: &[SnarkJsProof], public_input
         write_u64_slice(&mut buf, &g1_to_raw(&proof.c));
         for x in pubs { write_u64_slice(&mut buf, &fr_to_u64x4(x)); }
     }
-    // Precomputed hints
-    for p in &scaled_a { write_u64_slice(&mut buf, &g1_to_raw(p)); }
-    write_u64_slice(&mut buf, &g1_to_raw(&neg_alpha_rsum));
-    write_u64_slice(&mut buf, &g1_to_raw(&neg_g_ic));
-    write_u64_slice(&mut buf, &g1_to_raw(&neg_acc_c));
-
     // ECDSA signatures (one entry per proof): r[4] || s[4] || recid(u64 LE)
     // The public key is no longer shipped; the circuit recovers it from
     // (r, s, z, recid) via `ecdsa_recover_secp256k1`.

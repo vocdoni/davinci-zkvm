@@ -9,7 +9,6 @@
 //! VK     : alpha_g1(G1) beta_g2(G2) gamma_g2(G2) delta_g2(G2)
 //!          gamma_abc_len(u64) gamma_abc[..](G1 each)
 //! Proofs : nproofs(u64) [a(G1) b(G2) c(G1) pubs[..](FrRaw each)] × nproofs
-//! Hints  : scaled_a[..](G1 each) neg_alpha_rsum(G1) neg_g_ic(G1) neg_acc_c(G1)
 //! ECDSA  : [r(FrRaw) s(FrRaw) recid(u64)] × nproofs  (mandatory)
 //! STATETX: STATE_MAGIC(u64) followed by full state-transition data
 //! CENSUS : CENSUS_MAGIC(u64) followed by lean-IMT proofs
@@ -47,10 +46,6 @@ pub struct ParsedInput {
     pub vk_delta_g2: G2,
     pub vk_gamma_abc: Vec<G1>,
     pub proofs: Vec<ProofRaw>,
-    pub scaled_a: Vec<G1>,
-    pub neg_alpha_rsum: G1,
-    pub neg_g_ic: G1,
-    pub neg_acc_c: G1,
     /// ECDSA entries; one per proof (mandatory).
     pub ecdsa: Vec<EcdsaEntry>,
     /// Full state-transition data (STATETX! magic). None if absent.
@@ -107,6 +102,10 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
     if magic != MAGIC                              { *fail_mask |= 1 << 31; }
     if nproofs == 0 || nproofs > crate::types::MAX_BATCH_SIZE { *fail_mask |= 1 << 31; }
     if n_public > 256                              { *fail_mask |= 1 << 31; }
+    // Clamp before any allocation: the guards above only flag the error, and an
+    // attacker-sized count would otherwise drive Vec::with_capacity into OOM.
+    let nproofs = nproofs.min(crate::types::MAX_BATCH_SIZE);
+    let n_public = n_public.min(256);
 
     // --- Verification key ---
     let vk_start = off;
@@ -117,6 +116,7 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
 
     let gamma_abc_len = read1!(&mut off, 0) as usize;
     if gamma_abc_len != n_public + 1 { *fail_mask |= 1 << 31; }
+    let gamma_abc_len = gamma_abc_len.min(n_public + 1);
 
     let mut vk_gamma_abc = Vec::with_capacity(gamma_abc_len);
     for _ in 0..gamma_abc_len {
@@ -141,15 +141,6 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
         }
         proofs.push(ProofRaw { a, b, c, public_inputs });
     }
-
-    // --- Precomputed hints (validated by the pairing equation) ---
-    let mut scaled_a = Vec::with_capacity(nproofs);
-    for _ in 0..nproofs {
-        scaled_a.push(read_g1!(&mut off));
-    }
-    let neg_alpha_rsum = read_g1!(&mut off);
-    let neg_g_ic       = read_g1!(&mut off);
-    let neg_acc_c      = read_g1!(&mut off);
 
     // --- ECDSA block (mandatory) ---
     // Must be present: exactly nproofs × (r + s + recid_u64) bytes follow.
@@ -190,6 +181,7 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
             off += 8;
             let n_proofs = read1!(&mut off, 0) as usize;
             if n_proofs > 4096 { *fail_mask |= 1 << 31; }
+            let n_proofs = n_proofs.min(4096);
             census_proofs.reserve(n_proofs);
             for _ in 0..n_proofs {
                 let root = read_fr!(&mut off);
@@ -197,6 +189,7 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
                 let index = read1!(&mut off, 0);
                 let n_siblings = read1!(&mut off, 0) as usize;
                 if n_siblings > 64 { *fail_mask |= 1 << 31; }
+                let n_siblings = n_siblings.min(64);
                 let mut siblings = Vec::with_capacity(n_siblings);
                 for _ in 0..n_siblings {
                     siblings.push(read_fr!(&mut off));
@@ -217,6 +210,7 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
             off += 8;
             let n_entries = read1!(&mut off, 0) as usize;
             if n_entries > 4096 { *fail_mask |= 1 << 31; }
+            let n_entries = n_entries.min(4096);
             let mut entries = Vec::with_capacity(n_entries);
             for _ in 0..n_entries {
                 let r = read_fr!(&mut off);
@@ -237,6 +231,8 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
         if maybe_magic == REENC_MAGIC {
             off += 8;
             let n_voters = read1!(&mut off, 0) as usize;
+            if n_voters > crate::types::MAX_BATCH_SIZE { *fail_mask |= 1 << 31; }
+            let n_voters = n_voters.min(crate::types::MAX_BATCH_SIZE);
             let pub_key_x = read_fr!(&mut off);
             let pub_key_y = read_fr!(&mut off);
             reenc_pub_key = Some((pub_key_x, pub_key_y));
@@ -301,7 +297,7 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
     ParsedInput {
         log_n, nproofs, n_public,
         vk_alpha_g1, vk_beta_g2, vk_gamma_g2, vk_delta_g2, vk_gamma_abc,
-        proofs, scaled_a, neg_alpha_rsum, neg_g_ic, neg_acc_c,
+        proofs,
         ecdsa, state, census_proofs, csp_block,
         reenc_pub_key, reenc_entries, kzg,
         vk_hash,
@@ -366,6 +362,9 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
     let vote_id_n      = read1!(0) as usize;
     let n_levels       = read1!(0) as usize;
     if n_levels > 256 { *fail_mask |= 1 << 31; }
+    let n_levels = n_levels.min(256);
+    if vote_id_n > crate::types::MAX_BATCH_SIZE { *fail_mask |= 1 << 31; }
+    let vote_id_n = vote_id_n.min(crate::types::MAX_BATCH_SIZE);
     let mut vote_id_chain = Vec::with_capacity(vote_id_n);
     for _ in 0..vote_id_n {
         vote_id_chain.push(parse_smt_transition(input, off, n_levels, fail_mask));
@@ -375,6 +374,9 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
     let ballot_n       = read1!(0) as usize;
     let ballot_n_levels = read1!(0) as usize;
     if ballot_n_levels > 256 { *fail_mask |= 1 << 31; }
+    let ballot_n_levels = ballot_n_levels.min(256);
+    if ballot_n > crate::types::MAX_BATCH_SIZE { *fail_mask |= 1 << 31; }
+    let ballot_n = ballot_n.min(crate::types::MAX_BATCH_SIZE);
     let mut ballot_chain = Vec::with_capacity(ballot_n);
     for _ in 0..ballot_n {
         ballot_chain.push(parse_smt_transition(input, off, ballot_n_levels, fail_mask));
@@ -384,6 +386,7 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
     let has_results  = read1!(0) != 0;
     let results_n_levels = read1!(0) as usize;
     if results_n_levels > 256 { *fail_mask |= 1 << 31; }
+    let results_n_levels = results_n_levels.min(256);
     let results = if has_results {
         Some(parse_smt_transition(input, off, results_n_levels, fail_mask))
     } else {
@@ -393,10 +396,12 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
     // Process read-proofs: n (0 or 5), then n_levels + entries only when n>0.
     let process_n = read1!(0) as usize;
     if process_n != 0 && process_n != 5 { *fail_mask |= 1 << 31; }
+    let process_n = process_n.min(5);
     let mut process_proofs = Vec::with_capacity(process_n);
     if process_n > 0 {
         let process_n_levels = read1!(0) as usize;
         if process_n_levels > 256 { *fail_mask |= 1 << 31; }
+        let process_n_levels = process_n_levels.min(256);
         for _ in 0..process_n {
             process_proofs.push(parse_smt_transition(input, off, process_n_levels, fail_mask));
         }
@@ -412,6 +417,7 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
 
         let n_vb = read1!(0) as usize;
         if n_vb > 4096 { *fail_mask |= 1 << 31; }
+        let n_vb = n_vb.min(4096);
         let mut vb = Vec::with_capacity(n_vb);
         for _ in 0..n_vb {
             let mut b = [ZERO_FR; BALLOT_FIELDS];
@@ -421,6 +427,7 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
 
         let n_ob = read1!(0) as usize;
         if n_ob > 4096 { *fail_mask |= 1 << 31; }
+        let n_ob = n_ob.min(4096);
         let mut ob = Vec::with_capacity(n_ob);
         for _ in 0..n_ob {
             let mut b = [ZERO_FR; BALLOT_FIELDS];

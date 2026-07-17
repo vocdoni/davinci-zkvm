@@ -53,8 +53,8 @@ ziskos::entrypoint!(main);
 use circuit_primitives::chaum_pedersen::{verify_decryption, CpProof};
 use circuit_primitives::hash::{hash_enc_key, sha256_once};
 use circuit_primitives::results::ballot_leaf_hash;
-use circuit_primitives::smt::{get_bit, le_to_fr, leaf_hash, node_hash, verify_transition};
-use circuit_primitives::types::{FrRaw, SmtTransition, ZERO_FR};
+use circuit_primitives::smt::{get_bit, le_to_fr, leaf_hash, node_hash, verify_inclusion};
+use circuit_primitives::types::{FrRaw, ZERO_FR};
 use ziskos::io::{commit_slice, read_input_slice};
 
 const AGG_MAGIC_IN: u64 = u64::from_le_bytes(*b"DAVAGGR!");
@@ -215,27 +215,19 @@ fn verify_results(frame: &[u8], cfg: &Config, state_root: &[u32; 8], results_u32
     off += 16 * CP_BYTES;
 
     // SMT inclusion of the net Results leaf under the final state root.
-    // An identity update (fnc=(0,1), old == new) through the processor
-    // proves the leaf is present with exactly this value.
+    // Genuine inclusion proof (circomlib SMTVerifier), the same primitive the
+    // batch circuit uses for its config read-proofs — a Processor transition
+    // is the wrong tool for reads (see the verify_inclusion docs in smt.rs).
     let n_levels = u64_at(off) as usize;
     off += 8;
     assert_eq!(frame.len(), off + n_levels * 32, "bad results frame length");
     let root = u32x8_to_fr(state_root);
     let siblings: Vec<FrRaw> = (0..n_levels).map(|i| fr_at(off + i * 32)).collect();
     let leaf = ballot_leaf_hash(&ballot);
-    let t = SmtTransition {
-        old_root: root,
-        new_root: root,
-        old_key: [0x04, 0, 0, 0],
-        old_value: leaf,
-        is_old0: false,
-        new_key: [0x04, 0, 0, 0],
-        new_value: leaf,
-        fnc0: false,
-        fnc1: true,
-        siblings,
-    };
-    assert!(verify_transition(&t), "results leaf 0x04 inclusion failed");
+    assert!(
+        verify_inclusion(&root, &[0x04, 0, 0, 0], &leaf, &siblings),
+        "results leaf 0x04 inclusion failed"
+    );
 
     for i in 0..16 {
         assert!(results[i] <= u32::MAX as u64, "result {} overflows u32 digest slot", i);
@@ -253,7 +245,7 @@ fn bytes32_to_u32x8(b: &[u8; 32]) -> [u32; 8] {
 
 /// Verify a proof blob in-guest and return (program_vk, publics as u32, zisk_vk).
 fn verify_blob(blob: &[u8], what: &str) -> ([u64; 4], [u32; BLOB_PUBS_WORDS], [u64; 4]) {
-    assert!(blob.len() % 8 == 0 && blob.len() / 8 > BLOB_PUBS_OFF + BLOB_PUBS_WORDS + 4,
+    assert!(blob.len().is_multiple_of(8) && blob.len() / 8 > BLOB_PUBS_OFF + BLOB_PUBS_WORDS + 4,
         "{}: blob too short", what);
     let valid = unsafe { ziskos::zisklib::verify_zisk_proof_c(blob.as_ptr(), blob.len()) };
     assert!(valid, "{}: STARK verification failed", what);

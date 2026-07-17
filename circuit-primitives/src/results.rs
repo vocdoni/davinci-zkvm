@@ -130,7 +130,7 @@ pub fn ballot_leaf_hash(b: &BallotData) -> FrRaw {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::babyjubjub::{bjj_add, bjj_generator, bjj_mul, BjjAffine};
+    use crate::babyjubjub::{bjj_add, bjj_generator, bjj_mul, bjj_neg, BjjAffine};
 
     #[test]
     fn ballot_net_matches_pairwise_ops() {
@@ -170,6 +170,44 @@ mod tests {
             }
         }
         assert_eq!(ballot_net(&init, &add_terms, &sub_terms, NUM_FIELDS), expected);
+    }
+
+    /// x + p (non-canonical encoding of the same residue). x < p, so no carry-out.
+    fn plus_modulus(x: &FrRaw) -> FrRaw {
+        let m = crate::bn254_fr::BN254_FR_MOD;
+        let mut out = [0u64; 4];
+        let mut carry = 0u128;
+        for i in 0..4 {
+            let s = x[i] as u128 + m[i] as u128 + carry;
+            out[i] = s as u64;
+            carry = s >> 64;
+        }
+        out
+    }
+
+    #[test]
+    fn ballot_net_tolerates_noncanonical_sub_terms() {
+        // A stored ballot may carry non-canonical coords (x + p) — the SMT leaf
+        // hash binds raw bytes, not residues. Subtraction of such an overwritten
+        // ballot must treat the coord as its residue (x), not underflow.
+        let g = bjj_generator();
+        let p = bjj_mul(&g, &[42, 0, 0, 0]);
+        let mut canonical = [ZERO_FR; BALLOT_FIELDS];
+        canonical[0] = p.0;
+        canonical[1] = p.1;
+        // Same ballot with both point coords in non-canonical encoding.
+        let mut noncanon = canonical;
+        noncanon[0] = plus_modulus(&p.0);
+        noncanon[1] = plus_modulus(&p.1);
+
+        let init = zero_ballot();
+        let net_canon = ballot_net(&init, &[], &[canonical], NUM_FIELDS);
+        let net_noncanon = ballot_net(&init, &[], &[noncanon], NUM_FIELDS);
+        assert_eq!(net_canon, net_noncanon);
+        // And the result must equal -p in the first ciphertext slot.
+        let neg_p = bjj_neg(&p);
+        assert_eq!(net_canon[0], neg_p.0);
+        assert_eq!(net_canon[1], neg_p.1);
     }
 }
 
