@@ -173,28 +173,28 @@ using Fiat-Shamir randomization.
 | 1.2 | Each proof point A_i is on BN254 G1 and in the prime-order subgroup | FAIL_CURVE |
 | 1.3 | Each proof point B_i is on the BN254 G2 twist curve | FAIL_CURVE |
 | 1.4 | Each proof point C_i is on BN254 G1 and in the prime-order subgroup | FAIL_CURVE |
-| 1.5 | Host hint points (neg_alpha_rsum, neg_g_ic, neg_acc_c, scaled_a[]) are on curve | FAIL_CURVE |
-| 1.6 | Fiat-Shamir challenge `r_shift ≠ 0` (derived from SHA-256 of full proof transcript) | FAIL_PAIRING |
-| 1.7 | Batch pairing equation holds: `e(-α·r_sum, β) · e(-Σ r_i·g_ic_i, γ) · e(-Σ r_i·C_i, δ) · Π e(r_i·A_i, B_i) = 1_GT` | FAIL_PAIRING |
+| 1.5 | Batch pairing equation holds: `e(-(Σr_i)·α, β) · e(-Σ r_i·L_i, γ) · e(-Σ r_i·C_i, δ) · Π e(r_i·A_i, B_i) = 1_GT` | FAIL_PAIRING |
 
 ### Fiat-Shamir transcript
 
 ```
-"groth16-batch-v1" ‖ A_0 ‖ B_0 ‖ C_0 ‖ pubs_0 ‖ A_1 ‖ B_1 ‖ C_1 ‖ pubs_1 ‖ ...
+"groth16-batch-v2" ‖ A_0 ‖ B_0 ‖ C_0 ‖ pubs_0 ‖ A_1 ‖ B_1 ‖ C_1 ‖ pubs_1 ‖ ...
 ```
 
 All curve points and field elements are serialized as their `[u64; N]` LE limbs.
-The transcript is first hashed to 32 bytes with SHA-256, then processed by
-`challenge_fr()` which applies double-SHA-256 wide reduction with a counter
-until a non-zero BN254 Fr element is obtained.
+The transcript is hashed to a 32-byte digest with SHA-256; the per-proof batch
+coefficients are `r_0 = 1`, `r_i = lo128(SHA256(digest ‖ i))` — independent
+128-bit values (small-exponents batch test, 2⁻¹²⁸ soundness error).
 
 ### Security rationale
 
-The host provides pre-computed aggregation hints (scaled points). These hints
-are **not trusted** — their correctness is enforced by the pairing equation
-itself. If the host provides incorrect hints, the pairing equation fails.
-The Fiat-Shamir challenge binds the random linear combination to the specific
-proof transcript, preventing the host from crafting valid hints for invalid proofs.
+The guest computes the entire random linear combination itself — every scalar
+multiplication over the proof points, public inputs and VK. Nothing
+proof-related is taken on trust from the host (an earlier hint-based variant
+was forgeable: one GT equation cannot bind n+3 free G1 points). The γ-side
+term is aggregated as `(Σr_i)·γ_abc[0] + Σ_j (Σ_i r_i·pubs_ij)·γ_abc[j+1]`,
+which is algebraically identical to `Σ_i r_i·L_i` but needs only
+`n_public + 1` scalar muls per batch.
 
 ---
 

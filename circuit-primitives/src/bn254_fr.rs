@@ -18,7 +18,7 @@
 //! form, matching the `arith256_mod` input/output convention.  This is the same
 //! representation used by `types::FrRaw`.
 
-use ziskos::syscalls::{SyscallArith256ModParams, syscall_arith256_mod};
+use ziskos::syscalls::{syscall_arith256_mod, SyscallArith256ModParams};
 use ziskos::zisklib::fcall_uint256_inv_mod;
 
 /// BN254 scalar field modulus (Fr):
@@ -44,7 +44,7 @@ const PM2: [u64; 4] = [
 pub type BnFr = [u64; 4];
 
 pub const ZERO: BnFr = [0, 0, 0, 0];
-pub const ONE:  BnFr = [1, 0, 0, 0];
+pub const ONE: BnFr = [1, 0, 0, 0];
 
 // Core primitive
 
@@ -68,18 +68,26 @@ pub fn muladd(a: &BnFr, b: &BnFr, c: &BnFr) -> BnFr {
 // Derived operations
 
 #[inline(always)]
-pub fn mul(a: &BnFr, b: &BnFr) -> BnFr { muladd(a, b, &ZERO) }
+pub fn mul(a: &BnFr, b: &BnFr) -> BnFr {
+    muladd(a, b, &ZERO)
+}
 
 #[inline(always)]
-pub fn sqr(a: &BnFr) -> BnFr { mul(a, a) }
+pub fn sqr(a: &BnFr) -> BnFr {
+    mul(a, a)
+}
 
 #[inline(always)]
-pub fn add(a: &BnFr, b: &BnFr) -> BnFr { muladd(a, &ONE, b) }
+pub fn add(a: &BnFr, b: &BnFr) -> BnFr {
+    muladd(a, &ONE, b)
+}
 
 /// `(a - b) mod p`.
 #[inline]
 pub fn sub(a: &BnFr, b: &BnFr) -> BnFr {
-    if b == &ZERO { return *a; }
+    if b == &ZERO {
+        return *a;
+    }
     muladd(a, &ONE, &neg(b))
 }
 
@@ -90,7 +98,9 @@ pub fn sub(a: &BnFr, b: &BnFr) -> BnFr {
 #[inline]
 pub fn neg(a: &BnFr) -> BnFr {
     let a = reduce(a);
-    if a == ZERO { return ZERO; }
+    if a == ZERO {
+        return ZERO;
+    }
     sub_256(&BN254_FR_MOD, &a)
 }
 
@@ -153,10 +163,18 @@ mod tests {
 
     #[test]
     fn neg_matches_reference() {
-        for v in [[0u64, 0, 0, 0], [1, 0, 0, 0], [0xDEADBEEF, 0x12345, 0xFFF, 0x1],
-                  BN254_FR_MOD] {
+        for v in [
+            [0u64, 0, 0, 0],
+            [1, 0, 0, 0],
+            [0xDEADBEEF, 0x12345, 0xFFF, 0x1],
+            BN254_FR_MOD,
+        ] {
             let a = reduce(&v);
-            let expected = if a == ZERO { ZERO } else { sub_256(&BN254_FR_MOD, &a) };
+            let expected = if a == ZERO {
+                ZERO
+            } else {
+                sub_256(&BN254_FR_MOD, &a)
+            };
             assert_eq!(neg(&v), expected);
         }
     }
@@ -171,7 +189,11 @@ mod tests {
         // 2^256 - 1 (worst-case non-canonical) must not underflow.
         let max = [u64::MAX; 4];
         let r = reduce(&max);
-        let expected = if r == ZERO { ZERO } else { sub_256(&BN254_FR_MOD, &r) };
+        let expected = if r == ZERO {
+            ZERO
+        } else {
+            sub_256(&BN254_FR_MOD, &r)
+        };
         assert_eq!(neg(&max), expected);
     }
 
@@ -191,35 +213,6 @@ mod tests {
 #[inline]
 pub fn reduce(a: &BnFr) -> BnFr {
     muladd(a, &ONE, &ZERO)
-}
-
-/// Check if a 256-bit value is strictly less than the BN254 Fr modulus.
-/// Compares limbs from most-significant to least-significant.
-#[inline]
-pub fn is_canonical(a: &BnFr) -> bool {
-    for i in (0..4).rev() {
-        if a[i] < BN254_FR_MOD[i] { return true; }
-        if a[i] > BN254_FR_MOD[i] { return false; }
-    }
-    false // equal to p → not canonical
-}
-
-/// Try to interpret 32 bytes as a canonical Fr element (for Fiat-Shamir).
-/// Reads the first 32 bytes as a little-endian `[u64; 4]`, masks the top 2 bits
-/// (since BN254 Fr has 254-bit modulus), and returns `Some(value)` if the result
-/// is < p and non-zero.  Returns `None` otherwise.
-pub fn from_random_bytes_32(bytes: &[u8; 32]) -> Option<BnFr> {
-    let mut r = [0u64; 4];
-    for i in 0..4 {
-        let off = i * 8;
-        r[i] = u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
-    }
-    // BN254 Fr modulus is 254 bits => mask top 2 bits for uniform sampling
-    r[3] &= 0x3FFFFFFFFFFFFFFF;
-    if !is_canonical(&r) || r == ZERO {
-        return None;
-    }
-    Some(r)
 }
 
 /// 256-bit subtraction `a - b` without modular reduction.

@@ -9,8 +9,26 @@
 //! e(-(Σrᵢ)·α, β) · e(-Σrᵢ·Lᵢ, γ) · e(-Σrᵢ·Cᵢ, δ) · Π e(rᵢ·Aᵢ, Bᵢ) = GT_ONE
 //! ```
 //!
-//! where `Lᵢ = γ_abc[0] + Σⱼ pubsᵢⱼ·γ_abc[j+1]` and `rᵢ = r_shiftⁱ`, with `r_shift`
-//! a Fiat-Shamir challenge derived in-guest from SHA-256 of the full proof transcript.
+//! where `Lᵢ = γ_abc[0] + Σⱼ pubsᵢⱼ·γ_abc[j+1]` and the `rᵢ` are independent
+//! 128-bit Fiat-Shamir coefficients derived in-guest from SHA-256 of the full
+//! proof transcript (`r₀ = 1`).
+//!
+//! # Cost model
+//!
+//! Two structural optimisations keep the in-guest MSM cheap without touching
+//! soundness:
+//!
+//! - The γ-side term is aggregated across proofs instead of building each `Lᵢ`:
+//!   `Σᵢ rᵢ·Lᵢ = (Σᵢrᵢ)·γ_abc[0] + Σⱼ (Σᵢ rᵢ·pubsᵢⱼ)·γ_abc[j+1]`.
+//!   The inner sums are Fr muladds (one arith256_mod row each), leaving only
+//!   `n_public + 1` scalar muls for the whole batch instead of
+//!   `n·(n_public + 1)`. This is pure algebra — the resulting point is
+//!   identical.
+//! - The coefficients are independent 128-bit values rather than 254-bit powers
+//!   `r_shiftⁱ`. `scalar_mul_bn254` starts its double-and-add at the scalar's
+//!   MSB, so the per-proof `rᵢ·Aᵢ` and `rᵢ·Cᵢ` muls cost half. The
+//!   small-exponents batch test (Bellare–Garay–Rabin) gives soundness error
+//!   2⁻¹²⁸ per Fiat-Shamir attempt — beyond BN254's own ~100-bit security.
 //!
 //! # Why the MSM is done in-guest
 //!
@@ -29,30 +47,29 @@ use crate::hash::sha256_once;
 use crate::io::ParsedInput;
 use crate::types::*;
 use ziskos::zisklib::{
-    add_bn254, is_on_curve_bn254, is_on_curve_twist_bn254,
-    neg_bn254, pairing_batch_bn254, scalar_mul_bn254,
+    add_bn254, is_on_curve_bn254, is_on_curve_twist_bn254, neg_bn254, pairing_batch_bn254,
+    scalar_mul_bn254,
 };
 
-/// Derive a non-zero BN254 scalar field challenge from a 32-byte digest.
+/// The i-th batch coefficient: `r₀ = 1`, `rᵢ = lo128(SHA256(digest ‖ i))`.
 ///
-/// Uses a double-SHA-256 wide-reduction loop.  Stack-allocated 41-byte buffers
-/// avoid heap allocation in the retry path.  Loops until a non-zero invertible
-/// value is found (statistically immediate for random digests).
-fn challenge_fr(digest: &[u8; 32]) -> Option<FrRaw> {
-    let mut counter = 0u64;
-    loop {
-        let mut buf0 = [0u8; 41];
-        buf0[..32].copy_from_slice(digest);
-        buf0[32..40].copy_from_slice(&counter.to_be_bytes());
-        buf0[40] = 0;
-        let d0 = sha256_once(&buf0);
-
-        // BN254 Fr has 254-bit modulus: only 32 bytes needed for Fiat-Shamir.
-        if let Some(v) = bn254_fr::from_random_bytes_32(&d0) {
-            return Some(v);
-        }
-        counter = counter.wrapping_add(1);
+/// 128-bit values are trivially canonical Fr elements, so no reduction retry
+/// loop is needed. The 2⁻¹²⁸ all-zero case maps to 1 (a zero coefficient would
+/// leave that proof unverified).
+fn batch_coeff(digest: &[u8; 32], i: usize) -> FrRaw {
+    if i == 0 {
+        return [1, 0, 0, 0];
     }
+    let mut buf = [0u8; 40];
+    buf[..32].copy_from_slice(digest);
+    buf[32..].copy_from_slice(&(i as u64).to_le_bytes());
+    let d = sha256_once(&buf);
+    let lo = u64::from_le_bytes(d[0..8].try_into().unwrap());
+    let hi = u64::from_le_bytes(d[8..16].try_into().unwrap());
+    if lo == 0 && hi == 0 {
+        return [1, 0, 0, 0];
+    }
+    [lo, hi, 0, 0]
 }
 
 /// Verify a Groth16 batch.  Returns `true` if the batch passes.
@@ -71,13 +88,16 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     // on-curve (non-infinity): the in-guest scalar multiplication requires
     // non-zero points. VK G2 points additionally need the subgroup check.
     // Proof B is on-curve-only: subgroup soundness comes from the randomized
-    // batch coefficients (the transcript commits to B before r_shift exists).
+    // batch coefficients (the transcript commits to B before the coefficients
+    // exist).
     let mut points_ok = true;
     points_ok &= is_on_curve_bn254(&parsed.vk_alpha_g1);
     points_ok &= g2_is_valid(&parsed.vk_beta_g2);
     points_ok &= g2_is_valid(&parsed.vk_gamma_g2);
     points_ok &= g2_is_valid(&parsed.vk_delta_g2);
-    for p in &parsed.vk_gamma_abc { points_ok &= is_on_curve_bn254(p); }
+    for p in &parsed.vk_gamma_abc {
+        points_ok &= is_on_curve_bn254(p);
+    }
     for i in 0..parsed.nproofs {
         points_ok &= is_on_curve_bn254(&parsed.proofs[i].a);
         points_ok &= is_on_curve_twist_bn254(&parsed.proofs[i].b);
@@ -88,20 +108,25 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
         return false;
     }
 
-    // --- Fiat-Shamir transcript → challenge r_shift ---
+    // --- Fiat-Shamir transcript → per-proof coefficients ---
     //
-    // Pre-hash the full transcript to 32 bytes before calling challenge_fr.
-    // This halves SHA-256 AIR rows and avoids large heap clones in
-    // challenge_fr's retry loop.
-    let nproofs  = parsed.nproofs;
+    // Pre-hash the full transcript to 32 bytes; each coefficient is then one
+    // 40-byte SHA-256 of (digest ‖ index).
+    let nproofs = parsed.nproofs;
     let n_public = parsed.n_public;
     let cap = 16 + nproofs * (64 + 128 + 64 + n_public * 32);
     let mut transcript = Vec::<u8>::with_capacity(cap);
-    transcript.extend_from_slice(b"groth16-batch-v1");
+    transcript.extend_from_slice(b"groth16-batch-v2");
     for i in 0..nproofs {
-        for w in parsed.proofs[i].a.iter()         { transcript.extend_from_slice(&w.to_le_bytes()); }
-        for w in parsed.proofs[i].b.iter()         { transcript.extend_from_slice(&w.to_le_bytes()); }
-        for w in parsed.proofs[i].c.iter()         { transcript.extend_from_slice(&w.to_le_bytes()); }
+        for w in parsed.proofs[i].a.iter() {
+            transcript.extend_from_slice(&w.to_le_bytes());
+        }
+        for w in parsed.proofs[i].b.iter() {
+            transcript.extend_from_slice(&w.to_le_bytes());
+        }
+        for w in parsed.proofs[i].c.iter() {
+            transcript.extend_from_slice(&w.to_le_bytes());
+        }
         for j in 0..n_public {
             for w in parsed.proofs[i].public_inputs[j].iter() {
                 transcript.extend_from_slice(&w.to_le_bytes());
@@ -111,46 +136,56 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     let digest = sha256_once(&transcript);
     drop(transcript); // free ~36 KB before allocating pairing inputs
 
-    let r_shift = match challenge_fr(&digest) {
-        Some(r) if r != ZERO_FR => r,
-        _ => { *fail_mask |= FAIL_PAIRING; return false; }
-    };
-
     // --- In-guest random linear combination ---
     //
-    // r_i = r_shift^i (r_0 = 1). Every scaled point is computed here in the
-    // guest; nothing proof-related is taken on trust from the host.
-    let mut r_i: FrRaw = [1, 0, 0, 0];
+    // Every scaled point is computed here in the guest; nothing proof-related
+    // is taken on trust from the host. The γ-side pub scalars are accumulated
+    // in Fr and applied to γ_abc once, after the loop (see module docs).
     let mut r_sum = ZERO_FR;
-    let mut acc_c = g1_identity();   // Σ rᵢ·Cᵢ
-    let mut g_ic_acc = g1_identity(); // Σ rᵢ·Lᵢ
+    let mut acc_c = g1_identity(); // Σ rᵢ·Cᵢ
+    let mut pub_coeffs = vec![ZERO_FR; n_public]; // Σᵢ rᵢ·pubsᵢⱼ per j
     let mut eq_g1 = Vec::<G1>::with_capacity(3 + nproofs);
     let mut eq_g2 = Vec::<G2>::with_capacity(3 + nproofs);
 
     for i in 0..nproofs {
         let proof = &parsed.proofs[i];
+        let r_i = batch_coeff(&digest, i);
 
         // rᵢ·Aᵢ pairs with Bᵢ.
         eq_g1.push(scalar_mul_bn254(&proof.a, &r_i));
         eq_g2.push(proof.b);
 
-        // acc_c += rᵢ·Cᵢ  (rᵢ ≠ 0 and Cᵢ ≠ 𝒪, so terms are never 𝒪)
+        // acc_c += rᵢ·Cᵢ  (0 < rᵢ < r and Cᵢ ≠ 𝒪 on the cofactor-1 G1, so
+        // terms are never 𝒪; a 2⁻²⁵⁴ Fiat-Shamir cancellation is handled by
+        // the identity branch)
         let rc = scalar_mul_bn254(&proof.c, &r_i);
-        acc_c = if acc_c == g1_identity() { rc } else { add_bn254(&acc_c, &rc) };
+        acc_c = if acc_c == g1_identity() {
+            rc
+        } else {
+            add_bn254(&acc_c, &rc)
+        };
 
-        // Lᵢ = γ_abc[0] + Σⱼ pubsᵢⱼ·γ_abc[j+1];  g_ic_acc += rᵢ·Lᵢ
-        let mut l_i = parsed.vk_gamma_abc[0];
-        for j in 0..n_public {
-            let s = &proof.public_inputs[j];
-            if *s == ZERO_FR { continue; } // 0·P = 𝒪; add_bn254 needs non-𝒪
-            let t = scalar_mul_bn254(&parsed.vk_gamma_abc[j + 1], s);
-            l_i = add_bn254(&l_i, &t);
+        // muladd reduces mod r, so raw (non-canonical) pubs contribute their
+        // residue — same semantics scalar_mul_bn254 would give them.
+        for (j, coeff) in pub_coeffs.iter_mut().enumerate() {
+            *coeff = bn254_fr::muladd(&proof.public_inputs[j], &r_i, coeff);
         }
-        let rg = scalar_mul_bn254(&l_i, &r_i);
-        g_ic_acc = if g_ic_acc == g1_identity() { rg } else { add_bn254(&g_ic_acc, &rg) };
-
         r_sum = bn254_fr::add(&r_sum, &r_i);
-        r_i = bn254_fr::mul(&r_i, &r_shift);
+    }
+
+    // Σᵢ rᵢ·Lᵢ = (Σᵢrᵢ)·γ_abc[0] + Σⱼ pub_coeffs[j]·γ_abc[j+1].
+    // r_sum ∈ [1, n·2¹²⁸] is never 0 mod r, so the first term is non-𝒪.
+    let mut g_ic_acc = scalar_mul_bn254(&parsed.vk_gamma_abc[0], &r_sum);
+    for j in 0..n_public {
+        if pub_coeffs[j] == ZERO_FR {
+            continue; // 0·P = 𝒪; add_bn254 needs non-𝒪
+        }
+        let t = scalar_mul_bn254(&parsed.vk_gamma_abc[j + 1], &pub_coeffs[j]);
+        g_ic_acc = if g_ic_acc == g1_identity() {
+            t
+        } else {
+            add_bn254(&g_ic_acc, &t)
+        };
     }
 
     // VK-side aggregates, negated: e(-(Σrᵢ)α, β) · e(-ΣrᵢLᵢ, γ) · e(-ΣrᵢCᵢ, δ).
@@ -163,6 +198,8 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     eq_g2.push(parsed.vk_delta_g2);
 
     let ok = gt_eq(&pairing_batch_bn254(&eq_g1, &eq_g2), &gt_one());
-    if !ok { *fail_mask |= FAIL_PAIRING; }
+    if !ok {
+        *fail_mask |= FAIL_PAIRING;
+    }
     ok
 }
