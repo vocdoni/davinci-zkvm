@@ -9,7 +9,17 @@ edition = "2021"
 [workspace]
 
 [dependencies]
-ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", tag = "v0.18.0" }
+ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", rev = "9e9291d244867aaa6334e6dabef3cba4f604db86" }
+
+# ziskos 1.3 drags in proofman-starks-lib-c (via zisk-verifier -> proofman-fields),
+# whose build.rs compiles a CUDA prover we never use from a guest. Declared here
+# only to force `cpu-only` on through feature unification.
+#
+# Must stay a `branch` ref, matching upstream zisk's own Cargo.toml: a cargo
+# source id includes the git ref, so pinning `rev` here would resolve to a
+# second, separate copy of the crate, and the feature unification this entry
+# exists for would stop working. The exact commit is pinned in Cargo.lock.
+proofman-starks-lib-c = { git = "https://github.com/0xPolygonHermez/pil2-proofman.git", branch = "pre-develop-1.3.0-alpha", features = ["cpu-only"] }
 
 # Test-only: parse the davinci-node-extracted Chaum-Pedersen vectors. Excluded
 # from the guest ELF build (dev-dependencies are not compiled for release).

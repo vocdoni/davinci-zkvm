@@ -532,14 +532,15 @@ func runZiskEmu(inputBytes []byte) ([]uint32, error) {
 	}
 	elfPath := os.Getenv("CIRCUIT_ELF_PATH")
 	if elfPath == "" {
-		elfPath = "./circuit/elf/circuit.elf"
+		// Repo-relative default: tests run from go-sdk/tests/integration.
+		elfPath = "../../../circuit/elf/circuit.elf"
 	}
 	tmp, err := os.CreateTemp("", "davinci-integration-*.bin")
 	if err != nil {
 		return nil, err
 	}
 	defer os.Remove(tmp.Name())
-	// The guest reads its input via read_input_slice(), which expects a
+	// The guest reads its input via read_slice(), which expects a
 	// u64 LE length prefix before the data (the service adds the same
 	// frame when writing job input.bin files).
 	var lenPrefix [8]byte

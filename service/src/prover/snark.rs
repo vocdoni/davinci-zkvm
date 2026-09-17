@@ -37,12 +37,29 @@ const PROGRAM_VK_LEN: usize = 4;
 /// Size of the ABI-encoded `uint256[24]` PLONK proof payload, in bytes.
 const PROOF_BYTES_LEN: usize = 24 * 32;
 
+/// Mirror of upstream `HashMode`. Variant order fixes the bincode tag.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+enum HashMode {
+    Poseidon1,
+    Poseidon2,
+    Blake3,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProgramVK {
     vk: Vec<u64>,
+    hash_mode: HashMode,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Mirror of upstream `VadcopKind`. Variant order fixes the bincode tag.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+enum VadcopKind {
+    Final,
+    Recurser,
+    Minimal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PublicValues {
     data: Vec<u8>,
     // The upstream struct stores an AtomicUsize cursor here; we deserialize
@@ -88,18 +105,23 @@ enum ProofBody {
     Vadcop {
         proof: Vec<u64>,
         zisk_vk: Vec<u64>,
-        minimal: bool,
+        kind: VadcopKind,
+        hash: String,
+        publics_full: Vec<u64>,
     },
     Plonk {
         proof_bytes: Vec<u8>,
         plonk_vk: Box<PlonkVkBlob>,
+        publics: PublicValues,
+        publics_full: Vec<u64>,
+        rootc: Vec<u64>,
     },
 }
 
+/// ZisK 1.3 moved `publics` out of `Proof` and into the body variants.
 #[derive(Debug, Serialize, Deserialize)]
 struct Proof {
     body: ProofBody,
-    publics: PublicValues,
     program_vk: ProgramVK,
 }
 
@@ -136,8 +158,12 @@ pub fn parse_proof_bytes(bytes: &[u8]) -> Result<SnarkArtifact> {
         bincode::serde::decode_from_slice(bytes, bincode::config::standard())
             .map_err(|e| anyhow!("bincode-decode proof.bin: {}", e))?;
 
-    let (proof_bytes, vadcop_vk) = match proof.body {
-        ProofBody::Plonk { proof_bytes, plonk_vk } => (proof_bytes, plonk_vk.vadcop_vk),
+    // ZisK 1.3 stamps the rootCVadcopFinal that went into `publicsHash` in the
+    // body (the vadcop_final verkey for a plain proof, the recurser verkey for
+    // an aggregated one). Use it rather than plonk_vk.vadcop_vk, which is only
+    // the same value in the plain case.
+    let (proof_bytes, vadcop_vk, publics) = match proof.body {
+        ProofBody::Plonk { proof_bytes, publics, rootc, .. } => (proof_bytes, rootc, publics),
         ProofBody::Vadcop { .. } => bail!(
             "proof.bin is a Vadcop STARK proof, not a PLONK SNARK; the service must run \
              cargo-zisk prove with --plonk"
@@ -158,11 +184,11 @@ pub fn parse_proof_bytes(bytes: &[u8]) -> Result<SnarkArtifact> {
             vadcop_vk.len()
         );
     }
-    if proof.publics.data.len() != ZISK_PUBLICS * 4 {
+    if publics.data.len() != ZISK_PUBLICS * 4 {
         bail!(
             "publics: expected {} bytes, got {}",
             ZISK_PUBLICS * 4,
-            proof.publics.data.len()
+            publics.data.len()
         );
     }
     if proof_bytes.len() != PROOF_BYTES_LEN {
@@ -176,7 +202,7 @@ pub fn parse_proof_bytes(bytes: &[u8]) -> Result<SnarkArtifact> {
     Ok(SnarkArtifact {
         program_vk: encode_u64_be_hex(&proof.program_vk.vk),
         root_c_vadcop_final: encode_u64_be_hex(&vadcop_vk),
-        public_values: format!("0x{}", hex::encode(&proof.publics.data)),
+        public_values: format!("0x{}", hex::encode(&publics.data)),
         proof_bytes: format!("0x{}", hex::encode(&proof_bytes)),
     })
 }

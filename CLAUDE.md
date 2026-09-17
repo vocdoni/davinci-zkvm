@@ -235,12 +235,28 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   `program_vk` (`AggVK`) + vote-batch `batch_vk` (`BatchVK`)** for the
   external verifiability anchor. The guest's `config_commitment` is
   `sha256(config frame ‖ batch_vk ‖ fold_vk)`, so a stale manifest fails
-  the commitment check after a guest rebuild. Refreeze it by running a
-  finalize and reading the digest's `fold_vk`/`batch_vk` (or
-  `FetchStarkInfo`); the `davinci-fold` finalize log line prints both.
-- **`verify_zisk_proof_c` + the vadcop blob layout are ZisK v0.18.0
-  internals**, not stable API — pin the ZisK version;
-  `service/src/prover/recursion.rs` asserts the layout.
+  the commitment check after a guest rebuild. Refreeze it straight from
+  `cargo-zisk setup -e <elf> -k <proving-key>`, which prints the program vk as
+  `Root hash: [w0, w1, w2, w3]`; the pinned string is those four u64 words
+  rendered big-endian and concatenated. (A finalize digest's
+  `fold_vk`/`batch_vk`, or `FetchStarkInfo`, gives the same values but needs a
+  working prover and a GPU.)
+- **`verify_zisk_proof_c` + the vadcop blob layout are ZisK internals**, not
+  stable API — pin the ZisK version. On 1.3 the call takes six arguments
+  (proof, `expected_setup_vk`, `expected_program_vk`), the blob tail is
+  `[zisk_vk(4)][hash_tag(1)]`, and an uncompressed proof carries the
+  `is_vadcop_final_proof` flag so `n_publics` is 69, shifting the vk/publics
+  offsets by one word. `circuit-aggregator/src/main.rs` pins the accepted
+  shape and asserts it; `input-gen/src/aggregator.rs` rebuilds the same
+  layout host-side. Both must move together.
+- **`SETUP_VK` in the aggregator guest must stay a compile-time constant.**
+  It is the ZisK vadcop-final setup key
+  (`provingKey/zisk/vadcop_final/vadcop_final.verkey.json`), and upstream is
+  explicit that a key read from program input makes verification self-keyed
+  and authenticates nothing. `batch_vk`/`fold_vk` stay runtime-bound: they are
+  folded into `config_commitment` and pinned externally by `CircuitRelease`,
+  which is what makes the chain's program authorization hold. Refreeze
+  `SETUP_VK` whenever the ZisK release or its setup key changes.
 - **128 is the maximum batch size** (`MAX_BATCH_SIZE` in
   `circuit-primitives/src/types.rs`, mirrored in `input-gen` and
   `go-sdk/types.go`): the circuit rejects any batch with more than 128
@@ -276,7 +292,73 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   zkVM is the production prover. `TestCheatTamperPaddedSlot` guards the skip;
   sweep configs in tests with `BALLOT_NUM_FIELDS`.
 
-## Performance baseline (RTX 5090, ZisK v0.18.0)
+## ZisK 1.3.0-alpha + BabyJubJub precompile
+
+The guests build against upstream `ziskos` pinned by rev
+(`9e9291d2`, branch `pre-develop-1.3.0-alpha`), which carries the BabyJubJub
+precompile. `circuit-primitives/src/babyjubjub.rs` is affine and
+syscall-backed: no projective coordinates, no field inversions.
+
+Toolchain lives in `~/.zisk-1.3` (binaries, both proving keys, guest
+toolchain). Build and prove with `PATH=$HOME/.zisk-1.3/bin:$PATH`.
+
+- **`cargo-zisk` hardcodes the rustup toolchain name `zisk`**
+  (`RUSTUP_TOOLCHAIN_NAME` in `ziskbuild`), so the 1.3 toolchain must be
+  linked under exactly that name or it silently pairs the new driver with an
+  old target spec. The symptom is a link error, `region 'rom' already
+  defined`. Fix: `rustup toolchain link zisk ~/.zisk-1.3/toolchains/zisk-4.0.0`.
+- **`program-setup` is now `setup`**, and `--gpu` was dropped from it (hash
+  mode comes from the proving key's `global_info.json`).
+- **`cargo-zisk prove` dropped `--emulator`** (the Rust emulator is the
+  default; `--asm` selects the assembly one) and renamed `--verify-proofs` to
+  `--verify-proof`.
+- **The proving key must be a Poseidon hash mode.** 1.3 defaults to Blake3,
+  which cannot do PLONK wrapping at all. The installed key is Poseidon1.
+- **`ziskos` 1.3 drags a CUDA prover into guest builds** via
+  `zisk-verifier` -> `proofman-fields` -> `proofman-starks-lib-c`, which is
+  unconditional. `circuit-primitives/Cargo.toml` declares that crate solely to
+  force its `cpu-only` feature through feature unification. It must stay a
+  `branch` ref, matching upstream: a cargo source id includes the git ref, so
+  pinning `rev` would resolve a second copy of the crate and break the
+  unification. Also note nvcc rejects gcc > 14, so CUDA builds need
+  `CUDAHOSTCXX=/usr/bin/g++-14`.
+- **1.3 weakened `is_on_curve_bn254`**: it now ends in
+  `eq(lhs, rhs) || eq(p, G1_IDENTITY)` and so accepts the all-zero identity,
+  where v0.18's plain `eq(lhs, rhs)` rejected it. `g1_is_valid` in
+  `circuit-primitives/src/bn254.rs` re-asserts non-identity; every G1 point
+  that feeds the batch MSM goes through it.
+- **The precompile does not reduce its inputs.** It requires both coordinates
+  in Fr range, but stored ballot coords are raw words (the SMT leaf hash binds
+  bytes, not residues), so `x + p` legitimately arrives as an encoding of `x`.
+  `babyjubjub.rs::canon` reduces at the untrusted boundary — the accumulator,
+  the public point API and the reencryption inputs — which keeps `affine_add`
+  syscall-only on the hot path.
+
+**The PLONK wrap is currently broken on 1.3.** STARK proving and verification
+work, but `--plonk` produces a proof that fails its own verification
+(`✗ SNARK verification failed`). The two keys are mutually consistent (the
+`vadcop_final.verkey.json` in `provingKeySnark` matches `provingKey`), so the
+freshly generated alpha snark setup is the prime suspect. Per-batch PLONK and
+chained finalize are blocked until this is resolved.
+
+The Docker/`ziskup` install path (`Makefile`, `Dockerfile.*`,
+`scripts/install*.sh`) still targets the v0.18.0 **release** and cannot work
+against an unreleased branch. Use the local toolchain in `~/.zisk-1.3` for 1.3
+work.
+
+### Measured (RTX 5090, num_fields=6, STARK, GPU)
+
+Same input files proved on both stacks, both verified:
+
+| batch | v0.18.0 | 1.3 + precompile | speedup | votes/min |
+|---:|---:|---:|---:|---:|
+|  64 | 61.2 s | 22.6 s | 2.71x | 63 -> 170 |
+| 128 | 94.0 s | 32.8 s | 2.87x | 82 -> 234 |
+
+Two variables move at once there (ZisK version and the precompile), so treat
+the speedup as the combination, not the precompile alone.
+
+## Historical baseline (RTX 5090, ZisK v0.18.0)
 
 Ballot capacity is 16 fields (`NUM_FIELDS`), but the guest reads the
 election's declared `num_fields` from the committed BallotMode leaf and

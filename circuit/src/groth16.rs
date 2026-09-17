@@ -41,13 +41,13 @@
 //! computes every scalar multiplication itself, so the equation binds the actual
 //! proof points, public inputs and VK to the in-guest challenge.
 
-use crate::bn254::{g1_identity, g2_is_valid, gt_eq, gt_one};
+use crate::bn254::{g1_identity, g1_is_valid, g2_is_valid, gt_eq, gt_one};
 use crate::bn254_fr;
 use crate::hash::sha256_once;
 use crate::io::ParsedInput;
 use crate::types::*;
 use ziskos::zisklib::{
-    add_bn254, is_on_curve_bn254, is_on_curve_twist_bn254, neg_bn254, pairing_batch_bn254,
+    add_bn254, is_on_curve_twist_bn254, neg_bn254, pairing_batch_bn254,
     scalar_mul_bn254,
 };
 
@@ -85,23 +85,25 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
 
     // --- Validate curve points ---
     // VK G1 points, gamma_abc and the proof A/C points must be strictly
-    // on-curve (non-infinity): the in-guest scalar multiplication requires
-    // non-zero points. VK G2 points additionally need the subgroup check.
+    // on-curve and non-infinity: the in-guest scalar multiplication requires
+    // non-zero points. `g1_is_valid` enforces the non-infinity half itself,
+    // because ZisK 1.3 made `is_on_curve_bn254` accept the all-zero identity
+    // (v0.18 rejected it). VK G2 points additionally need the subgroup check.
     // Proof B is on-curve-only: subgroup soundness comes from the randomized
     // batch coefficients (the transcript commits to B before the coefficients
     // exist).
     let mut points_ok = true;
-    points_ok &= is_on_curve_bn254(&parsed.vk_alpha_g1);
+    points_ok &= g1_is_valid(&parsed.vk_alpha_g1);
     points_ok &= g2_is_valid(&parsed.vk_beta_g2);
     points_ok &= g2_is_valid(&parsed.vk_gamma_g2);
     points_ok &= g2_is_valid(&parsed.vk_delta_g2);
     for p in &parsed.vk_gamma_abc {
-        points_ok &= is_on_curve_bn254(p);
+        points_ok &= g1_is_valid(p);
     }
     for i in 0..parsed.nproofs {
-        points_ok &= is_on_curve_bn254(&parsed.proofs[i].a);
+        points_ok &= g1_is_valid(&parsed.proofs[i].a);
         points_ok &= is_on_curve_twist_bn254(&parsed.proofs[i].b);
-        points_ok &= is_on_curve_bn254(&parsed.proofs[i].c);
+        points_ok &= g1_is_valid(&parsed.proofs[i].c);
     }
     if !points_ok {
         *fail_mask |= FAIL_CURVE;

@@ -15,7 +15,7 @@ mod kzg;
 pub use circuit_primitives::{babyjubjub, bn254, bn254_fr, bls_fr, hash, poseidon, results, smt, types};
 
 use crate::types::{FrRaw, ZERO_FR};
-use ziskos::io::{commit_slice, read_input_slice};
+use ziskos::io::{commit_slice, read_slice};
 
 /// Extract the Ethereum address (uint160) from a packed census leaf.
 /// Census leaves encode `PackAddressWeight(address, weight) = (address << 88) | weight`.
@@ -65,7 +65,7 @@ fn write_fr_output(out: &mut [u32; 46], base: usize, v: &FrRaw) {
 }
 
 fn main() {
-    let input = read_input_slice();
+    let input = read_slice();
     let mut fail_mask: u32 = 0;
 
     // INPUT PARSING

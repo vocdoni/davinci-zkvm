@@ -22,7 +22,7 @@
 //! skips reduction and requires the caller to guarantee the value is already `< p`.
 
 use ziskos::syscalls::{syscall_arith256_mod, SyscallArith256ModParams};
-use ziskos::zisklib::fcall_uint256_inv_mod;
+use ziskos::zisklib::{fcall_uint256_inv_mod, ModInvResult};
 
 /// BLS12-381 Fr modulus:
 ///   p = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001
@@ -172,7 +172,7 @@ pub fn inv(a: &BlsFrRaw) -> BlsFrRaw {
         return ZERO;
     }
     match fcall_uint256_inv_mod(a, &BLS_FR_MOD) {
-        Some(result) if muladd(a, &result, &ZERO) == ONE => result,
+        ModInvResult::Inverse(result) if muladd(a, &result, &ZERO) == ONE => result,
         _ => ZERO,
     }
 }

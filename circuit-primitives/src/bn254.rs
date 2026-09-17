@@ -1,7 +1,7 @@
 //! BN254 curve helper operations used by the Groth16 verifier.
 
 use crate::types::*;
-use ziskos::zisklib::{is_on_curve_twist_bn254, is_on_subgroup_twist_bn254};
+use ziskos::zisklib::{is_on_curve_bn254, is_on_curve_twist_bn254, is_on_subgroup_twist_bn254};
 
 /// Identity element of G1 (point at infinity, all-zero encoding).
 /// Matches zisklib's `G1_IDENTITY`/`G2_IDENTITY`: the pairing precompile
@@ -35,6 +35,24 @@ pub fn g2_is_valid(p: &G2) -> bool {
         return false;
     }
     is_on_curve_twist_bn254(p) && is_on_subgroup_twist_bn254(p)
+}
+
+/// Returns `true` if `p` is on the BN254 G1 curve and is not the identity.
+///
+/// The identity check is ours to make: ZisK 1.3 changed `is_on_curve_bn254` to
+/// end in `eq(lhs, rhs) || eq(p, G1_IDENTITY)`, so it now accepts the all-zero
+/// encoding, where v0.18's plain `eq(lhs, rhs)` rejected it (0 != 3). Every G1
+/// point we validate feeds the batch MSM, and `add_bn254` requires on-curve,
+/// non-identity, canonical inputs; an identity term is also skipped outright by
+/// the pairing precompile, which is exactly the degree of freedom the batch
+/// random linear combination exists to remove.
+///
+/// No subgroup check: BN254 G1 has prime order, so on-curve implies in-group.
+pub fn g1_is_valid(p: &G1) -> bool {
+    if *p == g1_identity() {
+        return false;
+    }
+    is_on_curve_bn254(p)
 }
 
 /// Returns `true` if two GT elements are equal.

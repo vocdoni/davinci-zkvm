@@ -6,7 +6,7 @@
 // `verify_zisk_proof_c`, checks state-root continuity, and commits a digest
 // binding the whole chain. The final fold gets a PLONK wrap host-side.
 //
-// Input frames (each one a `read_input_slice` frame):
+// Input frames (each one a `read_slice` frame):
 //   1. header: 12 u64 LE = [magic, mode, has_prev, n_batch, batch_vk[4], fold_vk[4]]
 //   2. config: 200 bytes = process_id(32 LE) | ballot_mode(32 LE) | enc_x(32 LE)
 //      | enc_y(32 LE) | census_origin(u64 LE) | census_root(32 LE) |
@@ -22,9 +22,12 @@
 //   n_levels    u64       SMT depth (siblings padded to this length)
 //   siblings    n x 32B   inclusion siblings for the Results leaf (key 0x04)
 //
-// Proof blob layout (u64 LE words, `get_proof_bytes()` from ZisK v0.18.0):
-//   [minimal][n_publics=68][program_vk(4)][publics(64)][proof][zisk_vk(4)]
-// Each publics word holds one u32 of the inner guest's output registers.
+// Proof blob layout (u64 LE words, `get_proof_bytes()` from ZisK 1.3.0-alpha):
+//   [minimal][n_publics=69][flag][program_vk(4)][publics(64)][proof]
+//   [zisk_vk(4)][hash_tag]
+// Each publics word holds one u32 of the inner guest's output registers. Only
+// uncompressed proofs are accepted, so the is_vadcop_final_proof flag is always
+// present and n_publics is 69.
 //
 // Output digest (53 u32, committed as LE bytes):
 //   [0]      magic "DAG1"
@@ -55,30 +58,43 @@ use circuit_primitives::hash::{hash_enc_key, sha256_once};
 use circuit_primitives::results::ballot_leaf_hash;
 use circuit_primitives::smt::{get_bit, le_to_fr, leaf_hash, node_hash, verify_inclusion};
 use circuit_primitives::types::{FrRaw, ZERO_FR};
-use ziskos::io::{commit_slice, read_input_slice};
+use ziskos::io::{commit_slice, read_slice};
 
 const AGG_MAGIC_IN: u64 = u64::from_le_bytes(*b"DAVAGGR!");
 const AGG_MAGIC_OUT: u32 = u32::from_le_bytes(*b"DAG1");
 const MODE_FOLD: u64 = 1;
 const MODE_FINALIZE: u64 = 2;
 
-// Universal ZisK vadcop-final verification key (rootC) for v0.18.0. Bound to
-// the ZisK release, not to any guest program. Every inner proof's zisk_vk
-// must match, otherwise it was produced by a different prover stack.
-const ROOTC: [u64; 4] = [
-    0xcf2a309856f107b1,
-    0x43836ada112806da,
-    0x71ae11567fa3f2d2,
-    0x050baba5381c7b7d,
+// Universal ZisK vadcop-final setup key for the pinned 1.3.0-alpha release.
+// Bound to the ZisK proving key, not to any guest program, and passed to
+// `verify_zisk_proof_c` as `expected_setup_vk`. It MUST stay a compile-time
+// constant: read from input it would be self-keyed and authenticate nothing.
+// Refreeze from provingKey/zisk/vadcop_final/vadcop_final.verkey.json whenever
+// the ZisK release or its setup changes.
+const SETUP_VK: [u64; 4] = [
+    0x05006517b6ccde5d,
+    0xa4d890587ba62845,
+    0xb5af8a307c00e87d,
+    0x4b9d05099b16dc80,
 ];
 
 const CONFIG_LEN: usize = 200;
 const DIGEST_WORDS: usize = 53;
 
-// Proof blob word offsets.
-const BLOB_VK_OFF: usize = 2; // program_vk at words [2..6]
-const BLOB_PUBS_OFF: usize = 6; // publics at words [6..70]
+// Proof blob word layout (ZisK 1.3):
+//   [minimal(1)][n_publics(1)][flag|vk(4)|inputs(64)][proof][zisk_vk(4)][tag(1)]
+// Only uncompressed guest proofs are accepted, so the is_vadcop_final_proof
+// flag is present at word 2 and n_publics is 69. A minimal proof would be
+// flag-free with n_publics 68 and different offsets, so it is rejected rather
+// than silently misparsed.
+const BLOB_FLAG_OFF: usize = 2; // is_vadcop_final_proof
+const BLOB_VK_OFF: usize = 3; // program_vk at words [3..7]
+const BLOB_PUBS_OFF: usize = 7; // publics at words [7..71]
 const BLOB_PUBS_WORDS: usize = 64;
+/// Tail words after the STARK payload: [zisk_vk(4)][hash_tag(1)].
+const BLOB_TAIL_WORDS: usize = 5;
+/// n_publics for an uncompressed proof: flag + program_vk(4) + inputs(64).
+const BLOB_N_PUBLICS: u64 = 69;
 
 struct Config {
     process_id: FrRaw,
@@ -251,24 +267,53 @@ fn bytes32_to_u32x8(b: &[u8; 32]) -> [u32; 8] {
     out
 }
 
-/// Verify a proof blob in-guest and return (program_vk, publics as u32, zisk_vk).
-fn verify_blob(blob: &[u8], what: &str) -> ([u64; 4], [u32; BLOB_PUBS_WORDS], [u64; 4]) {
+/// Verify a proof blob in-guest against the pinned setup key and the caller's
+/// expected program vk, returning (program_vk, publics as u32, zisk_vk).
+///
+/// `expected_program_vk` is the runtime-bound batch or fold vk. It is safe to
+/// take it from input because it is bound into `config_commitment` and the
+/// final verifier pins both vks against the published release: an accepted
+/// chain therefore proves every link ran the approved programs. The setup key
+/// is a compile-time constant, which is what makes the check authoritative.
+fn verify_blob(
+    blob: &[u8],
+    expected_program_vk: &[u64; 4],
+    what: &str,
+) -> ([u64; 4], [u32; BLOB_PUBS_WORDS], [u64; 4]) {
     assert!(
-        blob.len().is_multiple_of(8) && blob.len() / 8 > BLOB_PUBS_OFF + BLOB_PUBS_WORDS + 4,
+        blob.len().is_multiple_of(8)
+            && blob.len() / 8 > BLOB_PUBS_OFF + BLOB_PUBS_WORDS + BLOB_TAIL_WORDS,
         "{}: blob too short",
         what
     );
-    let valid = unsafe { ziskos::zisklib::verify_zisk_proof_c(blob.as_ptr(), blob.len()) };
+    let valid = unsafe {
+        ziskos::zisklib::verify_zisk_proof_c(
+            blob.as_ptr(),
+            blob.len(),
+            SETUP_VK.as_ptr() as *const u8,
+            core::mem::size_of_val(&SETUP_VK),
+            expected_program_vk.as_ptr() as *const u8,
+            core::mem::size_of_val(expected_program_vk),
+        )
+    };
     assert!(valid, "{}: STARK verification failed", what);
 
     let word = |i: usize| u64::from_le_bytes(blob[i * 8..i * 8 + 8].try_into().unwrap());
     let n_words = blob.len() / 8;
 
+    // Pin the accepted proof shape: an uncompressed guest proof carrying the
+    // is_vadcop_final_proof flag. Anything else (a minimal proof, or a native
+    // recurser output whose program vk is a recursion domain rather than a ROM
+    // identity) has a different layout and is refused outright.
+    assert_eq!(word(0), 0, "{}: minimal proofs not accepted", what);
+    assert_eq!(word(1), BLOB_N_PUBLICS, "{}: unexpected n_publics", what);
+    assert_eq!(word(BLOB_FLAG_OFF), 1, "{}: not a leaf proof", what);
+
     let mut program_vk = [0u64; 4];
     let mut zisk_vk = [0u64; 4];
     for i in 0..4 {
         program_vk[i] = word(BLOB_VK_OFF + i);
-        zisk_vk[i] = word(n_words - 4 + i);
+        zisk_vk[i] = word(n_words - BLOB_TAIL_WORDS + i);
     }
     let mut publics = [0u32; BLOB_PUBS_WORDS];
     for i in 0..BLOB_PUBS_WORDS {
@@ -285,7 +330,7 @@ fn verify_blob(blob: &[u8], what: &str) -> ([u64; 4], [u32; BLOB_PUBS_WORDS], [u
 }
 
 fn main() {
-    let header = read_input_slice();
+    let header = read_slice();
     assert_eq!(header.len(), 12 * 8, "bad header length");
     let hword = |i: usize| u64::from_le_bytes(header[i * 8..i * 8 + 8].try_into().unwrap());
     assert_eq!(hword(0), AGG_MAGIC_IN, "bad input magic");
@@ -308,7 +353,7 @@ fn main() {
         assert_eq!(n_batch, 0, "finalize takes no batch proofs");
     }
 
-    let config_frame = read_input_slice();
+    let config_frame = read_slice();
     let cfg = parse_config(&config_frame);
     let commitment = config_commitment(&config_frame, &batch_vk, &fold_vk);
     let commitment_u32 = bytes32_to_u32x8(&commitment);
@@ -324,10 +369,10 @@ fn main() {
     let mut state_root: [u32; 8];
 
     if has_prev == 1 {
-        let blob = read_input_slice();
-        let (pvk, pubs, zvk) = verify_blob(&blob, "prev fold");
+        let blob = read_slice();
+        let (pvk, pubs, zvk) = verify_blob(&blob, &fold_vk, "prev fold");
         assert_eq!(pvk, fold_vk, "prev fold: program_vk != fold_vk");
-        assert_eq!(zvk, ROOTC, "prev fold: zisk_vk != rootC");
+        assert_eq!(zvk, SETUP_VK, "prev fold: zisk_vk != setup vk");
         assert_eq!(pubs[0], AGG_MAGIC_OUT, "prev fold: bad digest magic");
         assert_eq!(pubs[1], MODE_FOLD as u32, "prev fold: not a fold digest");
         assert_eq!(
@@ -351,10 +396,10 @@ fn main() {
 
     // Fold the batch proofs, enforcing state-root continuity.
     for b in 0..n_batch {
-        let blob = read_input_slice();
-        let (pvk, pubs, zvk) = verify_blob(&blob, "batch");
+        let blob = read_slice();
+        let (pvk, pubs, zvk) = verify_blob(&blob, &batch_vk, "batch");
         assert_eq!(pvk, batch_vk, "batch {}: program_vk != batch_vk", b);
-        assert_eq!(zvk, ROOTC, "batch {}: zisk_vk != rootC", b);
+        assert_eq!(zvk, SETUP_VK, "batch {}: zisk_vk != setup vk", b);
         assert_eq!(
             pubs[0], 1,
             "batch {}: circuit reported failure (ok != 1)",
@@ -382,7 +427,7 @@ fn main() {
     if mode == MODE_FOLD {
         step_count = step_count.checked_add(1).unwrap();
     } else {
-        verify_results(&read_input_slice(), &cfg, &state_root, &mut results_u32);
+        verify_results(&read_slice(), &cfg, &state_root, &mut results_u32);
     }
 
     let mut digest = [0u32; DIGEST_WORDS];

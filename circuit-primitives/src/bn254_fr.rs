@@ -19,7 +19,7 @@
 //! representation used by `types::FrRaw`.
 
 use ziskos::syscalls::{syscall_arith256_mod, SyscallArith256ModParams};
-use ziskos::zisklib::fcall_uint256_inv_mod;
+use ziskos::zisklib::{fcall_uint256_inv_mod, ModInvResult};
 
 /// BN254 scalar field modulus (Fr):
 ///   p = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
@@ -125,7 +125,7 @@ pub fn inv(a: &BnFr) -> BnFr {
         return ZERO;
     }
     match fcall_uint256_inv_mod(a, &BN254_FR_MOD) {
-        Some(result) if muladd(a, &result, &ZERO) == ONE => result,
+        ModInvResult::Inverse(result) if muladd(a, &result, &ZERO) == ONE => result,
         _ => ZERO,
     }
 }

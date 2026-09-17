@@ -73,11 +73,42 @@ impl ChainConfig {
 }
 
 // Minimal bincode mirrors of ZisK's `common::proof::Proof`. Only the layout
-// matters; see upstream `common/src/proof.rs` (v0.18.0).
+// matters; see upstream `common/src/proof.rs` (1.3.0-alpha).
+
+/// Hash families indexed by the tag word written into a serialized proof.
+/// Upstream `verifier::HASH_TAGS` — append-only, position is the wire value.
+const HASH_TAGS: [&str; 3] = ["Poseidon1", "Poseidon2", "blake3"];
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+enum HashMode {
+    Poseidon1,
+    Poseidon2,
+    Blake3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+enum VadcopKind {
+    Final,
+    Recurser,
+    Minimal,
+}
+
+impl VadcopKind {
+    /// The `is_vadcop_final_proof` value prepended to the STARK publics, or
+    /// `None` for minimal proofs whose circuit strips the flag.
+    fn flag(self) -> Option<u64> {
+        match self {
+            VadcopKind::Final => Some(1),
+            VadcopKind::Recurser => Some(0),
+            VadcopKind::Minimal => None,
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ProgramVK {
     vk: Vec<u64>,
+    hash_mode: HashMode,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -128,18 +159,23 @@ enum ProofBody {
     Vadcop {
         proof: Vec<u64>,
         zisk_vk: Vec<u64>,
-        minimal: bool,
+        kind: VadcopKind,
+        hash: String,
+        /// Flag-free `[program_vk(4) | inputs(64)]`, always 68 words.
+        publics_full: Vec<u64>,
     },
     Plonk {
         proof_bytes: Vec<u8>,
         plonk_vk: Box<PlonkVkBlob>,
+        publics: PublicValues,
+        publics_full: Vec<u64>,
+        rootc: Vec<u64>,
     },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Proof {
     body: ProofBody,
-    publics: PublicValues,
     program_vk: ProgramVK,
 }
 
@@ -161,38 +197,56 @@ pub fn vadcop_blob_from_proof_bin(bytes: &[u8]) -> Result<VadcopBlob> {
         bincode::serde::decode_from_slice(bytes, bincode::config::standard())
             .map_err(|e| anyhow::anyhow!("bincode-decode proof.bin: {}", e))?;
 
-    let (proof_words, zisk_vk, minimal) = match proof.body {
+    let (proof_words, zisk_vk, kind, hash, publics_full) = match proof.body {
         ProofBody::Vadcop {
             proof,
             zisk_vk,
-            minimal,
-        } => (proof, zisk_vk, minimal),
+            kind,
+            hash,
+            publics_full,
+        } => (proof, zisk_vk, kind, hash, publics_full),
         ProofBody::Plonk { .. } => bail!("proof.bin holds a PLONK proof; need a Vadcop STARK"),
     };
 
-    if proof.program_vk.vk.len() != PROGRAM_VK_LEN {
-        bail!("bad program_vk len {}", proof.program_vk.vk.len());
-    }
     if zisk_vk.len() != PROGRAM_VK_LEN {
         bail!("bad zisk_vk len {}", zisk_vk.len());
     }
-    if proof.publics.data.len() != ZISK_PUBLICS * 4 {
-        bail!("bad publics len {}", proof.publics.data.len());
+    // publics_full is the committed `[program_vk | inputs]`; upstream treats the
+    // separate program_vk copy as untrusted metadata, so read the vk from here.
+    if publics_full.len() != PROGRAM_VK_LEN + ZISK_PUBLICS {
+        bail!("bad publics_full len {}", publics_full.len());
     }
+    let program_vk: [u64; PROGRAM_VK_LEN] = publics_full[..PROGRAM_VK_LEN].try_into().unwrap();
 
     let mut publics = [0u32; ZISK_PUBLICS];
-    for (i, c) in proof.publics.data.chunks_exact(4).enumerate() {
-        publics[i] = u32::from_le_bytes(c.try_into().unwrap());
+    for (i, w) in publics_full[PROGRAM_VK_LEN..].iter().enumerate() {
+        publics[i] = *w as u32;
     }
 
-    let n_publics = PROGRAM_VK_LEN + ZISK_PUBLICS;
-    let mut words: Vec<u64> = Vec::with_capacity(2 + n_publics + proof_words.len() + zisk_vk.len());
-    words.push(minimal as u64);
+    // The serialized STARK publics carry the is_vadcop_final_proof flag, since
+    // the Fiat-Shamir transcript is over the full vector; minimal proofs are
+    // flag-free. Upstream: VadcopKind::stark_publics.
+    let stark_publics: Vec<u64> = match kind.flag() {
+        Some(flag) => core::iter::once(flag).chain(publics_full).collect(),
+        None => publics_full,
+    };
+    // Routing metadata only: a wrong family fails against the expected vk.
+    let tag = HASH_TAGS
+        .iter()
+        .position(|&f| f == hash)
+        .ok_or_else(|| anyhow::anyhow!("unrecognized proof hash family {hash:?}"))?
+        as u64;
+
+    // Format: [minimal(1)][n_publics(1)][flag?|vk|inputs][proof][zisk_vk(4)][tag(1)]
+    let n_publics = stark_publics.len();
+    let mut words: Vec<u64> =
+        Vec::with_capacity(3 + n_publics + proof_words.len() + zisk_vk.len());
+    words.push((kind == VadcopKind::Minimal) as u64);
     words.push(n_publics as u64);
-    words.extend_from_slice(&proof.program_vk.vk);
-    words.extend(publics.iter().map(|&p| p as u64));
+    words.extend_from_slice(&stark_publics);
     words.extend_from_slice(&proof_words);
     words.extend_from_slice(&zisk_vk);
+    words.push(tag);
 
     let mut out = Vec::with_capacity(words.len() * 8);
     for w in &words {
@@ -201,7 +255,7 @@ pub fn vadcop_blob_from_proof_bin(bytes: &[u8]) -> Result<VadcopBlob> {
 
     Ok(VadcopBlob {
         bytes: out,
-        program_vk: proof.program_vk.vk.try_into().unwrap(),
+        program_vk,
         zisk_vk: zisk_vk.try_into().unwrap(),
         publics,
     })

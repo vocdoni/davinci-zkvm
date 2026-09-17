@@ -270,7 +270,6 @@ func findGenInputBin(t *testing.T) string {
 	}
 	// Derive from ELF path or cwd.
 	candidates := []string{
-		"./target/release/gen-input",
 		"../../../../target/release/gen-input",
 		"../../../target/release/gen-input",
 	}

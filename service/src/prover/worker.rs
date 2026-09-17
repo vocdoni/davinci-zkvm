@@ -240,9 +240,10 @@ async fn run_prove(config: &Config, task: &ProveTask, minimal_memory: bool) -> a
         config.proving_key_path.display().to_string(),
         "--output".to_string(),
         proof_output_path.display().to_string(),
-        "--emulator".to_string(),
+        // ZisK 1.3 dropped --emulator (the Rust emulator is the default now;
+        // --asm opts into the assembly one) and renamed --verify-proofs.
         "--gpu".to_string(),
-        "--verify-proofs".to_string(),
+        "--verify-proof".to_string(),
     ];
     if task.plonk {
         zisk_args.push("--proving-key-plonk".to_string());
