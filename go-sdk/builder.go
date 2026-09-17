@@ -108,6 +108,9 @@ func (b *ProveRequestBuilder) Build() (*ProveRequest, error) {
 	if len(b.proofs) == 0 {
 		return nil, fmt.Errorf("at least one proof is required")
 	}
+	if len(b.proofs) > MaxBatchSize {
+		return nil, fmt.Errorf("batch size %d exceeds MaxBatchSize (%d)", len(b.proofs), MaxBatchSize)
+	}
 	if len(b.proofs) != len(b.publicInputs) {
 		return nil, fmt.Errorf("proofs count (%d) must match public inputs count (%d)",
 			len(b.proofs), len(b.publicInputs))

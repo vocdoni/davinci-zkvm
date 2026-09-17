@@ -41,13 +41,13 @@ pub const MAX_BATCH_SIZE: usize = 128;
 /// as understood by Arbo; the circuit converts them internally for SHA-256 hashing.
 #[derive(Debug, Clone)]
 pub struct SmtEntry {
-    pub old_root:  [u64; 4],
-    pub new_root:  [u64; 4],
-    pub old_key:   [u64; 4],
+    pub old_root: [u64; 4],
+    pub new_root: [u64; 4],
+    pub old_key: [u64; 4],
     pub old_value: [u64; 4],
     /// `true` when the old leaf slot was empty (pure insert into unoccupied position).
-    pub is_old0:   bool,
-    pub new_key:   [u64; 4],
+    pub is_old0: bool,
+    pub new_key: [u64; 4],
     pub new_value: [u64; 4],
     /// `true` for insert (or delete when also `fnc1=true`).
     pub fnc0: bool,
@@ -62,8 +62,7 @@ pub struct SmtEntry {
 /// order (`BigIntToBytes` = LE), so the hex bytes map directly to LE words.
 pub fn hex32_to_smt_fr(s: &str) -> Result<[u64; 4]> {
     let hex = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(hex)
-        .with_context(|| format!("invalid hex: {}", s))?;
+    let bytes = hex::decode(hex).with_context(|| format!("invalid hex: {}", s))?;
     if bytes.len() != 32 {
         bail!("expected 32-byte hex, got {} bytes: {}", bytes.len(), s);
     }
@@ -74,8 +73,6 @@ pub fn hex32_to_smt_fr(s: &str) -> Result<[u64; 4]> {
     }
     Ok(out)
 }
-
-
 
 /// Full DAVINCI state-transition data for binary serialization.
 /// Matches the `StateTransitionData` JSON type in go-sdk/types.go.
@@ -134,7 +131,10 @@ pub fn write_state_block(sd: &StateData) -> Result<Vec<u8>> {
 
     // Process read-proofs: write n (0 or 5), then n_levels + entries only when n>0.
     if !sd.process_proofs.is_empty() && sd.process_proofs.len() != 5 {
-        bail!("process_proofs must have exactly 5 entries, got {}", sd.process_proofs.len());
+        bail!(
+            "process_proofs must have exactly 5 entries, got {}",
+            sd.process_proofs.len()
+        );
     }
     buf.extend_from_slice(&(sd.process_proofs.len() as u64).to_le_bytes()); // 0 or 5
     if !sd.process_proofs.is_empty() {
@@ -155,24 +155,44 @@ pub fn write_state_block(sd: &StateData) -> Result<Vec<u8>> {
         buf.extend_from_slice(&1u64.to_le_bytes()); // has_ballot_data = true
 
         if bp.old_results.len() != BALLOT_FIELDS {
-            bail!("old_results must have {} elements, got {}", BALLOT_FIELDS, bp.old_results.len());
+            bail!(
+                "old_results must have {} elements, got {}",
+                BALLOT_FIELDS,
+                bp.old_results.len()
+            );
         }
-        for fr in &bp.old_results { write_u64_slice(&mut buf, fr); }
+        for fr in &bp.old_results {
+            write_u64_slice(&mut buf, fr);
+        }
 
         buf.extend_from_slice(&(bp.voter_ballots.len() as u64).to_le_bytes());
         for (i, vb) in bp.voter_ballots.iter().enumerate() {
             if vb.len() != BALLOT_FIELDS {
-                bail!("voter_ballots[{}] must have {} elements, got {}", i, BALLOT_FIELDS, vb.len());
+                bail!(
+                    "voter_ballots[{}] must have {} elements, got {}",
+                    i,
+                    BALLOT_FIELDS,
+                    vb.len()
+                );
             }
-            for fr in vb { write_u64_slice(&mut buf, fr); }
+            for fr in vb {
+                write_u64_slice(&mut buf, fr);
+            }
         }
 
         buf.extend_from_slice(&(bp.overwritten_ballots.len() as u64).to_le_bytes());
         for (i, ob) in bp.overwritten_ballots.iter().enumerate() {
             if ob.len() != BALLOT_FIELDS {
-                bail!("overwritten_ballots[{}] must have {} elements, got {}", i, BALLOT_FIELDS, ob.len());
+                bail!(
+                    "overwritten_ballots[{}] must have {} elements, got {}",
+                    i,
+                    BALLOT_FIELDS,
+                    ob.len()
+                );
             }
-            for fr in ob { write_u64_slice(&mut buf, fr); }
+            for fr in ob {
+                write_u64_slice(&mut buf, fr);
+            }
         }
     } else {
         buf.extend_from_slice(&0u64.to_le_bytes()); // has_ballot_data = false
@@ -185,7 +205,12 @@ fn write_smt_chain(buf: &mut Vec<u8>, entries: &[SmtEntry]) -> Result<()> {
     let n_levels = entries.first().map(|e| e.siblings.len()).unwrap_or(0);
     for (i, e) in entries.iter().enumerate() {
         if e.siblings.len() != n_levels {
-            bail!("chain entry {} has {} siblings, expected {}", i, e.siblings.len(), n_levels);
+            bail!(
+                "chain entry {} has {} siblings, expected {}",
+                i,
+                e.siblings.len(),
+                n_levels
+            );
         }
     }
     buf.extend_from_slice(&n.to_le_bytes());
@@ -226,12 +251,12 @@ fn write_smt_entry_body(buf: &mut Vec<u8>, e: &SmtEntry) {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct EcdsaSig {
-    pub public_key_x: String,  // 0x-prefixed 32-byte big-endian hex
-    pub public_key_y: String,  // 0x-prefixed 32-byte big-endian hex
-    pub signature_r: String,   // 0x-prefixed 32-byte big-endian hex
-    pub signature_s: String,   // 0x-prefixed 32-byte big-endian hex
+    pub public_key_x: String, // 0x-prefixed 32-byte big-endian hex
+    pub public_key_y: String, // 0x-prefixed 32-byte big-endian hex
+    pub signature_r: String,  // 0x-prefixed 32-byte big-endian hex
+    pub signature_s: String,  // 0x-prefixed 32-byte big-endian hex
     pub vote_id: u64,
-    pub address: String,       // decimal uint160
+    pub address: String, // decimal uint160
     // private_key is unused by the circuit (debug only).
     #[serde(default)]
     pub private_key: String,
@@ -266,14 +291,28 @@ pub struct SnarkJsVk {
 
 #[derive(Clone, Copy, Debug)]
 enum G2Mode {
-    C0C1, C1C0, C0C1YSwap, C1C0YSwap,
-    XYSwapC0C1, XYSwapC1C0, XYSwapC0C1YSwap, XYSwapC1C0YSwap,
+    C0C1,
+    C1C0,
+    C0C1YSwap,
+    C1C0YSwap,
+    XYSwapC0C1,
+    XYSwapC1C0,
+    XYSwapC0C1YSwap,
+    XYSwapC1C0YSwap,
 }
 
 impl G2Mode {
     fn all() -> [G2Mode; 8] {
-        [G2Mode::C0C1, G2Mode::C1C0, G2Mode::C0C1YSwap, G2Mode::C1C0YSwap,
-         G2Mode::XYSwapC0C1, G2Mode::XYSwapC1C0, G2Mode::XYSwapC0C1YSwap, G2Mode::XYSwapC1C0YSwap]
+        [
+            G2Mode::C0C1,
+            G2Mode::C1C0,
+            G2Mode::C0C1YSwap,
+            G2Mode::C1C0YSwap,
+            G2Mode::XYSwapC0C1,
+            G2Mode::XYSwapC1C0,
+            G2Mode::XYSwapC0C1YSwap,
+            G2Mode::XYSwapC1C0YSwap,
+        ]
     }
 }
 
@@ -283,11 +322,15 @@ fn parse_big_decimal(s: &str) -> Result<BigUint> {
 
 fn big_to_u64x4_le(x: &BigUint) -> Result<[u64; 4]> {
     let bytes = x.to_bytes_le();
-    if bytes.len() > 32 { bail!("integer does not fit in 32 bytes"); }
+    if bytes.len() > 32 {
+        bail!("integer does not fit in 32 bytes");
+    }
     let mut out = [0u8; 32];
     out[..bytes.len()].copy_from_slice(&bytes);
     let mut limbs = [0u64; 4];
-    for i in 0..4 { limbs[i] = u64::from_le_bytes(out[i * 8..(i + 1) * 8].try_into().unwrap()); }
+    for i in 0..4 {
+        limbs[i] = u64::from_le_bytes(out[i * 8..(i + 1) * 8].try_into().unwrap());
+    }
     Ok(limbs)
 }
 
@@ -302,19 +345,28 @@ fn fr_from_dec(s: &str) -> Result<Fr> {
 }
 
 fn parse_g1(v: &[String; 3]) -> Result<G1Affine> {
-    if v[2] == "0" { return Ok(G1Affine::identity()); }
+    if v[2] == "0" {
+        return Ok(G1Affine::identity());
+    }
     let x = fq_from_dec(&v[0])?;
     let y = fq_from_dec(&v[1])?;
     let p = G1Affine::new_unchecked(x, y);
-    if !p.is_on_curve() || !p.is_in_correct_subgroup_assuming_on_curve() { bail!("invalid G1 point"); }
+    if !p.is_on_curve() || !p.is_in_correct_subgroup_assuming_on_curve() {
+        bail!("invalid G1 point");
+    }
     Ok(p)
 }
 
 fn parse_g2(v: &[[String; 2]; 3], mode: G2Mode) -> Result<G2Affine> {
-    if v[2][0] == "0" && v[2][1] == "0" { return Ok(G2Affine::identity()); }
+    if v[2][0] == "0" && v[2][1] == "0" {
+        return Ok(G2Affine::identity());
+    }
 
     let (x_pair, y_pair) = match mode {
-        G2Mode::XYSwapC0C1 | G2Mode::XYSwapC1C0 | G2Mode::XYSwapC0C1YSwap | G2Mode::XYSwapC1C0YSwap => (&v[1], &v[0]),
+        G2Mode::XYSwapC0C1
+        | G2Mode::XYSwapC1C0
+        | G2Mode::XYSwapC0C1YSwap
+        | G2Mode::XYSwapC1C0YSwap => (&v[1], &v[0]),
         _ => (&v[0], &v[1]),
     };
 
@@ -331,7 +383,9 @@ fn parse_g2(v: &[[String; 2]; 3], mode: G2Mode) -> Result<G2Affine> {
     };
 
     let p = G2Affine::new_unchecked(Fq2::new(x_c0, x_c1), Fq2::new(y_c0, y_c1));
-    if !p.is_on_curve() || !p.is_in_correct_subgroup_assuming_on_curve() { bail!("invalid G2 point"); }
+    if !p.is_on_curve() || !p.is_in_correct_subgroup_assuming_on_curve() {
+        bail!("invalid G2 point");
+    }
     Ok(p)
 }
 
@@ -340,21 +394,53 @@ fn build_vk(vk: &SnarkJsVk, mode: G2Mode) -> Result<VerifyingKey<Bn254>> {
     let beta2 = parse_g2(&vk.vk_beta_2, mode)?;
     let gamma2 = parse_g2(&vk.vk_gamma_2, mode)?;
     let delta2 = parse_g2(&vk.vk_delta_2, mode)?;
-    let ic = vk.ic.iter().map(parse_g1).collect::<Result<Vec<_>>>().context("failed to parse IC points")?;
-    if ic.is_empty() { bail!("vk IC must not be empty"); }
-    Ok(VerifyingKey { alpha_g1: alpha, beta_g2: beta2, gamma_g2: gamma2, delta_g2: delta2, gamma_abc_g1: ic })
+    let ic = vk
+        .ic
+        .iter()
+        .map(parse_g1)
+        .collect::<Result<Vec<_>>>()
+        .context("failed to parse IC points")?;
+    if ic.is_empty() {
+        bail!("vk IC must not be empty");
+    }
+    Ok(VerifyingKey {
+        alpha_g1: alpha,
+        beta_g2: beta2,
+        gamma_g2: gamma2,
+        delta_g2: delta2,
+        gamma_abc_g1: ic,
+    })
 }
 
 fn build_proof(p: &SnarkJsProof, mode: G2Mode) -> Result<Proof<Bn254>> {
-    Ok(Proof { a: parse_g1(&p.pi_a)?, b: parse_g2(&p.pi_b, mode)?, c: parse_g1(&p.pi_c)? })
+    Ok(Proof {
+        a: parse_g1(&p.pi_a)?,
+        b: parse_g2(&p.pi_b, mode)?,
+        c: parse_g1(&p.pi_c)?,
+    })
 }
 
-fn detect_mode(vk: &SnarkJsVk, first_proof: &SnarkJsProof, first_public: &[String]) -> Result<G2Mode> {
+fn detect_mode(
+    vk: &SnarkJsVk,
+    first_proof: &SnarkJsProof,
+    first_public: &[String],
+) -> Result<G2Mode> {
     for mode in G2Mode::all() {
-        let try_vk = match build_vk(vk, mode) { Ok(v) => v, Err(_) => continue };
-        let try_proof = match build_proof(first_proof, mode) { Ok(p) => p, Err(_) => continue };
-        let pubs = match first_public.iter().map(|s| fr_from_dec(s)).collect::<Result<Vec<_>>>() {
-            Ok(v) => v, Err(_) => continue,
+        let try_vk = match build_vk(vk, mode) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let try_proof = match build_proof(first_proof, mode) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let pubs = match first_public
+            .iter()
+            .map(|s| fr_from_dec(s))
+            .collect::<Result<Vec<_>>>()
+        {
+            Ok(v) => v,
+            Err(_) => continue,
         };
         let pvk = prepare_verifying_key(&try_vk);
         if Groth16::<Bn254>::verify_with_processed_vk(&pvk, &pubs, &try_proof).unwrap_or(false) {
@@ -365,8 +451,13 @@ fn detect_mode(vk: &SnarkJsVk, first_proof: &SnarkJsProof, first_public: &[Strin
 }
 
 fn parse_index(name: &str, prefix: &str) -> Option<usize> {
-    if !name.starts_with(prefix) || !name.ends_with(".json") { return None; }
-    name.strip_prefix(prefix)?.strip_suffix(".json")?.parse::<usize>().ok()
+    if !name.starts_with(prefix) || !name.ends_with(".json") {
+        return None;
+    }
+    name.strip_prefix(prefix)?
+        .strip_suffix(".json")?
+        .parse::<usize>()
+        .ok()
 }
 
 fn collect_paths(dir: &Path, prefix: &str) -> Result<Vec<PathBuf>> {
@@ -375,56 +466,97 @@ fn collect_paths(dir: &Path, prefix: &str) -> Result<Vec<PathBuf>> {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if parse_index(&name, prefix).is_some() { out.push(entry.path()); }
+        if parse_index(&name, prefix).is_some() {
+            out.push(entry.path());
+        }
     }
     out.sort_by(|a, b| {
-        let an = a.file_name().and_then(|n| n.to_str()).and_then(|n| parse_index(n, prefix)).unwrap_or(usize::MAX);
-        let bn = b.file_name().and_then(|n| n.to_str()).and_then(|n| parse_index(n, prefix)).unwrap_or(usize::MAX);
-        if an == bn { a.cmp(b) } else if an < bn { Ordering::Less } else { Ordering::Greater }
+        let an = a
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| parse_index(n, prefix))
+            .unwrap_or(usize::MAX);
+        let bn = b
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| parse_index(n, prefix))
+            .unwrap_or(usize::MAX);
+        if an == bn {
+            a.cmp(b)
+        } else if an < bn {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        }
     });
     Ok(out)
 }
 
-fn fq_to_u64x4(x: &Fq) -> [u64; 4] { x.into_bigint().0 }
-fn fr_to_u64x4(x: &Fr) -> [u64; 4] { x.into_bigint().0 }
+fn fq_to_u64x4(x: &Fq) -> [u64; 4] {
+    x.into_bigint().0
+}
+fn fr_to_u64x4(x: &Fr) -> [u64; 4] {
+    x.into_bigint().0
+}
 
 fn g1_to_raw(p: &G1Affine) -> [u64; 8] {
     // Infinity is encoded as all-zeros, matching zisklib's G1_IDENTITY (the
     // encoding the pairing precompile actually treats as 𝒪).
-    if p.is_zero() { return [0u64; 8]; }
+    if p.is_zero() {
+        return [0u64; 8];
+    }
     let x = fq_to_u64x4(&p.x);
     let y = fq_to_u64x4(&p.y);
     [x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3]]
 }
 
 fn g2_to_raw(p: &G2Affine) -> [u64; 16] {
-    if p.is_zero() { return [0u64; 16]; }
+    if p.is_zero() {
+        return [0u64; 16];
+    }
     let xc0 = fq_to_u64x4(&p.x.c0);
     let xc1 = fq_to_u64x4(&p.x.c1);
     let yc0 = fq_to_u64x4(&p.y.c0);
     let yc1 = fq_to_u64x4(&p.y.c1);
-    [xc0[0], xc0[1], xc0[2], xc0[3], xc1[0], xc1[1], xc1[2], xc1[3],
-     yc0[0], yc0[1], yc0[2], yc0[3], yc1[0], yc1[1], yc1[2], yc1[3]]
+    [
+        xc0[0], xc0[1], xc0[2], xc0[3], xc1[0], xc1[1], xc1[2], xc1[3], yc0[0], yc0[1], yc0[2],
+        yc0[3], yc1[0], yc1[1], yc1[2], yc1[3],
+    ]
 }
 
 fn write_u64_slice(buf: &mut Vec<u8>, words: &[u64]) {
-    for w in words { buf.extend_from_slice(&w.to_le_bytes()); }
+    for w in words {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
 }
 
 /// Generate ZisK binary input from a snarkjs VK and an array of proofs + public inputs.
 /// The `proofs` and `public_inputs` arrays must have the same length, which must be a
 /// power of two >= 2 up to MAX_BATCH_SIZE.
 /// Returns raw bytes suitable for writing to disk and passing to `cargo-zisk prove --input`.
-pub fn generate_input(vk: &SnarkJsVk, proofs_json: &[SnarkJsProof], public_inputs_json: &[Vec<String>], sigs: &[EcdsaSig]) -> Result<Vec<u8>> {
+pub fn generate_input(
+    vk: &SnarkJsVk,
+    proofs_json: &[SnarkJsProof],
+    public_inputs_json: &[Vec<String>],
+    sigs: &[EcdsaSig],
+) -> Result<Vec<u8>> {
     let num_proofs = proofs_json.len();
     if num_proofs < 2 || !num_proofs.is_power_of_two() || num_proofs > MAX_BATCH_SIZE {
-        bail!("num_proofs ({}) must be a power of two between 2 and {} (MAX_BATCH_SIZE)", num_proofs, MAX_BATCH_SIZE);
+        bail!(
+            "num_proofs ({}) must be a power of two between 2 and {} (MAX_BATCH_SIZE)",
+            num_proofs,
+            MAX_BATCH_SIZE
+        );
     }
     if proofs_json.len() != public_inputs_json.len() {
         bail!("proofs and public_inputs must have the same length");
     }
     if sigs.len() != num_proofs {
-        bail!("sigs length ({}) must equal num_proofs ({}); ECDSA signatures are mandatory", sigs.len(), num_proofs);
+        bail!(
+            "sigs length ({}) must equal num_proofs ({}); ECDSA signatures are mandatory",
+            sigs.len(),
+            num_proofs
+        );
     }
 
     // Detect G2 encoding mode from the first proof
@@ -438,9 +570,17 @@ pub fn generate_input(vk: &SnarkJsVk, proofs_json: &[SnarkJsProof], public_input
     // Parse and verify each proof
     let mut ark_proofs = Vec::with_capacity(num_proofs);
     let mut ark_public_inputs = Vec::with_capacity(num_proofs);
-    for (i, (proof_json, pubs_json)) in proofs_json.iter().zip(public_inputs_json.iter()).enumerate() {
-        let proof = build_proof(proof_json, mode).with_context(|| format!("proof[{}] parse failed", i))?;
-        let pubs = pubs_json.iter().map(|s| fr_from_dec(s)).collect::<Result<Vec<_>>>()
+    for (i, (proof_json, pubs_json)) in proofs_json
+        .iter()
+        .zip(public_inputs_json.iter())
+        .enumerate()
+    {
+        let proof =
+            build_proof(proof_json, mode).with_context(|| format!("proof[{}] parse failed", i))?;
+        let pubs = pubs_json
+            .iter()
+            .map(|s| fr_from_dec(s))
+            .collect::<Result<Vec<_>>>()
             .with_context(|| format!("public[{}] parse failed", i))?;
         if !Groth16::<Bn254>::verify_with_processed_vk(&pvk, &pubs, &proof)? {
             bail!("single-proof verification failed for proof[{}]", i);
@@ -456,21 +596,28 @@ pub fn generate_input(vk: &SnarkJsVk, proofs_json: &[SnarkJsProof], public_input
     let log_n = (num_proofs as f64).log2() as u64;
     let mut buf: Vec<u8> = Vec::new();
     // Header
-    write_u64_slice(&mut buf, &[MAGIC, log_n, num_proofs as u64, n_public as u64]);
+    write_u64_slice(
+        &mut buf,
+        &[MAGIC, log_n, num_proofs as u64, n_public as u64],
+    );
     // VK
     write_u64_slice(&mut buf, &g1_to_raw(&ark_vk.alpha_g1));
     write_u64_slice(&mut buf, &g2_to_raw(&ark_vk.beta_g2));
     write_u64_slice(&mut buf, &g2_to_raw(&ark_vk.gamma_g2));
     write_u64_slice(&mut buf, &g2_to_raw(&ark_vk.delta_g2));
     write_u64_slice(&mut buf, &[ark_vk.gamma_abc_g1.len() as u64]);
-    for p in &ark_vk.gamma_abc_g1 { write_u64_slice(&mut buf, &g1_to_raw(p)); }
+    for p in &ark_vk.gamma_abc_g1 {
+        write_u64_slice(&mut buf, &g1_to_raw(p));
+    }
     // Proofs
     write_u64_slice(&mut buf, &[num_proofs as u64]);
     for (proof, pubs) in ark_proofs.iter().zip(ark_public_inputs.iter()) {
         write_u64_slice(&mut buf, &g1_to_raw(&proof.a));
         write_u64_slice(&mut buf, &g2_to_raw(&proof.b));
         write_u64_slice(&mut buf, &g1_to_raw(&proof.c));
-        for x in pubs { write_u64_slice(&mut buf, &fr_to_u64x4(x)); }
+        for x in pubs {
+            write_u64_slice(&mut buf, &fr_to_u64x4(x));
+        }
     }
     // ECDSA signatures (one entry per proof): r[4] || s[4] || recid(u64 LE)
     // The public key is no longer shipped; the circuit recovers it from
@@ -486,19 +633,28 @@ pub fn generate_input(vk: &SnarkJsVk, proofs_json: &[SnarkJsProof], public_input
 
 /// Load proofs from a directory following snarkjs naming convention.
 /// Reads `proof_1.json..proof_N.json` and `public_1.json..public_N.json`.
-pub fn load_proofs_from_dir(dir: &Path, num_proofs: usize) -> Result<(Vec<SnarkJsProof>, Vec<Vec<String>>)> {
+pub fn load_proofs_from_dir(
+    dir: &Path,
+    num_proofs: usize,
+) -> Result<(Vec<SnarkJsProof>, Vec<Vec<String>>)> {
     let mut proof_paths = collect_paths(dir, "proof_")?;
     let mut public_paths = collect_paths(dir, "public_")?;
     if proof_paths.len() < num_proofs || public_paths.len() < num_proofs {
-        bail!("not enough proofs/publics in {} (need {})", dir.display(), num_proofs);
+        bail!(
+            "not enough proofs/publics in {} (need {})",
+            dir.display(),
+            num_proofs
+        );
     }
     proof_paths.truncate(num_proofs);
     public_paths.truncate(num_proofs);
 
-    let proofs = proof_paths.iter()
+    let proofs = proof_paths
+        .iter()
         .map(|p| read_json(p))
         .collect::<Result<Vec<SnarkJsProof>>>()?;
-    let publics = public_paths.iter()
+    let publics = public_paths
+        .iter()
         .map(|p| read_json::<Vec<String>>(p))
         .collect::<Result<Vec<_>>>()?;
     Ok((proofs, publics))
@@ -515,10 +671,18 @@ fn read_json<T: for<'de> serde::Deserialize<'de>>(path: &Path) -> Result<T> {
 pub fn load_signatures_from_dir(dir: &Path, num_proofs: usize) -> Result<Vec<EcdsaSig>> {
     let mut sig_paths = collect_paths(dir, "sig_")?;
     if sig_paths.is_empty() {
-        bail!("no sig_*.json files found in {}; ECDSA signatures are mandatory", dir.display());
+        bail!(
+            "no sig_*.json files found in {}; ECDSA signatures are mandatory",
+            dir.display()
+        );
     }
     if sig_paths.len() < num_proofs {
-        bail!("not enough sig files in {} (need {}, found {})", dir.display(), num_proofs, sig_paths.len());
+        bail!(
+            "not enough sig files in {} (need {}, found {})",
+            dir.display(),
+            num_proofs,
+            sig_paths.len()
+        );
     }
     sig_paths.truncate(num_proofs);
     sig_paths.iter().map(|p| read_json(p)).collect()
@@ -528,8 +692,7 @@ pub fn load_signatures_from_dir(dir: &Path, num_proofs: usize) -> Result<Vec<Ecd
 /// The circuit reads these words as little-endian 64-bit integers.
 fn hex32_to_u64x4(s: &str) -> Result<[u64; 4]> {
     let hex = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(hex)
-        .with_context(|| format!("invalid hex: {}", s))?;
+    let bytes = hex::decode(hex).with_context(|| format!("invalid hex: {}", s))?;
     if bytes.len() != 32 {
         bail!("expected 32-byte hex, got {} bytes: {}", bytes.len(), s);
     }
@@ -575,12 +738,18 @@ pub fn write_census_block(proofs: &[CensusProofData]) -> Result<Vec<u8>> {
     buf.extend_from_slice(&magic.to_le_bytes());
     buf.extend_from_slice(&(proofs.len() as u64).to_le_bytes());
     for p in proofs {
-        for w in &p.root     { buf.extend_from_slice(&w.to_le_bytes()); }
-        for w in &p.leaf     { buf.extend_from_slice(&w.to_le_bytes()); }
+        for w in &p.root {
+            buf.extend_from_slice(&w.to_le_bytes());
+        }
+        for w in &p.leaf {
+            buf.extend_from_slice(&w.to_le_bytes());
+        }
         buf.extend_from_slice(&p.index.to_le_bytes());
         buf.extend_from_slice(&(p.siblings.len() as u64).to_le_bytes());
         for s in &p.siblings {
-            for w in s { buf.extend_from_slice(&w.to_le_bytes()); }
+            for w in s {
+                buf.extend_from_slice(&w.to_le_bytes());
+            }
         }
     }
     Ok(buf)
@@ -588,7 +757,10 @@ pub fn write_census_block(proofs: &[CensusProofData]) -> Result<Vec<u8>> {
 
 /// Parse a 0x-prefixed hex big-endian string into CensusProofData.
 pub fn census_proof_from_hex(
-    root: &str, leaf: &str, index: u64, siblings: &[String],
+    root: &str,
+    leaf: &str,
+    index: u64,
+    siblings: &[String],
 ) -> Result<CensusProofData> {
     let root = hex32_to_u64x4(root)?;
     let leaf = hex32_to_u64x4(leaf)?;
@@ -596,7 +768,12 @@ pub fn census_proof_from_hex(
     for s in siblings {
         sibs.push(hex32_to_u64x4(s)?);
     }
-    Ok(CensusProofData { root, leaf, index, siblings: sibs })
+    Ok(CensusProofData {
+        root,
+        leaf,
+        index,
+        siblings: sibs,
+    })
 }
 
 /// One ElGamal ciphertext (C1.x, C1.y, C2.x, C2.y) in BN254 Fr as LE u64 limbs.
@@ -638,21 +815,43 @@ pub fn write_reenc_block(
     let mut buf = Vec::new();
     buf.extend_from_slice(&magic.to_le_bytes());
     buf.extend_from_slice(&(entries.len() as u64).to_le_bytes());
-    for w in &pub_key_x { buf.extend_from_slice(&w.to_le_bytes()); }
-    for w in &pub_key_y { buf.extend_from_slice(&w.to_le_bytes()); }
+    for w in &pub_key_x {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
+    for w in &pub_key_y {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
     for e in entries {
-        for w in &e.k { buf.extend_from_slice(&w.to_le_bytes()); }
+        for w in &e.k {
+            buf.extend_from_slice(&w.to_le_bytes());
+        }
         for ct in &e.original {
-            for w in &ct.c1x { buf.extend_from_slice(&w.to_le_bytes()); }
-            for w in &ct.c1y { buf.extend_from_slice(&w.to_le_bytes()); }
-            for w in &ct.c2x { buf.extend_from_slice(&w.to_le_bytes()); }
-            for w in &ct.c2y { buf.extend_from_slice(&w.to_le_bytes()); }
+            for w in &ct.c1x {
+                buf.extend_from_slice(&w.to_le_bytes());
+            }
+            for w in &ct.c1y {
+                buf.extend_from_slice(&w.to_le_bytes());
+            }
+            for w in &ct.c2x {
+                buf.extend_from_slice(&w.to_le_bytes());
+            }
+            for w in &ct.c2y {
+                buf.extend_from_slice(&w.to_le_bytes());
+            }
         }
         for ct in &e.reencrypted {
-            for w in &ct.c1x { buf.extend_from_slice(&w.to_le_bytes()); }
-            for w in &ct.c1y { buf.extend_from_slice(&w.to_le_bytes()); }
-            for w in &ct.c2x { buf.extend_from_slice(&w.to_le_bytes()); }
-            for w in &ct.c2y { buf.extend_from_slice(&w.to_le_bytes()); }
+            for w in &ct.c1x {
+                buf.extend_from_slice(&w.to_le_bytes());
+            }
+            for w in &ct.c1y {
+                buf.extend_from_slice(&w.to_le_bytes());
+            }
+            for w in &ct.c2x {
+                buf.extend_from_slice(&w.to_le_bytes());
+            }
+            for w in &ct.c2y {
+                buf.extend_from_slice(&w.to_le_bytes());
+            }
         }
     }
     Ok(buf)
@@ -687,8 +886,12 @@ pub fn write_kzg_block(d: &KzgData) -> Result<Vec<u8>> {
     let magic: u64 = u64::from_le_bytes(*b"KZGBLK!!");
     let mut buf = Vec::with_capacity(8 + 32 + 32 + 48 + 32 + 4096 * 32);
     buf.extend_from_slice(&magic.to_le_bytes());
-    for w in &d.process_id      { buf.extend_from_slice(&w.to_le_bytes()); }
-    for w in &d.root_hash_before { buf.extend_from_slice(&w.to_le_bytes()); }
+    for w in &d.process_id {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
+    for w in &d.root_hash_before {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
     buf.extend_from_slice(&d.commitment);
     buf.extend_from_slice(&d.y_claimed);
     buf.extend_from_slice(&d.blob);
@@ -755,11 +958,19 @@ pub fn write_csp_block(data: &CspBlockData) -> Result<Vec<u8>> {
     buf.extend_from_slice(&CSP_MAGIC.to_le_bytes());
     buf.extend_from_slice(&(data.entries.len() as u64).to_le_bytes());
     for entry in &data.entries {
-        for &w in &entry.r { buf.extend_from_slice(&w.to_le_bytes()); }
-        for &w in &entry.s { buf.extend_from_slice(&w.to_le_bytes()); }
+        for &w in &entry.r {
+            buf.extend_from_slice(&w.to_le_bytes());
+        }
+        for &w in &entry.s {
+            buf.extend_from_slice(&w.to_le_bytes());
+        }
         buf.extend_from_slice(&(entry.recid as u64).to_le_bytes());
-        for &w in &entry.voter_address { buf.extend_from_slice(&w.to_le_bytes()); }
-        for &w in &entry.weight { buf.extend_from_slice(&w.to_le_bytes()); }
+        for &w in &entry.voter_address {
+            buf.extend_from_slice(&w.to_le_bytes());
+        }
+        for &w in &entry.weight {
+            buf.extend_from_slice(&w.to_le_bytes());
+        }
         buf.extend_from_slice(&entry.index.to_le_bytes());
     }
     Ok(buf)

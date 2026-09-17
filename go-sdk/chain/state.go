@@ -72,11 +72,14 @@ type Vote struct {
 // accumulators. It mirrors exactly what the batch circuit verifies, so
 // every ApplyBatch output is provable as-is.
 type State struct {
-	cfg          Config
-	tree         *arbo.Tree
-	root         string // current root, 0x-prefixed arbo LE hex
+	cfg  Config
+	tree *arbo.Tree
+	root string // current root, 0x-prefixed arbo LE hex
+	// votedBallots is keyed by the full ballot tree key (census index +
+	// address bits), so two votes only count as an overwrite when they
+	// target the exact same leaf.
 	results      accumBallot
-	votedBallots map[int]*elgamal.Ballot
+	votedBallots map[uint64]*elgamal.Ballot
 	voters       uint64
 	overwrites   uint64
 }
@@ -87,6 +90,9 @@ type State struct {
 func NewState(cfg Config) (*State, error) {
 	if cfg.ProcessID == nil || cfg.BallotMode == nil || cfg.EncKey == nil || cfg.CensusRoot == nil || cfg.BallotVKHash == nil {
 		return nil, fmt.Errorf("chain.Config: ProcessID, BallotMode, EncKey, CensusRoot and BallotVKHash are required")
+	}
+	if nf := cfg.numFields(); nf < 1 || nf > davinci.NumFields {
+		return nil, fmt.Errorf("chain.Config: BallotMode declares num_fields = %d, want 1..%d", nf, davinci.NumFields)
 	}
 	tree, err := arbo.NewTree(arbo.Config{
 		Database:     memdb.New(),
@@ -130,7 +136,7 @@ func NewState(cfg Config) (*State, error) {
 		tree:         tree,
 		root:         "0x" + hex.EncodeToString(pad32(rootBytes)),
 		results:      newIdentityAccum(),
-		votedBallots: make(map[int]*elgamal.Ballot),
+		votedBallots: make(map[uint64]*elgamal.Ballot),
 	}, nil
 }
 
@@ -162,10 +168,27 @@ func (s *State) ChainConfig() *davinci.ChainConfig {
 // state tree: voteID inserts, ballot insert/update per voter, results
 // accumulator updates. Returns the STATETX and REENCBLK blocks ready to
 // attach to a ProveRequest. The state root advances on success.
+//
+// On error the tree may be partially mutated; discard the State and
+// restore it from a Snapshot.
 func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci.ReencryptionData, error) {
 	n := len(votes)
 	if n == 0 {
 		return nil, nil, fmt.Errorf("empty batch")
+	}
+	if n > davinci.MaxBatchSize {
+		return nil, nil, fmt.Errorf("batch size %d exceeds MaxBatchSize (%d)", n, davinci.MaxBatchSize)
+	}
+	for i, v := range votes {
+		// Ballot key layout: bits [0..15] address, [16..62] census index,
+		// bit 63 is the voteID namespace. Out-of-range parts silently
+		// corrupt the key and the guest rejects the whole batch.
+		if v.CensusIdx < 0 || uint64(v.CensusIdx) >= 1<<47 {
+			return nil, nil, fmt.Errorf("vote[%d]: census index %d out of range", i, v.CensusIdx)
+		}
+		if v.AddressLo16 > 0xffff {
+			return nil, nil, fmt.Errorf("vote[%d]: AddressLo16 %#x exceeds 16 bits", i, v.AddressLo16)
+		}
 	}
 	bLen := arbo.HashFunctionSha256.Len()
 
@@ -238,7 +261,7 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 	for i, v := range votes {
 		key := ballotMin + uint64(v.CensusIdx)<<16 + v.AddressLo16
 		leaf := ballotLeafHash(reencBallots[i])
-		if old, isOverwrite := s.votedBallots[v.CensusIdx]; isOverwrite {
+		if old, isOverwrite := s.votedBallots[key]; isOverwrite {
 			entry, err := buildArboUpdateEntry(s.tree, new(big.Int).SetUint64(key), leaf, procLevels)
 			if err != nil {
 				return nil, nil, fmt.Errorf("ballot update[%d]: %w", i, err)
@@ -252,7 +275,7 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 			}
 			ballotChain = append(ballotChain, entry)
 		}
-		s.votedBallots[v.CensusIdx] = reencBallots[i]
+		s.votedBallots[key] = reencBallots[i]
 	}
 
 	// Net results accumulator (BabyJubJub point add/sub per ciphertext):

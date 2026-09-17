@@ -174,11 +174,31 @@ func ballotToFrStrings(b *elgamal.Ballot) []string {
 }
 
 // bigIntToFr32 converts v to a 0x-prefixed 32-byte big-endian hex string.
+// Panics if v is negative or exceeds 256 bits — always a caller bug, better
+// loud than silently corrupted wire bytes (FillBytes alone would encode the
+// absolute value).
 func bigIntToFr32(v *big.Int) string {
-	b := v.Bytes()
+	if v.Sign() < 0 {
+		panic("bigIntToFr32: negative value")
+	}
 	padded := make([]byte, 32)
-	copy(padded[32-len(b):], b)
+	v.FillBytes(padded)
 	return "0x" + hex.EncodeToString(padded)
+}
+
+// isOnCurveTE reports whether (x, y) satisfies the BabyJubJub twisted
+// Edwards equation a*x² + y² = 1 + d*x²*y² (mod p).
+func isOnCurveTE(x, y *big.Int) bool {
+	p := bn254ScalarField
+	x2 := new(big.Int).Mul(x, x)
+	y2 := new(big.Int).Mul(y, y)
+	lhs := new(big.Int).Add(new(big.Int).Mul(bjjTEA, x2), y2)
+	lhs.Mod(lhs, p)
+	rhs := new(big.Int).Mul(x2, y2)
+	rhs.Mul(rhs, bjjTED)
+	rhs.Add(rhs, big.NewInt(1))
+	rhs.Mod(rhs, p)
+	return lhs.Cmp(rhs) == 0
 }
 
 // bjjPointToFr32Hex converts a BabyJubJub point from RTE to TE and

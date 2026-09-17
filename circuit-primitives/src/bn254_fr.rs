@@ -7,7 +7,7 @@
 //!
 //! Each BN254 Fr multiplication via `ark-ff` compiles to ~50 RISC-V instructions
 //! (Montgomery form) in the Fibonacci SM table.  The ZisK `arith256_mod` precompile
-// ! computes `(a*b + c) mod p` in a single dedicated ArithMod row => roughly 50×
+//! computes `(a*b + c) mod p` in a single dedicated ArithMod row => roughly 50×
 //! cheaper per operation.  For 128 voters, Poseidon + BabyJubJub generate ~1.1M
 //! field multiplications; this module reduces prover cost by replacing all of
 //! them with single-row precompile calls.

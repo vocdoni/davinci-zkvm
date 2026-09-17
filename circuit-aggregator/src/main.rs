@@ -132,7 +132,10 @@ fn subtree_root(leaves: &[(FrRaw, FrRaw)], level: usize) -> FrRaw {
                     left.push(*l);
                 }
             }
-            node_hash(&subtree_root(&left, level + 1), &subtree_root(&right, level + 1))
+            node_hash(
+                &subtree_root(&left, level + 1),
+                &subtree_root(&right, level + 1),
+            )
         }
     }
 }
@@ -142,12 +145,12 @@ fn subtree_root(leaves: &[(FrRaw, FrRaw)], level: usize) -> FrRaw {
 fn genesis_root(cfg: &Config) -> FrRaw {
     let zero_results = ballot_leaf_hash(&circuit_primitives::results::zero_ballot());
     let leaves: [(FrRaw, FrRaw); 6] = [
-        ([0x00, 0, 0, 0], cfg.process_id),                       // ProcessID
-        ([0x02, 0, 0, 0], cfg.ballot_mode),                      // BallotMode
+        ([0x00, 0, 0, 0], cfg.process_id),  // ProcessID
+        ([0x02, 0, 0, 0], cfg.ballot_mode), // BallotMode
         ([0x03, 0, 0, 0], hash_enc_key(&cfg.enc_x, &cfg.enc_y)), // EncryptionKey
-        ([0x04, 0, 0, 0], zero_results),                         // Results (net)
-        ([0x06, 0, 0, 0], [cfg.census_origin, 0, 0, 0]),         // CensusOrigin
-        ([0x07, 0, 0, 0], cfg.ballot_vk_hash),                   // BallotVKHash
+        ([0x04, 0, 0, 0], zero_results),    // Results (net)
+        ([0x06, 0, 0, 0], [cfg.census_origin, 0, 0, 0]), // CensusOrigin
+        ([0x07, 0, 0, 0], cfg.ballot_vk_hash), // BallotVKHash
     ];
     subtree_root(&leaves, 0)
 }
@@ -209,7 +212,8 @@ fn verify_results(frame: &[u8], cfg: &Config, state_root: &[u32; 8], results_u32
         let c2 = (ballot[i * 4 + 2], ballot[i * 4 + 3]);
         assert!(
             verify_decryption(&enc_key, &c1, &c2, results[i], &proof),
-            "CP proof {} failed", i
+            "CP proof {} failed",
+            i
         );
     }
     off += 16 * CP_BYTES;
@@ -230,7 +234,11 @@ fn verify_results(frame: &[u8], cfg: &Config, state_root: &[u32; 8], results_u32
     );
 
     for i in 0..16 {
-        assert!(results[i] <= u32::MAX as u64, "result {} overflows u32 digest slot", i);
+        assert!(
+            results[i] <= u32::MAX as u64,
+            "result {} overflows u32 digest slot",
+            i
+        );
         results_u32[i] = results[i] as u32;
     }
 }
@@ -245,8 +253,11 @@ fn bytes32_to_u32x8(b: &[u8; 32]) -> [u32; 8] {
 
 /// Verify a proof blob in-guest and return (program_vk, publics as u32, zisk_vk).
 fn verify_blob(blob: &[u8], what: &str) -> ([u64; 4], [u32; BLOB_PUBS_WORDS], [u64; 4]) {
-    assert!(blob.len().is_multiple_of(8) && blob.len() / 8 > BLOB_PUBS_OFF + BLOB_PUBS_WORDS + 4,
-        "{}: blob too short", what);
+    assert!(
+        blob.len().is_multiple_of(8) && blob.len() / 8 > BLOB_PUBS_OFF + BLOB_PUBS_WORDS + 4,
+        "{}: blob too short",
+        what
+    );
     let valid = unsafe { ziskos::zisklib::verify_zisk_proof_c(blob.as_ptr(), blob.len()) };
     assert!(valid, "{}: STARK verification failed", what);
 
@@ -262,7 +273,12 @@ fn verify_blob(blob: &[u8], what: &str) -> ([u64; 4], [u32; BLOB_PUBS_WORDS], [u
     let mut publics = [0u32; BLOB_PUBS_WORDS];
     for i in 0..BLOB_PUBS_WORDS {
         let w = word(BLOB_PUBS_OFF + i);
-        assert!(w <= u32::MAX as u64, "{}: publics word {} not a u32", what, i);
+        assert!(
+            w <= u32::MAX as u64,
+            "{}: publics word {} not a u32",
+            what,
+            i
+        );
         publics[i] = w as u32;
     }
     (program_vk, publics, zisk_vk)
@@ -283,7 +299,11 @@ fn main() {
         fold_vk[i] = hword(8 + i);
     }
 
-    assert!(mode == MODE_FOLD || mode == MODE_FINALIZE, "bad mode {}", mode);
+    assert!(
+        mode == MODE_FOLD || mode == MODE_FINALIZE,
+        "bad mode {}",
+        mode
+    );
     if mode == MODE_FINALIZE {
         assert_eq!(n_batch, 0, "finalize takes no batch proofs");
     }
@@ -310,7 +330,11 @@ fn main() {
         assert_eq!(zvk, ROOTC, "prev fold: zisk_vk != rootC");
         assert_eq!(pubs[0], AGG_MAGIC_OUT, "prev fold: bad digest magic");
         assert_eq!(pubs[1], MODE_FOLD as u32, "prev fold: not a fold digest");
-        assert_eq!(pubs[5..13], commitment_u32, "prev fold: config commitment mismatch");
+        assert_eq!(
+            pubs[5..13],
+            commitment_u32,
+            "prev fold: config commitment mismatch"
+        );
         assert_eq!(pubs[21..29], batch_vk_u32, "prev fold: batch_vk mismatch");
         assert_eq!(pubs[29..37], fold_vk_u32, "prev fold: fold_vk mismatch");
         step_count = pubs[2];
@@ -331,10 +355,24 @@ fn main() {
         let (pvk, pubs, zvk) = verify_blob(&blob, "batch");
         assert_eq!(pvk, batch_vk, "batch {}: program_vk != batch_vk", b);
         assert_eq!(zvk, ROOTC, "batch {}: zisk_vk != rootC", b);
-        assert_eq!(pubs[0], 1, "batch {}: circuit reported failure (ok != 1)", b);
+        assert_eq!(
+            pubs[0], 1,
+            "batch {}: circuit reported failure (ok != 1)",
+            b
+        );
         assert_eq!(pubs[1], 0, "batch {}: nonzero fail_mask {:#x}", b, pubs[1]);
-        assert_eq!(pubs[2..10], state_root, "batch {}: root_before != chain state_root", b);
-        assert_eq!(pubs[20..28], census_root_u32, "batch {}: census_root mismatch", b);
+        assert_eq!(
+            pubs[2..10],
+            state_root,
+            "batch {}: root_before != chain state_root",
+            b
+        );
+        assert_eq!(
+            pubs[20..28],
+            census_root_u32,
+            "batch {}: census_root mismatch",
+            b
+        );
         total_voters = total_voters.checked_add(pubs[18]).unwrap();
         total_overwrites = total_overwrites.checked_add(pubs[19]).unwrap();
         state_root = pubs[10..18].try_into().unwrap();

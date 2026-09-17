@@ -137,16 +137,16 @@ type StateTransitionData struct {
 }
 
 // BallotProofData holds the ballot data needed for result accumulator verification.
-// Each BallotData is 32 hex strings representing 32 BN254 Fr field elements
-// (8 ElGamal ciphertexts × 4 coordinates: C1.X, C1.Y, C2.X, C2.Y).
+// Each ballot is BallotFields hex strings representing BN254 Fr field elements
+// (NumFields ElGamal ciphertexts × 4 coordinates: C1.X, C1.Y, C2.X, C2.Y).
 type BallotProofData struct {
-	// OldResults is the previous net Results leaf value (32 Fr elements, big-endian hex).
+	// OldResults is the previous net Results leaf value (BallotFields Fr elements, big-endian hex).
 	OldResults []string `json:"old_results"`
 	// VoterBallots contains the re-encrypted ballot for each voter (same order as BallotSmt).
-	// Each inner slice has exactly 32 big-endian hex strings.
+	// Each inner slice has exactly BallotFields big-endian hex strings.
 	VoterBallots [][]string `json:"voter_ballots"`
 	// OverwrittenBallots contains the old ballot data for each UPDATE entry.
-	// Each inner slice has exactly 32 big-endian hex strings.
+	// Each inner slice has exactly BallotFields big-endian hex strings.
 	OverwrittenBallots [][]string `json:"overwritten_ballots"`
 }
 
@@ -355,6 +355,14 @@ type KZGRequest struct {
 	// Blob is the 131072-byte big-endian hex full EIP-4844 blob (4096 × 32-byte cells).
 	Blob string `json:"blob"`
 }
+
+// Job status values returned by the service (JobResponse.Status).
+const (
+	JobStatusQueued  = "queued"
+	JobStatusRunning = "running"
+	JobStatusDone    = "done"
+	JobStatusFailed  = "failed"
+)
 
 // JobResponse is the response body for GET /jobs/{id}.
 type JobResponse struct {

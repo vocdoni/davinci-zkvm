@@ -26,7 +26,7 @@ type stateSnapshot struct {
 	TreeDump     []byte
 	Root         string
 	Results      [][]byte
-	VotedBallots map[int][]byte
+	VotedBallots map[uint64][]byte // keyed by full ballot tree key
 	Voters       uint64
 	Overwrites   uint64
 }
@@ -44,9 +44,9 @@ func (s *State) Snapshot() ([]byte, error) {
 		results[i] = v.Bytes()
 	}
 
-	voted := make(map[int][]byte, len(s.votedBallots))
-	for idx, b := range s.votedBallots {
-		voted[idx] = b.Serialize()
+	voted := make(map[uint64][]byte, len(s.votedBallots))
+	for key, b := range s.votedBallots {
+		voted[key] = b.Serialize()
 	}
 
 	return cbor.Marshal(stateSnapshot{
@@ -126,18 +126,33 @@ func RestoreState(cfg Config, blob []byte) (*State, error) {
 		}
 	}
 
+	// Validate the accumulator coordinates: bounded, canonical and on-curve.
+	// A corrupted or tampered snapshot would otherwise only surface later as
+	// a panic inside the TE point arithmetic.
 	var results accumBallot
 	for i, b := range snap.Results {
-		results[i] = new(big.Int).SetBytes(b)
+		if len(b) > 32 {
+			return nil, fmt.Errorf("snapshot results[%d]: %d bytes, want <= 32", i, len(b))
+		}
+		v := new(big.Int).SetBytes(b)
+		if v.Cmp(bn254ScalarField) >= 0 {
+			return nil, fmt.Errorf("snapshot results[%d]: coordinate not in field", i)
+		}
+		results[i] = v
+	}
+	for i := 0; i < davinci.BallotFields/2; i++ {
+		if !isOnCurveTE(results[i*2], results[i*2+1]) {
+			return nil, fmt.Errorf("snapshot results: point %d not on BabyJubJub", i)
+		}
 	}
 
-	voted := make(map[int]*elgamal.Ballot, len(snap.VotedBallots))
-	for idx, b := range snap.VotedBallots {
+	voted := make(map[uint64]*elgamal.Ballot, len(snap.VotedBallots))
+	for key, b := range snap.VotedBallots {
 		ballot := elgamal.NewBallot(cfg.EncKey)
 		if err := ballot.Deserialize(b); err != nil {
-			return nil, fmt.Errorf("deserialize ballot[%d]: %w", idx, err)
+			return nil, fmt.Errorf("deserialize ballot[%#x]: %w", key, err)
 		}
-		voted[idx] = ballot
+		voted[key] = ballot
 	}
 
 	return &State{

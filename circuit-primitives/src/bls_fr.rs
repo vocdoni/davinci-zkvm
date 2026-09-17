@@ -21,7 +21,7 @@
 //! Outputs are always fully reduced.  The only exception is `from_be32_raw`, which
 //! skips reduction and requires the caller to guarantee the value is already `< p`.
 
-use ziskos::syscalls::{SyscallArith256ModParams, syscall_arith256_mod};
+use ziskos::syscalls::{syscall_arith256_mod, SyscallArith256ModParams};
 use ziskos::zisklib::fcall_uint256_inv_mod;
 
 /// BLS12-381 Fr modulus:
@@ -132,7 +132,6 @@ pub fn sub(a: &BlsFrRaw, b: &BlsFrRaw) -> BlsFrRaw {
     if b == &ZERO {
         return *a;
     }
-    // neg(b) = p - b (pure 256-bit subtraction, no precompile needed since p > b)
     muladd(a, &ONE, &neg(b))
 }
 
@@ -195,6 +194,65 @@ pub fn pow(a: &BlsFrRaw, exp: &[u64; 4]) -> BlsFrRaw {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reduce(a: &BlsFrRaw) -> BlsFrRaw {
+        muladd(a, &ONE, &ZERO)
+    }
+
+    #[test]
+    fn neg_matches_reference() {
+        for v in [
+            [0u64, 0, 0, 0],
+            [1, 0, 0, 0],
+            [0xDEADBEEF, 0x12345, 0xFFF, 0x1],
+            BLS_FR_MOD,
+        ] {
+            let a = reduce(&v);
+            let expected = if a == ZERO {
+                ZERO
+            } else {
+                sub_256(&BLS_FR_MOD, &a)
+            };
+            assert_eq!(neg(&v), expected);
+        }
+    }
+
+    #[test]
+    fn neg_reduces_noncanonical_input() {
+        // p + 5 (non-canonical encoding of 5) must negate like 5: neg = p - 5.
+        let mut nc = BLS_FR_MOD;
+        nc[0] += 5;
+        let expected = sub_256(&BLS_FR_MOD, &[5, 0, 0, 0]);
+        assert_eq!(neg(&nc), expected);
+        // 2^256 - 1 (worst-case non-canonical) must not underflow.
+        let max = [u64::MAX; 4];
+        let r = reduce(&max);
+        let expected = if r == ZERO {
+            ZERO
+        } else {
+            sub_256(&BLS_FR_MOD, &r)
+        };
+        assert_eq!(neg(&max), expected);
+    }
+
+    #[test]
+    fn sub_tolerates_noncanonical_rhs() {
+        let a = [7u64, 0, 0, 0];
+        let mut b = BLS_FR_MOD;
+        b[0] += 3; // non-canonical encoding of 3
+        assert_eq!(sub(&a, &b), [4, 0, 0, 0]);
+    }
+
+    #[test]
+    fn be32_roundtrip() {
+        let v = [0xDEADBEEFu64, 0x12345, 0xFFF, 0x1];
+        assert_eq!(from_be32_raw(&to_be32(&v)), v);
+    }
 }
 
 // Internal helpers

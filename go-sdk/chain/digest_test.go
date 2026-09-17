@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"bytes"
 	"encoding/binary"
 	"testing"
 )
@@ -80,5 +81,21 @@ func TestParseDigest(t *testing.T) {
 	pub[0] = 'X'
 	if _, err := ParseDigest(pub); err == nil {
 		t.Error("ParseDigest accepted a bad magic")
+	}
+}
+
+func TestParseDigestCopiesBuffers(t *testing.T) {
+	pub := buildPublics(ModeFold, 1, 1, 0, [4]uint64{1, 2, 3, 4}, [4]uint64{5, 6, 7, 8}, [16]uint32{})
+	d, err := ParseDigest(pub)
+	if err != nil {
+		t.Fatalf("ParseDigest: %v", err)
+	}
+	cc := bytes.Clone(d.ConfigCommitment)
+	sr := bytes.Clone(d.StateRoot)
+	for i := range pub {
+		pub[i] = 0xff
+	}
+	if !bytes.Equal(d.ConfigCommitment, cc) || !bytes.Equal(d.StateRoot, sr) {
+		t.Error("digest aliases the caller's publics buffer")
 	}
 }

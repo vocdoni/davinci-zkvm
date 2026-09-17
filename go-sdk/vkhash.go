@@ -34,7 +34,7 @@ func BallotVKLeaf(vkJSON []byte) (*big.Int, error) {
 	var badCoord string
 	le32 := func(dec string) {
 		v, ok := new(big.Int).SetString(dec, 10)
-		if !ok {
+		if !ok || v.Sign() < 0 || v.BitLen() > 256 {
 			if badCoord == "" {
 				badCoord = dec
 			}

@@ -31,9 +31,10 @@ type Sequencer struct {
 	aggVK   string // aggregator program_vk, learned on first fold
 	batchVK string // vote-batch program_vk, learned on first batch
 
-	pending   []string // completed batch jobs not yet folded
-	lastFold  string   // last completed fold job, "" before genesis
-	foldCount uint32   // completed fold steps (excluding bootstrap)
+	pending       []string // completed batch jobs not yet folded
+	lastFold      string   // last completed fold job, "" before genesis
+	foldCount     uint32   // completed fold steps (excluding bootstrap)
+	bootstrapFold string   // completed bootstrap fold job, cached so a failed FetchStarkInfo doesn't re-prove it
 }
 
 // FinalResult is the outcome of Finalize: the verified chain digest, the
@@ -126,14 +127,17 @@ func (s *Sequencer) Fold() (string, error) {
 	}
 
 	if s.aggVK == "" {
-		bootID, err := s.foldJob(&davinci.FoldRequest{
-			Config:    s.chainCfg,
-			BatchJobs: s.pending[:1],
-		})
-		if err != nil {
-			return "", fmt.Errorf("bootstrap fold: %w", err)
+		if s.bootstrapFold == "" {
+			bootID, err := s.foldJob(&davinci.FoldRequest{
+				Config:    s.chainCfg,
+				BatchJobs: s.pending[:1],
+			})
+			if err != nil {
+				return "", fmt.Errorf("bootstrap fold: %w", err)
+			}
+			s.bootstrapFold = bootID
 		}
-		info, err := s.client.FetchStarkInfo(bootID)
+		info, err := s.client.FetchStarkInfo(s.bootstrapFold)
 		if err != nil {
 			return "", fmt.Errorf("bootstrap fold info: %w", err)
 		}
@@ -170,8 +174,10 @@ func (s *Sequencer) foldJob(req *davinci.FoldRequest) (string, error) {
 // resubmitting is always safe.
 const maxJobAttempts = 3
 
-// runJob submits a job and waits for it, resubmitting on failure up to
-// maxJobAttempts times.
+// runJob submits a job and waits for it, resubmitting up to maxJobAttempts
+// times — but only when the job actually failed. On a timeout or persistent
+// poll failure the job may still be running server-side, so resubmitting
+// would double the proving work.
 func (s *Sequencer) runJob(kind string, submit func() (string, error)) (string, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxJobAttempts; attempt++ {
@@ -179,10 +185,13 @@ func (s *Sequencer) runJob(kind string, submit func() (string, error)) (string, 
 		if err != nil {
 			return "", fmt.Errorf("submit %s: %w", kind, err)
 		}
-		if _, err := s.client.WaitForJob(id, s.Timeout); err == nil {
+		job, err := s.client.WaitForJob(id, s.Timeout)
+		if err == nil {
 			return id, nil
-		} else {
-			lastErr = fmt.Errorf("%s job %s (attempt %d/%d): %w", kind, id, attempt, maxJobAttempts, err)
+		}
+		lastErr = fmt.Errorf("%s job %s (attempt %d/%d): %w", kind, id, attempt, maxJobAttempts, err)
+		if job == nil || job.Status != davinci.JobStatusFailed {
+			return "", lastErr
 		}
 	}
 	return "", lastErr

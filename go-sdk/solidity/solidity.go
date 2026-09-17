@@ -8,9 +8,9 @@
 // `verifySnarkProof(programVK, rootCVadcopFinal, publicValues, proofBytes)`.
 //
 // The simulated backend brings up an in-process Ethereum execution layer with
-// the EVM precompiles ECDSA / BN254 add+mul+pairing pre-funded, so no Anvil,
+// the EVM precompiles MODEXP / BN254 add+mul+pairing pre-funded, so no Anvil,
 // ganache, or external RPC is required: tests run anywhere `solc` (or
-// `docker run ethereum/solc:stable`) is available.
+// `docker run ethereum/solc:0.8.28`) is available.
 package solidity
 
 import (
@@ -60,7 +60,7 @@ const verifyABI = `[{
 //
 // `solidityDir` is typically the davinci-zkvm repo's top-level `solidity/`
 // directory. `solc` is preferred when on PATH; otherwise the function falls
-// back to `docker run --rm ethereum/solc:stable`. Both produce identical
+// back to `docker run --rm ethereum/solc:0.8.28`. Both produce identical
 // artifacts.
 func VerifyOnSimulated(solidityDir string, snark *davinci.PlonkSnark) error {
 	buildDir, err := os.MkdirTemp("", "davinci-solidity-build-*")
@@ -174,10 +174,12 @@ func compileVerifier(srcDir, outDir string) error {
 	if _, err := exec.LookPath("docker"); err != nil {
 		return fmt.Errorf("neither solc nor docker found on PATH; install one to run Solidity verification")
 	}
+	// Pinned so an upstream "stable" retag can't silently change compiler
+	// output. The vendored sources need ^0.8.20.
 	cmd := exec.Command("docker", "run", "--rm",
 		"-v", patchedDir+":/src",
 		"-v", outDir+":/out",
-		"ethereum/solc:stable",
+		"ethereum/solc:0.8.28",
 		"--abi", "--bin", "--optimize",
 		"--base-path", "/src",
 		"-o", "/out",

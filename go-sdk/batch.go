@@ -252,6 +252,7 @@ func (c *Client) Prove(ctx context.Context, batch *ProveBatch) (*ProveResult, er
 		return nil, fmt.Errorf("submit: %w", err)
 	}
 
+	pollErrs := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -260,12 +261,14 @@ func (c *Client) Prove(ctx context.Context, batch *ProveBatch) (*ProveResult, er
 		}
 
 		job, err := c.GetJob(jobID)
-		if err != nil {
-			return nil, fmt.Errorf("poll job %s: %w", jobID, err)
-		}
+		switch {
+		case err != nil:
+			pollErrs++
+			if pollErrs >= maxPollErrs {
+				return nil, fmt.Errorf("poll job %s: %w", jobID, err)
+			}
 
-		switch job.Status {
-		case "done":
+		case job.Status == JobStatusDone:
 			snark, err := c.FetchSnark(jobID)
 			if err != nil {
 				return nil, fmt.Errorf("fetch snark for job %s: %w", jobID, err)
@@ -276,12 +279,15 @@ func (c *Client) Prove(ctx context.Context, batch *ProveBatch) (*ProveResult, er
 			}
 			return &ProveResult{JobID: jobID, Snark: snark, Elapsed: elapsed}, nil
 
-		case "failed":
+		case job.Status == JobStatusFailed:
 			errMsg := "unknown error"
 			if job.Error != nil {
 				errMsg = *job.Error
 			}
 			return nil, fmt.Errorf("job %s failed: %s", jobID, errMsg)
+
+		default:
+			pollErrs = 0
 		}
 
 		// Backoff before next poll
@@ -301,6 +307,8 @@ func NewPublicInput(values ...*big.Int) *PublicInput {
 
 // PackAddressWeight packs an Ethereum address and voter weight into the
 // census leaf value used by the lean-IMT: leaf = (address << 88) | weight.
+// The weight must fit in 88 bits; larger values bleed into the address
+// bits and produce a leaf the circuit will reject.
 //
 // This matches the packing used by davinci-node's census tree and the
 // circuit's extract_address_from_census_leaf function.

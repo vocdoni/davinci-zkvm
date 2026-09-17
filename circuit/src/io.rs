@@ -62,8 +62,6 @@ pub struct ParsedInput {
     /// SHA-256 of the raw VK wire bytes (arbo leaf convention). Bound to the
     /// state tree's config key 0x07 by main.rs so the VK is pinned per process.
     pub vk_hash: FrRaw,
-    /// Number of bytes consumed (equals `input.len()` on success).
-    pub bytes_consumed: usize,
 }
 
 /// Parse the binary input blob, setting bits in `fail_mask` on any error.
@@ -78,30 +76,54 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
         ($off:expr, $default:expr) => {
             read_words_le::<1>(input, $off)
                 .map(|x| x[0])
-                .unwrap_or_else(|| { *fail_mask |= 1 << 31; $default })
+                .unwrap_or_else(|| {
+                    *fail_mask |= 1 << 31;
+                    $default
+                })
         };
     }
-    macro_rules! read_g1 { ($off:expr) => {
-        read_words_le::<8>(input, $off).unwrap_or_else(|| { *fail_mask |= 1 << 31; g1_identity() })
-    };}
-    macro_rules! read_g2 { ($off:expr) => {
-        read_words_le::<16>(input, $off).unwrap_or_else(|| { *fail_mask |= 1 << 31; g2_identity() })
-    };}
-    macro_rules! read_fr { ($off:expr) => {
-        read_words_le::<4>(input, $off).unwrap_or_else(|| { *fail_mask |= 1 << 31; ZERO_FR })
-    };}
+    macro_rules! read_g1 {
+        ($off:expr) => {
+            read_words_le::<8>(input, $off).unwrap_or_else(|| {
+                *fail_mask |= 1 << 31;
+                g1_identity()
+            })
+        };
+    }
+    macro_rules! read_g2 {
+        ($off:expr) => {
+            read_words_le::<16>(input, $off).unwrap_or_else(|| {
+                *fail_mask |= 1 << 31;
+                g2_identity()
+            })
+        };
+    }
+    macro_rules! read_fr {
+        ($off:expr) => {
+            read_words_le::<4>(input, $off).unwrap_or_else(|| {
+                *fail_mask |= 1 << 31;
+                ZERO_FR
+            })
+        };
+    }
 
     let mut off = 0usize;
 
     // --- Header ---
-    let magic    = read1!(&mut off, 0);
-    let log_n    = read1!(&mut off, 0) as usize;
-    let nproofs  = read1!(&mut off, 0) as usize;
+    let magic = read1!(&mut off, 0);
+    let log_n = read1!(&mut off, 0) as usize;
+    let nproofs = read1!(&mut off, 0) as usize;
     let n_public = read1!(&mut off, 0) as usize;
 
-    if magic != MAGIC                              { *fail_mask |= 1 << 31; }
-    if nproofs == 0 || nproofs > crate::types::MAX_BATCH_SIZE { *fail_mask |= 1 << 31; }
-    if n_public > 256                              { *fail_mask |= 1 << 31; }
+    if magic != MAGIC {
+        *fail_mask |= 1 << 31;
+    }
+    if nproofs == 0 || nproofs > crate::types::MAX_BATCH_SIZE {
+        *fail_mask |= 1 << 31;
+    }
+    if n_public > 256 {
+        *fail_mask |= 1 << 31;
+    }
     // Clamp before any allocation: the guards above only flag the error, and an
     // attacker-sized count would otherwise drive Vec::with_capacity into OOM.
     let nproofs = nproofs.min(crate::types::MAX_BATCH_SIZE);
@@ -110,12 +132,14 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
     // --- Verification key ---
     let vk_start = off;
     let vk_alpha_g1 = read_g1!(&mut off);
-    let vk_beta_g2  = read_g2!(&mut off);
+    let vk_beta_g2 = read_g2!(&mut off);
     let vk_gamma_g2 = read_g2!(&mut off);
     let vk_delta_g2 = read_g2!(&mut off);
 
     let gamma_abc_len = read1!(&mut off, 0) as usize;
-    if gamma_abc_len != n_public + 1 { *fail_mask |= 1 << 31; }
+    if gamma_abc_len != n_public + 1 {
+        *fail_mask |= 1 << 31;
+    }
     let gamma_abc_len = gamma_abc_len.min(n_public + 1);
 
     let mut vk_gamma_abc = Vec::with_capacity(gamma_abc_len);
@@ -128,7 +152,9 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
 
     // --- Proofs ---
     let nproofs_check = read1!(&mut off, 0) as usize;
-    if nproofs_check != nproofs { *fail_mask |= 1 << 31; }
+    if nproofs_check != nproofs {
+        *fail_mask |= 1 << 31;
+    }
 
     let mut proofs = Vec::with_capacity(nproofs);
     for _ in 0..nproofs {
@@ -139,7 +165,12 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
         for _ in 0..n_public {
             public_inputs.push(read_fr!(&mut off));
         }
-        proofs.push(ProofRaw { a, b, c, public_inputs });
+        proofs.push(ProofRaw {
+            a,
+            b,
+            c,
+            public_inputs,
+        });
     }
 
     // --- ECDSA block (mandatory) ---
@@ -152,8 +183,8 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
 
     let mut ecdsa = Vec::with_capacity(nproofs);
     for _ in 0..nproofs {
-        let r     = read_fr!(&mut off);
-        let s     = read_fr!(&mut off);
+        let r = read_fr!(&mut off);
+        let s = read_fr!(&mut off);
         let recid = read1!(&mut off, 0) as u8;
         ecdsa.push(EcdsaEntry { r, s, recid });
     }
@@ -180,7 +211,9 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
         if maybe_magic == CENSUS_MAGIC {
             off += 8;
             let n_proofs = read1!(&mut off, 0) as usize;
-            if n_proofs > 4096 { *fail_mask |= 1 << 31; }
+            if n_proofs > 4096 {
+                *fail_mask |= 1 << 31;
+            }
             let n_proofs = n_proofs.min(4096);
             census_proofs.reserve(n_proofs);
             for _ in 0..n_proofs {
@@ -188,13 +221,20 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
                 let leaf = read_fr!(&mut off);
                 let index = read1!(&mut off, 0);
                 let n_siblings = read1!(&mut off, 0) as usize;
-                if n_siblings > 64 { *fail_mask |= 1 << 31; }
+                if n_siblings > 64 {
+                    *fail_mask |= 1 << 31;
+                }
                 let n_siblings = n_siblings.min(64);
                 let mut siblings = Vec::with_capacity(n_siblings);
                 for _ in 0..n_siblings {
                     siblings.push(read_fr!(&mut off));
                 }
-                census_proofs.push(CensusProofEntry { root, leaf, index, siblings });
+                census_proofs.push(CensusProofEntry {
+                    root,
+                    leaf,
+                    index,
+                    siblings,
+                });
             }
         }
     }
@@ -209,7 +249,9 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
         if maybe_magic == CSP_MAGIC {
             off += 8;
             let n_entries = read1!(&mut off, 0) as usize;
-            if n_entries > 4096 { *fail_mask |= 1 << 31; }
+            if n_entries > 4096 {
+                *fail_mask |= 1 << 31;
+            }
             let n_entries = n_entries.min(4096);
             let mut entries = Vec::with_capacity(n_entries);
             for _ in 0..n_entries {
@@ -219,7 +261,14 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
                 let voter_address = read_fr!(&mut off);
                 let weight = read_fr!(&mut off);
                 let index = read1!(&mut off, 0);
-                entries.push(CspEntry { r, s, recid, voter_address, weight, index });
+                entries.push(CspEntry {
+                    r,
+                    s,
+                    recid,
+                    voter_address,
+                    weight,
+                    index,
+                });
             }
             csp_block = Some(CspBlock { entries });
         }
@@ -231,7 +280,9 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
         if maybe_magic == REENC_MAGIC {
             off += 8;
             let n_voters = read1!(&mut off, 0) as usize;
-            if n_voters > crate::types::MAX_BATCH_SIZE { *fail_mask |= 1 << 31; }
+            if n_voters > crate::types::MAX_BATCH_SIZE {
+                *fail_mask |= 1 << 31;
+            }
             let n_voters = n_voters.min(crate::types::MAX_BATCH_SIZE);
             let pub_key_x = read_fr!(&mut off);
             let pub_key_y = read_fr!(&mut off);
@@ -257,7 +308,11 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
                         c2y: read_fr!(&mut off),
                     };
                 }
-                reenc_entries.push(ReencEntry { k, original, reencrypted });
+                reenc_entries.push(ReencEntry {
+                    k,
+                    original,
+                    reencrypted,
+                });
             }
         }
     }
@@ -271,7 +326,7 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
         let maybe_magic = u64::from_le_bytes(input[off..off + 8].try_into().unwrap());
         if maybe_magic == KZG_MAGIC {
             off += 8;
-            let process_id    = read_fr!(&mut off);
+            let process_id = read_fr!(&mut off);
             let root_hash_before = read_fr!(&mut off);
 
             // commitment: 48 raw bytes
@@ -286,7 +341,13 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
             let blob = input[off..off + BLOB_BYTES].to_vec();
             off += BLOB_BYTES;
 
-            kzg = Some(KZGBlock { process_id, root_hash_before, commitment, y_claimed, blob });
+            kzg = Some(KZGBlock {
+                process_id,
+                root_hash_before,
+                commitment,
+                y_claimed,
+                blob,
+            });
         }
     }
 
@@ -295,45 +356,76 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
     }
 
     ParsedInput {
-        log_n, nproofs, n_public,
-        vk_alpha_g1, vk_beta_g2, vk_gamma_g2, vk_delta_g2, vk_gamma_abc,
+        log_n,
+        nproofs,
+        n_public,
+        vk_alpha_g1,
+        vk_beta_g2,
+        vk_gamma_g2,
+        vk_delta_g2,
+        vk_gamma_abc,
         proofs,
-        ecdsa, state, census_proofs, csp_block,
-        reenc_pub_key, reenc_entries, kzg,
+        ecdsa,
+        state,
+        census_proofs,
+        csp_block,
+        reenc_pub_key,
+        reenc_entries,
+        kzg,
         vk_hash,
-        bytes_consumed: off,
     }
 }
 
 /// Parse an SMT transition (n_levels siblings) from `input` at `*off`.
-fn parse_smt_transition(input: &[u8], off: &mut usize, n_levels: usize, fail_mask: &mut u32) -> SmtTransition {
+fn parse_smt_transition(
+    input: &[u8],
+    off: &mut usize,
+    n_levels: usize,
+    fail_mask: &mut u32,
+) -> SmtTransition {
     macro_rules! read1 {
         ($default:expr) => {
             read_words_le::<1>(input, off)
                 .map(|x| x[0])
-                .unwrap_or_else(|| { *fail_mask |= 1 << 31; $default })
+                .unwrap_or_else(|| {
+                    *fail_mask |= 1 << 31;
+                    $default
+                })
         };
     }
     macro_rules! read_fr {
         () => {
-            read_words_le::<4>(input, off)
-                .unwrap_or_else(|| { *fail_mask |= 1 << 31; ZERO_FR })
+            read_words_le::<4>(input, off).unwrap_or_else(|| {
+                *fail_mask |= 1 << 31;
+                ZERO_FR
+            })
         };
     }
-    let old_root  = read_fr!();
-    let new_root  = read_fr!();
-    let old_key   = read_fr!();
+    let old_root = read_fr!();
+    let new_root = read_fr!();
+    let old_key = read_fr!();
     let old_value = read_fr!();
-    let is_old0   = read1!(0) != 0;
-    let new_key   = read_fr!();
+    let is_old0 = read1!(0) != 0;
+    let new_key = read_fr!();
     let new_value = read_fr!();
-    let fnc0      = read1!(0) != 0;
-    let fnc1      = read1!(0) != 0;
+    let fnc0 = read1!(0) != 0;
+    let fnc1 = read1!(0) != 0;
     let mut siblings = Vec::with_capacity(n_levels);
     for _ in 0..n_levels {
         siblings.push(read_fr!());
     }
-    SmtTransition { old_root, new_root, old_key, old_value, is_old0, new_key, new_value, fnc0, fnc1, siblings }
+    SmtTransition {
+        old_root,
+        new_root,
+        old_key,
+        old_value,
+        is_old0,
+        new_key,
+        new_value,
+        fnc0,
+        fnc1,
+        siblings,
+    }
 }
 
 /// Parse the STATETX block (magic already consumed) into a `StateBlock`.
@@ -342,28 +434,37 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
         ($default:expr) => {
             read_words_le::<1>(input, off)
                 .map(|x| x[0])
-                .unwrap_or_else(|| { *fail_mask |= 1 << 31; $default })
+                .unwrap_or_else(|| {
+                    *fail_mask |= 1 << 31;
+                    $default
+                })
         };
     }
     macro_rules! read_fr {
         () => {
-            read_words_le::<4>(input, off)
-                .unwrap_or_else(|| { *fail_mask |= 1 << 31; ZERO_FR })
+            read_words_le::<4>(input, off).unwrap_or_else(|| {
+                *fail_mask |= 1 << 31;
+                ZERO_FR
+            })
         };
     }
 
-    let n_voters      = read1!(0) as usize;
+    let n_voters = read1!(0) as usize;
     let n_overwritten = read1!(0) as usize;
-    let process_id    = read_fr!();
+    let process_id = read_fr!();
     let old_state_root = read_fr!();
     let new_state_root = read_fr!();
 
     // VoteID chain
-    let vote_id_n      = read1!(0) as usize;
-    let n_levels       = read1!(0) as usize;
-    if n_levels > 256 { *fail_mask |= 1 << 31; }
+    let vote_id_n = read1!(0) as usize;
+    let n_levels = read1!(0) as usize;
+    if n_levels > 256 {
+        *fail_mask |= 1 << 31;
+    }
     let n_levels = n_levels.min(256);
-    if vote_id_n > crate::types::MAX_BATCH_SIZE { *fail_mask |= 1 << 31; }
+    if vote_id_n > crate::types::MAX_BATCH_SIZE {
+        *fail_mask |= 1 << 31;
+    }
     let vote_id_n = vote_id_n.min(crate::types::MAX_BATCH_SIZE);
     let mut vote_id_chain = Vec::with_capacity(vote_id_n);
     for _ in 0..vote_id_n {
@@ -371,11 +472,15 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
     }
 
     // Ballot chain
-    let ballot_n       = read1!(0) as usize;
+    let ballot_n = read1!(0) as usize;
     let ballot_n_levels = read1!(0) as usize;
-    if ballot_n_levels > 256 { *fail_mask |= 1 << 31; }
+    if ballot_n_levels > 256 {
+        *fail_mask |= 1 << 31;
+    }
     let ballot_n_levels = ballot_n_levels.min(256);
-    if ballot_n > crate::types::MAX_BATCH_SIZE { *fail_mask |= 1 << 31; }
+    if ballot_n > crate::types::MAX_BATCH_SIZE {
+        *fail_mask |= 1 << 31;
+    }
     let ballot_n = ballot_n.min(crate::types::MAX_BATCH_SIZE);
     let mut ballot_chain = Vec::with_capacity(ballot_n);
     for _ in 0..ballot_n {
@@ -383,27 +488,43 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
     }
 
     // Net Results transition (0 or 1)
-    let has_results  = read1!(0) != 0;
+    let has_results = read1!(0) != 0;
     let results_n_levels = read1!(0) as usize;
-    if results_n_levels > 256 { *fail_mask |= 1 << 31; }
+    if results_n_levels > 256 {
+        *fail_mask |= 1 << 31;
+    }
     let results_n_levels = results_n_levels.min(256);
     let results = if has_results {
-        Some(parse_smt_transition(input, off, results_n_levels, fail_mask))
+        Some(parse_smt_transition(
+            input,
+            off,
+            results_n_levels,
+            fail_mask,
+        ))
     } else {
         None
     };
 
     // Process read-proofs: n (0 or 5), then n_levels + entries only when n>0.
     let process_n = read1!(0) as usize;
-    if process_n != 0 && process_n != 5 { *fail_mask |= 1 << 31; }
+    if process_n != 0 && process_n != 5 {
+        *fail_mask |= 1 << 31;
+    }
     let process_n = process_n.min(5);
     let mut process_proofs = Vec::with_capacity(process_n);
     if process_n > 0 {
         let process_n_levels = read1!(0) as usize;
-        if process_n_levels > 256 { *fail_mask |= 1 << 31; }
+        if process_n_levels > 256 {
+            *fail_mask |= 1 << 31;
+        }
         let process_n_levels = process_n_levels.min(256);
         for _ in 0..process_n {
-            process_proofs.push(parse_smt_transition(input, off, process_n_levels, fail_mask));
+            process_proofs.push(parse_smt_transition(
+                input,
+                off,
+                process_n_levels,
+                fail_mask,
+            ));
         }
     }
 
@@ -413,25 +534,35 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
     let zero_ballot: [FrRaw; BALLOT_FIELDS] = [ZERO_FR; BALLOT_FIELDS];
     let (old_results, voter_ballots, overwritten_ballots) = if has_ballot_data {
         let mut old_r = [ZERO_FR; BALLOT_FIELDS];
-        for i in 0..BALLOT_FIELDS { old_r[i] = read_fr!(); }
+        for i in 0..BALLOT_FIELDS {
+            old_r[i] = read_fr!();
+        }
 
         let n_vb = read1!(0) as usize;
-        if n_vb > 4096 { *fail_mask |= 1 << 31; }
+        if n_vb > 4096 {
+            *fail_mask |= 1 << 31;
+        }
         let n_vb = n_vb.min(4096);
         let mut vb = Vec::with_capacity(n_vb);
         for _ in 0..n_vb {
             let mut b = [ZERO_FR; BALLOT_FIELDS];
-            for i in 0..BALLOT_FIELDS { b[i] = read_fr!(); }
+            for i in 0..BALLOT_FIELDS {
+                b[i] = read_fr!();
+            }
             vb.push(b);
         }
 
         let n_ob = read1!(0) as usize;
-        if n_ob > 4096 { *fail_mask |= 1 << 31; }
+        if n_ob > 4096 {
+            *fail_mask |= 1 << 31;
+        }
         let n_ob = n_ob.min(4096);
         let mut ob = Vec::with_capacity(n_ob);
         for _ in 0..n_ob {
             let mut b = [ZERO_FR; BALLOT_FIELDS];
-            for i in 0..BALLOT_FIELDS { b[i] = read_fr!(); }
+            for i in 0..BALLOT_FIELDS {
+                b[i] = read_fr!();
+            }
             ob.push(b);
         }
         (old_r, vb, ob)
@@ -440,13 +571,18 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
     };
 
     StateBlock {
-        n_voters, n_overwritten,
-        process_id, old_state_root, new_state_root,
-        vote_id_chain, ballot_chain,
+        n_voters,
+        n_overwritten,
+        process_id,
+        old_state_root,
+        new_state_root,
+        vote_id_chain,
+        ballot_chain,
         results,
         process_proofs,
         n_levels,
         old_results,
-        voter_ballots, overwritten_ballots,
+        voter_ballots,
+        overwritten_ballots,
     }
 }

@@ -35,7 +35,9 @@ startup; chained mode additionally needs `AGGREGATOR_ELF_PATH`.
 | Path | Notes |
 |---|---|
 | `circuit/` | ZisK RISC-V guest (vote-batch circuit). Build with `cd circuit && cargo-zisk build --release` — the `cd` matters; building from the workspace root pulls in tokio/mio which doesn't compile for the zkvm target. Pre-built ELF lives at `circuit/elf/circuit.elf` and is tracked. |
-| `circuit-primitives/` | no_std lib shared by both guests: SMT, Poseidon, BabyJubJub, hashing, field types, io framing. |
+| `circuit/CIRCUIT.md` | Formal spec of the vote-batch guest: input block ordering, wire format, output registers, per-phase constraint checks, `fail_mask` bits. Read it before touching `circuit/src/` or `input-gen/`, and update it in the same change. |
+| `circuit/src/groth16.rs`, `circuit/src/kzg.rs` | In-guest batched Groth16 (BN254) verification of the per-ballot circom proofs, and the KZG/BLS12-381 checks. See the Groth16 gotcha below before touching the batch check. |
+| `circuit-primitives/` | no_std lib shared by both guests: SMT, Poseidon, BabyJubJub, BN254/BLS12-381 field arithmetic (`bn254.rs`, `bn254_fr.rs`, `bls_fr.rs`), hashing, field types, io framing. |
 | `circuit-aggregator/` | Recursive aggregator guest: genesis+fold / fold / finalize modes, in-guest STARK verification via `ziskos::zisklib::verify_zisk_proof_c`. ELF at `circuit-aggregator/elf/aggregator.elf`. Same `cd`-first build rule. |
 | `input-gen/` | Typed protocol blocks → ZisK binary input. Wire format owner (incl. `aggregator.rs` for fold/finalize input frames). |
 | `service/src/prover/recursion.rs` | proof.bin → vadcop blob conversion for feeding proofs back into the aggregator guest. |
@@ -100,6 +102,18 @@ cd go-sdk/tests
 make test        # full suite, 30m timeout
 make test-unit   # lightweight only (health/validation/404) — sets
                  # DAVINCI_SKIP_PROVING=1, no GPU needed, runs in seconds
+```
+
+The circuit cheat/soundness suite runs on `ziskemu` — no GPU, no
+service, seconds per case. It is the fastest correctness loop after
+touching `circuit/src/` or `input-gen/`. Needs `ziskemu` (ships in
+`~/.zisk/bin`, not always on PATH) and `gen-input`
+(`cargo build --release -p davinci-zkvm-input-gen`) on PATH, plus
+`CIRCUIT_ELF_PATH` or the default `circuit/elf/circuit.elf`:
+
+```bash
+cd go-sdk/tests
+go test ./integration -run TestCheat -v -timeout 30m
 ```
 
 Run a single proving test directly:
@@ -170,6 +184,20 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
 
 ## Gotchas worth remembering
 
+- **The Groth16 batch check must stay host-hint-free.** The random
+  linear combination over the batch (scaled `A_i`, `sum r_i*C_i`, and the
+  gamma-side `sum r_i*L_i`) is recomputed in-guest; the wire format
+  carries no precomputed hint points. One GT equation cannot bind n+3
+  free G1 points — a malicious host balances `B_i = c_i*beta` against
+  `neg_alpha_rsum`, zeroes the gamma/delta terms (all-zero G1 is skipped
+  by the pairing precompile) and the batch check passes for forged
+  proofs. The coefficients are independent 128-bit Fiat-Shamir values
+  (`r_0 = 1`, `r_i = lo128(SHA256(digest || i))`, transcript tag
+  `groth16-batch-v2`), not powers of one challenge: the small-exponents
+  batch argument gives 2^-128 soundness error per attempt, and starting
+  `scalar_mul_bn254` at the MSB makes the per-proof muls half-cost.
+  `TestCheatForgedPubs`, `TestCheatSwappedProofs`, `TestCheatZeroedVKGamma`
+  and `TestCheatZeroedProofA` guard it.
 - **`cargo-zisk build` from the workspace root pulls in non-ZisK deps**
   (tokio, mio). Always `cd circuit/` first.
 - **PLONK proving key `final.so` has an executable-stack flag** that
@@ -299,6 +327,8 @@ Chained-mode numbers (STARK batches + folds + one final PLONK) live in
 - After editing `service/src/prover/worker.rs` or `snark.rs`, the Docker
   image is stale — rebuild with `docker compose --profile cuda build`
   before restarting the service.
+- `circuit/CIRCUIT.md` is the guest's spec, not a changelog — a wire
+  format or constraint change lands there in the same commit.
 - The CSP, ECDSA, and SMT wire formats are tightly coupled across
   `circuit/src/`, `input-gen/src/lib.rs`, `service/src/types.rs`, and
   `go-sdk/`. Any wire-format change has to land in all four atomically.

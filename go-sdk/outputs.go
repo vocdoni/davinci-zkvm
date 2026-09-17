@@ -57,6 +57,7 @@ const (
 	FailResultAccum  = 1 << 20 // Result accumulator mismatch
 	FailLeafHash     = 1 << 21 // Ballot SMT leaf hash mismatch
 	FailBinding      = 1 << 22 // Cross-block binding mismatch
+	FailCSP          = 1 << 23 // CSP ECDSA census attestation
 	FailParse        = 1 << 31 // Input parsing error
 )
 
@@ -145,16 +146,23 @@ func (o *PublicOutputs) ABIEncode() []byte {
 
 // ABIValues returns the 8 public input values as a [8]*big.Int array,
 // suitable for passing directly to go-ethereum ABI encoding.
+// Nil fields become zero.
 func (o *PublicOutputs) ABIValues() [8]*big.Int {
+	set := func(v *big.Int) *big.Int {
+		if v == nil {
+			return new(big.Int)
+		}
+		return new(big.Int).Set(v)
+	}
 	return [8]*big.Int{
-		new(big.Int).Set(o.RootHashBefore),
-		new(big.Int).Set(o.RootHashAfter),
+		set(o.RootHashBefore),
+		set(o.RootHashAfter),
 		big.NewInt(int64(o.VotersCount)),
 		big.NewInt(int64(o.OverwrittenVotesCount)),
-		new(big.Int).Set(o.CensusRoot),
-		new(big.Int).Set(o.BlobCommitmentLimbs[0]),
-		new(big.Int).Set(o.BlobCommitmentLimbs[1]),
-		new(big.Int).Set(o.BlobCommitmentLimbs[2]),
+		set(o.CensusRoot),
+		set(o.BlobCommitmentLimbs[0]),
+		set(o.BlobCommitmentLimbs[1]),
+		set(o.BlobCommitmentLimbs[2]),
 	}
 }
 
@@ -185,6 +193,7 @@ func (o *PublicOutputs) FailString() string {
 		{FailResultAccum, "result_accum"},
 		{FailLeafHash, "leaf_hash"},
 		{FailBinding, "binding"},
+		{FailCSP, "csp"},
 		{FailParse, "parse_error"},
 	}
 	for _, f := range flags {

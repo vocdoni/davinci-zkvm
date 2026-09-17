@@ -63,8 +63,8 @@ func ParseDigest(publics []byte) (*Digest, error) {
 		StepCount:        w(2),
 		TotalVoters:      w(3),
 		TotalOverwrites:  w(4),
-		ConfigCommitment: publics[5*4 : 13*4],
-		StateRoot:        publics[13*4 : 21*4],
+		ConfigCommitment: bytes.Clone(publics[5*4 : 13*4]),
+		StateRoot:        bytes.Clone(publics[13*4 : 21*4]),
 		BatchVK:          vkHex(21),
 		FoldVK:           vkHex(29),
 	}

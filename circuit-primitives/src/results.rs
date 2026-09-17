@@ -14,9 +14,12 @@
 //! serialized ballot data, binding the re-encrypted ballot to the state tree.
 
 use crate::babyjubjub::BjjAccumulator;
-use crate::hash;
-use crate::types::{BallotData, FrRaw, StateBlock, ZERO_FR, BALLOT_FIELDS, NUM_FIELDS, FAIL_RESULT_ACCUM, FAIL_LEAF_HASH};
 use crate::bn254_fr::ONE;
+use crate::hash;
+use crate::types::{
+    BallotData, FrRaw, StateBlock, BALLOT_FIELDS, FAIL_LEAF_HASH, FAIL_RESULT_ACCUM, NUM_FIELDS,
+    ZERO_FR,
+};
 
 /// The identity ballot: every point is the TE identity (0, 1). Matches
 /// davinci-node `elgamal.NewBallot` and is the genesis Results leaf value.
@@ -75,8 +78,7 @@ fn padded_is_identity(b: &BallotData, num_fields: usize) -> bool {
     let mut f = num_fields;
     while f < NUM_FIELDS {
         let o = f * 4;
-        if b[o] != ZERO_FR || b[o + 1] != ONE
-            || b[o + 2] != ZERO_FR || b[o + 3] != ONE {
+        if b[o] != ZERO_FR || b[o + 1] != ONE || b[o + 2] != ZERO_FR || b[o + 3] != ONE {
             return false;
         }
         f += 1;
@@ -169,7 +171,10 @@ mod tests {
                 expected[i * 2 + 1] = p.1;
             }
         }
-        assert_eq!(ballot_net(&init, &add_terms, &sub_terms, NUM_FIELDS), expected);
+        assert_eq!(
+            ballot_net(&init, &add_terms, &sub_terms, NUM_FIELDS),
+            expected
+        );
     }
 
     /// x + p (non-canonical encoding of the same residue). x < p, so no carry-out.
@@ -271,7 +276,9 @@ pub fn verify_results(state: &StateBlock, num_fields: usize, fail_mask: &mut u32
 
     // Overwritten ballot leaf hash verification
     // For UPDATE entries, the old_value must match the hash of the overwritten ballot.
-    let update_indices: Vec<usize> = state.ballot_chain.iter()
+    let update_indices: Vec<usize> = state
+        .ballot_chain
+        .iter()
         .enumerate()
         .filter(|(_, t)| !t.fnc0 && t.fnc1) // UPDATE = fnc0=false, fnc1=true
         .map(|(i, _)| i)
@@ -293,7 +300,12 @@ pub fn verify_results(state: &StateBlock, num_fields: usize, fail_mask: &mut u32
     // Net Results accumulation
     // NewResults = OldResults + Σ(all voter ballots) − Σ(overwritten ballots)
     if let Some(ref r) = state.results {
-        let net = ballot_net(&state.old_results, &state.voter_ballots, &state.overwritten_ballots, num_fields);
+        let net = ballot_net(
+            &state.old_results,
+            &state.voter_ballots,
+            &state.overwritten_ballots,
+            num_fields,
+        );
         let expected_new_hash = ballot_leaf_hash(&net);
         if expected_new_hash != r.new_value {
             *fail_mask |= FAIL_RESULT_ACCUM;

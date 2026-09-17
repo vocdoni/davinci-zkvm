@@ -45,9 +45,11 @@ const (
 	failCensus      = uint32(1 << 16) // census membership proof failed
 	failReenc       = uint32(1 << 17) // re-encryption verification failed
 	failKZG         = uint32(1 << 18) // KZG barycentric evaluation mismatch
+	failMissing     = uint32(1 << 19) // mandatory block absent
 	failResultAccum = uint32(1 << 20) // net Results accumulator leaf mismatch
 	failLeafHash    = uint32(1 << 21) // ballot SMT leaf hash mismatch
 	failBinding     = uint32(1 << 22) // cross-block binding mismatch
+	failParse       = uint32(1 << 31) // input malformed / truncated / trailing bytes
 
 	// failSMTAny covers any SMT-related failure (bits 10–13).
 	failSMTAny = failSMTVoteID | failSMTBallot | failSMTResults | failSMTProcess
@@ -685,4 +687,113 @@ func TestCheatSwappedProofs(t *testing.T) {
 	copy(full[off:off+recLen], full[off+recLen:off+2*recLen])
 	copy(full[off+recLen:off+2*recLen], rec0)
 	assertCircuitFails(t, full, failECDSA|failBinding, "swapped-proofs")
+}
+
+// TestCheatZeroedVKGamma zeroes the VK gamma G2 point (the all-zero encoding
+// the pairing precompile treats as infinity, which would silently drop the
+// public-input pairing term). g2_is_valid must reject identity VK points.
+func TestCheatZeroedVKGamma(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+	full := base.fullInput()
+	// Layout: header(32B) | alpha(64) | beta(128) | gamma(128) | ...
+	gammaOff := 32 + 64 + 128
+	for i := gammaOff; i < gammaOff+128; i++ {
+		full[i] = 0
+	}
+	assertCircuitFails(t, full, failCurve, "zeroed-vk-gamma")
+}
+
+// TestCheatZeroedProofA zeroes proof 0's A point (identity encoding). The
+// pairing precompile skips identity pairs, so an unchecked zero A would drop
+// e(r0·A0, B0) from the batch equation; the strict on-curve check must reject
+// it first ((0,0) is not on the curve).
+func TestCheatZeroedProofA(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+	off, _, _ := proofsSectionOffset(t, base.baseBin)
+	full := base.fullInput()
+	for i := off; i < off+64; i++ {
+		full[i] = 0
+	}
+	assertCircuitFails(t, full, failCurve, "zeroed-proof-a")
+}
+
+// TestCheatTamperGammaAbc overwrites gamma_abc[1] with gamma_abc[0]: both
+// remain on-curve, so rejection must come from the pairing equation via the
+// aggregated public-input MSM. Regression guard for the γ-side aggregation.
+func TestCheatTamperGammaAbc(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+	full := base.fullInput()
+	// gamma_abc entries (64 B each) start after header(32) + VK(448) + len(8).
+	abcOff := 32 + 448 + 8
+	copy(full[abcOff+64:abcOff+128], full[abcOff:abcOff+64])
+	assertCircuitFails(t, full, failPairing, "tamper-gamma-abc")
+}
+
+// TestCheatTamperedSignature flips one byte of voter 0's ECDSA r. Recovery
+// then yields a different (or no) address, breaking the address binding.
+func TestCheatTamperedSignature(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+	off, nproofs, nPublic := proofsSectionOffset(t, base.baseBin)
+	recLen := 64 + 128 + 64 + nPublic*32
+	sigOff := off + nproofs*recLen // ECDSA block: nproofs × (r32 ‖ s32 ‖ recid8)
+	full := base.fullInput()
+	full[sigOff] ^= 0x01
+	assertCircuitFails(t, full, failECDSA, "tampered-signature")
+}
+
+// TestCheatTrailingGarbage appends bytes after the last block (8 of them:
+// ZisK requires input length ≡ 0 mod 8, shorter tails never reach the guest).
+// The parser must reject inputs it did not fully consume.
+func TestCheatTrailingGarbage(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+	full := append(base.fullInput(), 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA)
+	assertCircuitFails(t, full, failParse, "trailing-garbage")
+}
+
+// TestCheatMissingStateBlock drops the STATETX block entirely.
+func TestCheatMissingStateBlock(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+	var full []byte
+	full = append(full, base.baseBin...)
+	full = append(full, base.censusBlock...)
+	full = append(full, base.reencBlock...)
+	full = append(full, base.kzgBlock...)
+	assertCircuitFails(t, full, failMissing, "missing-state-block")
+}
+
+// TestCheatMissingKZGBlock omits the KZG block. This is accepted by design
+// (chained mode has no DA blob), but the blob-commitment limbs in the publics
+// must then be all-zero so an Ethereum-mode consumer comparing them against
+// the blob's versioned hash can never be satisfied by an omitted blob.
+func TestCheatMissingKZGBlock(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+	var full []byte
+	full = append(full, base.baseBin...)
+	full = append(full, base.stateBlock...)
+	full = append(full, base.censusBlock...)
+	full = append(full, base.reencBlock...)
+	outputs, err := runZiskEmu(full)
+	if err != nil {
+		t.Fatalf("ziskemu failed: %v", err)
+	}
+	if outputs[davinci.OutputOverallOk] != 1 {
+		t.Fatalf("expected overall_ok=1 without KZG block, got %d; fail_mask=0x%08x",
+			outputs[davinci.OutputOverallOk], outputs[davinci.OutputFailMask])
+	}
+	for i := 0; i < 12; i++ {
+		if outputs[davinci.OutputBlobCommitment+i] != 0 {
+			t.Errorf("blob commitment limb %d nonzero (0x%08x) with KZG block absent",
+				i, outputs[davinci.OutputBlobCommitment+i])
+		}
+	}
+}
+
+// TestCheatOversizedNproofs claims nproofs=129 (> MAX_BATCH_SIZE) in the
+// header while carrying only 2 proof records. The parser must flag-and-clamp,
+// never trust the declared count.
+func TestCheatOversizedNproofs(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+	full := base.fullInput()
+	binary.LittleEndian.PutUint64(full[16:], 129)
+	assertCircuitFails(t, full, failParse, "oversized-nproofs")
 }

@@ -48,7 +48,11 @@ fn hex32_le(field: &str, s: &str) -> Result<[u8; 32]> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = hex::decode(s).with_context(|| format!("config field {}: bad hex", field))?;
     if bytes.len() != 32 {
-        bail!("config field {}: expected 32 bytes, got {}", field, bytes.len());
+        bail!(
+            "config field {}: expected 32 bytes, got {}",
+            field,
+            bytes.len()
+        );
     }
     Ok(bytes.try_into().unwrap())
 }
@@ -92,15 +96,24 @@ struct PlonkVkey {
     power: u32,
     k1: String,
     k2: String,
-    #[serde(rename = "Qm")] qm: [String; 3],
-    #[serde(rename = "Ql")] ql: [String; 3],
-    #[serde(rename = "Qr")] qr: [String; 3],
-    #[serde(rename = "Qo")] qo: [String; 3],
-    #[serde(rename = "Qc")] qc: [String; 3],
-    #[serde(rename = "S1")] s1: [String; 3],
-    #[serde(rename = "S2")] s2: [String; 3],
-    #[serde(rename = "S3")] s3: [String; 3],
-    #[serde(rename = "X_2")] x_2: [[String; 2]; 3],
+    #[serde(rename = "Qm")]
+    qm: [String; 3],
+    #[serde(rename = "Ql")]
+    ql: [String; 3],
+    #[serde(rename = "Qr")]
+    qr: [String; 3],
+    #[serde(rename = "Qo")]
+    qo: [String; 3],
+    #[serde(rename = "Qc")]
+    qc: [String; 3],
+    #[serde(rename = "S1")]
+    s1: [String; 3],
+    #[serde(rename = "S2")]
+    s2: [String; 3],
+    #[serde(rename = "S3")]
+    s3: [String; 3],
+    #[serde(rename = "X_2")]
+    x_2: [[String; 2]; 3],
     w: String,
 }
 
@@ -149,7 +162,11 @@ pub fn vadcop_blob_from_proof_bin(bytes: &[u8]) -> Result<VadcopBlob> {
             .map_err(|e| anyhow::anyhow!("bincode-decode proof.bin: {}", e))?;
 
     let (proof_words, zisk_vk, minimal) = match proof.body {
-        ProofBody::Vadcop { proof, zisk_vk, minimal } => (proof, zisk_vk, minimal),
+        ProofBody::Vadcop {
+            proof,
+            zisk_vk,
+            minimal,
+        } => (proof, zisk_vk, minimal),
         ProofBody::Plonk { .. } => bail!("proof.bin holds a PLONK proof; need a Vadcop STARK"),
     };
 
@@ -169,8 +186,7 @@ pub fn vadcop_blob_from_proof_bin(bytes: &[u8]) -> Result<VadcopBlob> {
     }
 
     let n_publics = PROGRAM_VK_LEN + ZISK_PUBLICS;
-    let mut words: Vec<u64> =
-        Vec::with_capacity(2 + n_publics + proof_words.len() + zisk_vk.len());
+    let mut words: Vec<u64> = Vec::with_capacity(2 + n_publics + proof_words.len() + zisk_vk.len());
     words.push(minimal as u64);
     words.push(n_publics as u64);
     words.extend_from_slice(&proof.program_vk.vk);
@@ -284,7 +300,13 @@ impl ResultsPayload {
             out.extend_from_slice(&r.to_le_bytes());
         }
         for (i, p) in self.cp_proofs.iter().enumerate() {
-            for (f, v) in [("a1x", &p.a1x), ("a1y", &p.a1y), ("a2x", &p.a2x), ("a2y", &p.a2y), ("z", &p.z)] {
+            for (f, v) in [
+                ("a1x", &p.a1x),
+                ("a1y", &p.a1y),
+                ("a2x", &p.a2x),
+                ("a2y", &p.a2y),
+                ("z", &p.z),
+            ] {
                 out.extend_from_slice(&hex32_le(&format!("cp[{}].{}", i, f), v)?);
             }
         }

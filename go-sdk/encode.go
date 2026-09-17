@@ -75,6 +75,9 @@ func EncodeStateBlock(sd *StateTransitionData) ([]byte, error) {
 		procNLevels := len(sd.ProcessSmt[0].Siblings)
 		buf = appendU64(buf, uint64(procNLevels))
 		for i, p := range sd.ProcessSmt {
+			if len(p.Siblings) != procNLevels {
+				return nil, fmt.Errorf("process_smt[%d] has %d siblings, expected %d", i, len(p.Siblings), procNLevels)
+			}
 			e, err := encodeSMTEntry(p)
 			if err != nil {
 				return nil, fmt.Errorf("process_smt[%d]: %w", i, err)
@@ -171,13 +174,6 @@ func encodeSMTEntry(e SmtEntry) ([]byte, error) {
 		return nil, fmt.Errorf("sibling: %w", err)
 	}
 	return buf, nil
-}
-
-// zeroSMTEntry returns a zero-filled SMT entry binary (for padding).
-func zeroSMTEntry(nLevels int) []byte {
-	// 4 FrRaw (32 bytes each) + 5 u64 + nLevels FrRaw
-	size := 4*32 + 5*8 + nLevels*32
-	return make([]byte, size)
 }
 
 // leHexToFr parses a 0x-prefixed 32-byte little-endian hex string
@@ -320,7 +316,7 @@ func EncodeCensusBlock(proofs []CensusProof) ([]byte, error) {
 
 // EncodeReencBlock serialises the REENCBLK for the ZisK circuit.
 // Magic = "REENCBLK" (8 bytes LE u64), followed by n_voters, pub_key_x/y,
-// then per-voter: k, then 8×(c1x,c1y,c2x,c2y) original, 8×(c1x,c1y,c2x,c2y) reencrypted.
+// then per-voter: k, then NumFields×(c1x,c1y,c2x,c2y) original, NumFields×(c1x,c1y,c2x,c2y) reencrypted.
 func EncodeReencBlock(r *ReencryptionData) ([]byte, error) {
 	if r == nil || len(r.Entries) == 0 {
 		return nil, nil

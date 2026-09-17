@@ -16,18 +16,18 @@ func BigIntToHex32BE(v *big.Int) string {
 
 // bigIntToHex32BE converts a *big.Int to a 0x-prefixed 64-character big-endian
 // hex string (32 bytes zero-padded). This is the standard encoding for all
-// 256-bit field values in the go-sdk API.
+// 256-bit field values in the go-sdk API. Panics if v is negative or exceeds
+// 256 bits — always a caller bug, better loud than silently corrupted wire
+// bytes (FillBytes alone would encode the absolute value).
 func bigIntToHex32BE(v *big.Int) string {
 	if v == nil {
 		return "0x" + zeroHex64
 	}
-	b := v.Bytes() // big-endian, variable length
-	var padded [32]byte
-	if len(b) <= 32 {
-		copy(padded[32-len(b):], b)
-	} else {
-		copy(padded[:], b[len(b)-32:])
+	if v.Sign() < 0 {
+		panic("bigIntToHex32BE: negative value")
 	}
+	var padded [32]byte
+	v.FillBytes(padded[:])
 	return "0x" + hex.EncodeToString(padded[:])
 }
 
@@ -360,9 +360,9 @@ func NewStateTransitionData(
 
 // NewBallotProofData creates BallotProofData from native Go types.
 // Each Fr element is a *big.Int in the BN254 scalar field. The slice
-// oldResults must have exactly 32 elements. Each inner slice of voterBallots
-// and overwrittenBallots must also have exactly 32 elements
-// (8 ciphertexts × 4 coordinates).
+// oldResults must have exactly BallotFields elements. Each inner slice of
+// voterBallots and overwrittenBallots must also have exactly BallotFields
+// elements (NumFields ciphertexts × 4 coordinates).
 func NewBallotProofData(
 	oldResults []*big.Int,
 	voterBallots [][]*big.Int,

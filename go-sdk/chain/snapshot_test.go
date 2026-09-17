@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	qt "github.com/frankban/quicktest"
+	"github.com/fxamacker/cbor/v2"
+	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/bjj_gnark"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/elgamal"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/spec/params"
@@ -111,4 +113,77 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	st3, err := RestoreState(cfg, blob2)
 	c.Assert(err, qt.IsNil)
 	c.Assert(st3.Root(), qt.Equals, st2.Root())
+}
+
+func TestRestoreStateRejectsCorruptSnapshot(t *testing.T) {
+	c := qt.New(t)
+	encKey := testEncKey(t)
+	cfg := testConfig(encKey)
+	st, err := NewState(cfg)
+	c.Assert(err, qt.IsNil)
+	_, _, err = st.ApplyBatch([]Vote{vote(0, 1, 0x01, testBallot(t, encKey, 10))})
+	c.Assert(err, qt.IsNil)
+	blob, err := st.Snapshot()
+	c.Assert(err, qt.IsNil)
+
+	tamper := func(mutate func(*stateSnapshot)) error {
+		var snap stateSnapshot
+		c.Assert(cbor.Unmarshal(blob, &snap), qt.IsNil)
+		mutate(&snap)
+		b, err := cbor.Marshal(snap)
+		c.Assert(err, qt.IsNil)
+		_, err = RestoreState(cfg, b)
+		return err
+	}
+
+	// Coordinate outside the field.
+	err = tamper(func(s *stateSnapshot) { s.Results[0] = bn254ScalarField.Bytes() })
+	c.Assert(err, qt.ErrorMatches, ".*not in field.*")
+
+	// Off-curve point: x replaced, y kept.
+	err = tamper(func(s *stateSnapshot) { s.Results[0] = big.NewInt(12345).Bytes() })
+	c.Assert(err, qt.ErrorMatches, ".*not on BabyJubJub.*")
+
+	// Oversize coordinate encoding.
+	err = tamper(func(s *stateSnapshot) { s.Results[0] = make([]byte, 33) })
+	c.Assert(err, qt.ErrorMatches, ".*want <= 32.*")
+
+	// Restore under a different election config must be rejected.
+	cfg2 := cfg
+	cfg2.ProcessID = big.NewInt(0x999)
+	_, err = RestoreState(cfg2, blob)
+	c.Assert(err, qt.ErrorMatches, ".*config leaf 0x00 mismatch.*")
+}
+
+func TestApplyBatchValidation(t *testing.T) {
+	c := qt.New(t)
+	encKey := testEncKey(t)
+	st, err := NewState(testConfig(encKey))
+	c.Assert(err, qt.IsNil)
+	b := testBallot(t, encKey, 10)
+
+	_, _, err = st.ApplyBatch(make([]Vote, davinci.MaxBatchSize+1))
+	c.Assert(err, qt.ErrorMatches, ".*exceeds MaxBatchSize.*")
+
+	_, _, err = st.ApplyBatch([]Vote{vote(-1, 1, 0x01, b)})
+	c.Assert(err, qt.ErrorMatches, ".*census index -1 out of range.*")
+
+	_, _, err = st.ApplyBatch([]Vote{{CensusIdx: 0, VoteID: 1 | 1<<63, AddressLo16: 0x10000, Ballot: b}})
+	c.Assert(err, qt.ErrorMatches, ".*AddressLo16.*exceeds 16 bits.*")
+
+	// Rejected batches leave the state untouched.
+	voters, overwrites := st.Voters()
+	c.Assert(voters, qt.Equals, uint64(0))
+	c.Assert(overwrites, qt.Equals, uint64(0))
+}
+
+func TestNewStateNumFieldsBounds(t *testing.T) {
+	c := qt.New(t)
+	encKey := testEncKey(t)
+	for _, mode := range []int64{0x00, 0x11} { // num_fields 0 and 17
+		cfg := testConfig(encKey)
+		cfg.BallotMode = big.NewInt(mode)
+		_, err := NewState(cfg)
+		c.Assert(err, qt.IsNotNil, qt.Commentf("BallotMode %#x", mode))
+	}
 }
