@@ -257,7 +257,6 @@ func TestCensusProofFromBigInts(t *testing.T) {
 }
 
 func TestReencryptionEntryFromBigInts(t *testing.T) {
-	k := big.NewInt(999)
 	orig := make([]*big.Int, BallotFields)
 	reenc := make([]*big.Int, BallotFields)
 	for i := 0; i < BallotFields; i++ {
@@ -265,12 +264,9 @@ func TestReencryptionEntryFromBigInts(t *testing.T) {
 		reenc[i] = big.NewInt(int64(100 + i))
 	}
 
-	entry, err := ReencryptionEntryFromBigInts(k, orig, reenc)
+	entry, err := ReencryptionEntryFromBigInts(orig, reenc)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if entry.K != bigIntToHex32BE(k) {
-		t.Errorf("K mismatch")
 	}
 	// Verify first ciphertext
 	if entry.Original[0].C1.X != bigIntToHex32BE(big.NewInt(0)) {
@@ -278,7 +274,7 @@ func TestReencryptionEntryFromBigInts(t *testing.T) {
 	}
 
 	// Wrong length
-	_, err = ReencryptionEntryFromBigInts(k, make([]*big.Int, BallotFields-1), reenc)
+	_, err = ReencryptionEntryFromBigInts(make([]*big.Int, BallotFields-1), reenc)
 	if err == nil {
 		t.Error("expected error for wrong original length")
 	}
@@ -468,13 +464,16 @@ func TestPublicOutputsString(t *testing.T) {
 }
 
 func TestNewReencryptionData(t *testing.T) {
-	entries := []ReencryptionEntry{{K: "0x01"}}
-	rd := NewReencryptionData(big.NewInt(10), big.NewInt(20), entries)
+	entries := []ReencryptionEntry{{}}
+	rd := NewReencryptionData(big.NewInt(10), big.NewInt(20), big.NewInt(30), entries)
 	if rd.EncryptionKeyX != bigIntToHex32BE(big.NewInt(10)) {
 		t.Errorf("EncryptionKeyX = %s", rd.EncryptionKeyX)
 	}
 	if rd.EncryptionKeyY != bigIntToHex32BE(big.NewInt(20)) {
 		t.Errorf("EncryptionKeyY = %s", rd.EncryptionKeyY)
+	}
+	if rd.Seed != bigIntToHex32BE(big.NewInt(30)) {
+		t.Errorf("Seed = %s", rd.Seed)
 	}
 	if len(rd.Entries) != 1 {
 		t.Errorf("len(Entries) = %d, want 1", len(rd.Entries))

@@ -57,6 +57,9 @@ pub struct ParsedInput {
     /// Re-encryption verification entries (REENCBLK magic). Empty if absent.
     pub reenc_pub_key: Option<(FrRaw, FrRaw)>,
     pub reenc_entries: Vec<ReencEntry>,
+    /// Batch-scoped re-encryption seed (REENCBLK). ZERO_FR when the block is
+    /// absent; presence is signalled by `reenc_pub_key.is_some()`.
+    pub reenc_seed: FrRaw,
     /// KZG barycentric evaluation block (KZGBLK!! magic). None if absent.
     pub kzg: Option<KZGBlock>,
     /// SHA-256 of the raw VK wire bytes (arbo leaf convention). Bound to the
@@ -195,6 +198,7 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
     let mut csp_block: Option<CspBlock> = None;
     let mut reenc_pub_key: Option<(FrRaw, FrRaw)> = None;
     let mut reenc_entries: Vec<ReencEntry> = Vec::new();
+    let mut reenc_seed: FrRaw = ZERO_FR;
     let mut kzg: Option<KZGBlock> = None;
 
     if off + 8 <= input.len() {
@@ -287,9 +291,10 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
             let pub_key_x = read_fr!(&mut off);
             let pub_key_y = read_fr!(&mut off);
             reenc_pub_key = Some((pub_key_x, pub_key_y));
+            // Batch-scoped seed: fed to `reenc_chain_start(seed, old_root)`.
+            reenc_seed = read_fr!(&mut off);
             reenc_entries.reserve(n_voters);
             for _ in 0..n_voters {
-                let k = read_fr!(&mut off);
                 let mut original: [BjjCiphertext; NUM_FIELDS] = Default::default();
                 let mut reencrypted: [BjjCiphertext; NUM_FIELDS] = Default::default();
                 for j in 0..NUM_FIELDS {
@@ -309,7 +314,6 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
                     };
                 }
                 reenc_entries.push(ReencEntry {
-                    k,
                     original,
                     reencrypted,
                 });
@@ -371,6 +375,7 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
         csp_block,
         reenc_pub_key,
         reenc_entries,
+        reenc_seed,
         kzg,
         vk_hash,
     }

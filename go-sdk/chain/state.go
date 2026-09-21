@@ -193,31 +193,31 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 	bLen := arbo.HashFunctionSha256.Len()
 
 	// Re-encryption block first: the state tree stores the re-encrypted
-	// ballot leaf hashes.
+	// ballot leaf hashes. One secret seed per batch drives the whole
+	// scalar chain, bound to the state root before the batch — padded
+	// slots [nf, NumFields) are copied unchanged and stay TE identity,
+	// which the guest asserts before skipping their per-field work.
 	nf := s.cfg.numFields()
 	pkX, pkY := bjjPointToFr32Hex(s.cfg.EncKey)
+	seed, err := rand.Int(rand.Reader, s.cfg.EncKey.Order())
+	if err != nil {
+		return nil, nil, fmt.Errorf("rand reenc seed: %w", err)
+	}
+	oldRootInt, err := davinci.LeHexToBigInt(s.root)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse oldRoot: %w", err)
+	}
+	chain := elgamal.NewReencChain(seed, oldRootInt)
 	reencEntries := make([]davinci.ReencryptionEntry, n)
 	reencBallots := make([]*elgamal.Ballot, n)
 	for idx, v := range votes {
-		rawK, err := rand.Int(rand.Reader, s.cfg.EncKey.Order())
-		if err != nil {
-			return nil, nil, fmt.Errorf("rand k[%d]: %w", idx, err)
-		}
-		reenc, _, err := v.Ballot.Reencrypt(s.cfg.EncKey, rawK)
+		reenc, err := v.Ballot.ReencryptChained(s.cfg.EncKey, chain, nf)
 		if err != nil {
 			return nil, nil, fmt.Errorf("reencrypt[%d]: %w", idx, err)
 		}
-		// Padded slots [nf, NumFields) must stay the TE identity end-to-end.
-		// Re-encrypting the identity yields a non-identity Enc(0, k_i), but the
-		// guest asserts each padded slot is identity before skipping its
-		// per-field work, so reset them here. Keeps the reenc block, ballot
-		// leaf and results accumulator aligned with the guest's num_fields skip.
-		for i := nf; i < davinci.NumFields; i++ {
-			reenc.Ciphertexts[i] = identityCiphertext()
-		}
 		reencBallots[idx] = reenc
 
-		entry := davinci.ReencryptionEntry{K: bigIntToFr32(rawK)}
+		var entry davinci.ReencryptionEntry
 		for i := 0; i < davinci.NumFields; i++ {
 			oc1x, oc1y := bjjPointToFr32Hex(v.Ballot.Ciphertexts[i].C1)
 			oc2x, oc2y := bjjPointToFr32Hex(v.Ballot.Ciphertexts[i].C2)
@@ -336,6 +336,7 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 	reencData := &davinci.ReencryptionData{
 		EncryptionKeyX: pkX,
 		EncryptionKeyY: pkY,
+		Seed:           bigIntToFr32(seed),
 		Entries:        reencEntries,
 	}
 	return state, reencData, nil
@@ -457,17 +458,6 @@ func (s *State) leafSiblings(key uint64) ([]string, error) {
 // are identity-padded.
 func (c Config) numFields() int {
 	return int(new(big.Int).And(c.BallotMode, big.NewInt(0xff)).Int64())
-}
-
-// identityCiphertext returns the TE identity ElGamal ciphertext ((0,1),(0,1)),
-// used to pad ciphertext slots beyond the declared num_fields. SetZero gives
-// the BJJ identity (0,1); New() would give (0,0), which is off-curve.
-func identityCiphertext() *elgamal.Ciphertext {
-	c1 := bjjgnark.New()
-	c1.SetZero()
-	c2 := bjjgnark.New()
-	c2.SetZero()
-	return &elgamal.Ciphertext{C1: c1, C2: c2}
 }
 
 // encKeyLeafValue computes the config leaf for the encryption key:

@@ -1,8 +1,8 @@
 // snapshot.go serializes and restores a chained-election State so an
-// orchestrator can survive restarts. Per-ballot re-encryption draws a random
-// k, so replaying the vote log does not reproduce the same tree; the full
-// state (arbo contents, net accumulator, per-voter ballots and counters) has
-// to be captured verbatim.
+// orchestrator can survive restarts. Each batch draws a fresh random
+// re-encryption seed, so replaying the vote log does not reproduce the
+// same tree; the full state (arbo contents, net accumulator, per-voter
+// ballots and counters) has to be captured verbatim.
 package chain
 
 import (

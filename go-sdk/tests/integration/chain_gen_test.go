@@ -124,7 +124,7 @@ func TestGenChainInputs(t *testing.T) {
 			t.Fatalf("read base bin: %v", err)
 		}
 
-		reencData, reencBallots, err := election.BuildReencBlock(batch.Results)
+		reencData, reencBallots, err := election.BuildReencBlock(election.OldRoot, batch.Results)
 		if err != nil {
 			t.Fatalf("batch %d: BuildReencBlock: %v", b, err)
 		}

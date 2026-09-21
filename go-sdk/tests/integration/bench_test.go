@@ -94,7 +94,7 @@ func TestPlonkBenchmark(t *testing.T) {
 		if err != nil {
 			t.Fatalf("size=%d: BuildKZGBlock: %v", size, err)
 		}
-		reencBlock, reencBallots, err := election.BuildReencBlock(batch.Results)
+		reencBlock, reencBallots, err := election.BuildReencBlock(oldRoot, batch.Results)
 		if err != nil {
 			t.Fatalf("size=%d: BuildReencBlock: %v", size, err)
 		}

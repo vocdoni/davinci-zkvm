@@ -94,8 +94,6 @@ pub struct BjjCiphertextJson {
 /// Re-encryption data for one voter.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ReencryptionEntryJson {
-    /// Re-encryption seed (before Poseidon), 32-byte BE hex.
-    pub k: String,
     /// Original ciphertexts from the ballot proof.
     pub original: [BjjCiphertextJson; NUM_FIELDS],
     /// Re-encrypted ciphertexts stored in the state tree.
@@ -103,10 +101,16 @@ pub struct ReencryptionEntryJson {
 }
 
 /// Re-encryption verification data for the full batch.
+///
+/// `seed` is the sequencer-private, batch-scoped chain seed (32-byte
+/// big-endian hex). The guest derives every per-ciphertext offset scalar from
+/// `(seed, state.old_root)` via a SHA-256 chain, so no per-voter secret is
+/// carried in the payload.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ReencryptionDataJson {
     pub encryption_key_x: String,
     pub encryption_key_y: String,
+    pub seed: String,
     pub entries: Vec<ReencryptionEntryJson>,
 }
 

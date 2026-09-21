@@ -49,11 +49,11 @@ func TestChainAttackFoldChain(t *testing.T) {
 		if err != nil {
 			t.Fatalf("batch %d: GenerateBallotBatch: %v", b, err)
 		}
-		reencBlock, reencBallots, err := election.BuildReencBlock(batch.Results)
+		rootBefore[b] = election.OldRoot
+		reencBlock, reencBallots, err := election.BuildReencBlock(rootBefore[b], batch.Results)
 		if err != nil {
 			t.Fatalf("batch %d: BuildReencBlock: %v", b, err)
 		}
-		rootBefore[b] = election.OldRoot
 		stateBlock, _, err := election.BuildStateBlock(voters, batch.Results, reencBallots)
 		if err != nil {
 			t.Fatalf("batch %d: BuildStateBlock: %v", b, err)

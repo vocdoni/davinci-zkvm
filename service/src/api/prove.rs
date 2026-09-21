@@ -143,9 +143,9 @@ pub async fn submit_prove(
         if let Some(r) = reenc_json {
             let pub_key_x = be_hex32_to_fr_le(&r.encryption_key_x)?;
             let pub_key_y = be_hex32_to_fr_le(&r.encryption_key_y)?;
+            let seed = be_hex32_to_fr_le(&r.seed)?;
             let mut entries = Vec::with_capacity(r.entries.len());
             for e in &r.entries {
-                let k = be_hex32_to_fr_le(&e.k)?;
                 let parse_ct = |ct: &crate::types::BjjCiphertextJson| -> anyhow::Result<BjjCiphertextData> {
                     Ok(BjjCiphertextData {
                         c1x: be_hex32_to_fr_le(&ct.c1.x)?,
@@ -166,9 +166,9 @@ pub async fn submit_prove(
                 }
                 let reencrypted: [BjjCiphertextData; NUM_FIELDS] = reenc_arr.try_into()
                     .map_err(|_| anyhow::anyhow!("expected {} reencrypted ciphertexts", NUM_FIELDS))?;
-                entries.push(ReencEntryData { k, original, reencrypted });
+                entries.push(ReencEntryData { original, reencrypted });
             }
-            bytes.extend(write_reenc_block(pub_key_x, pub_key_y, &entries)?);
+            bytes.extend(write_reenc_block(pub_key_x, pub_key_y, seed, &entries)?);
         }
 
         // Append KZG blob barycentric evaluation block.

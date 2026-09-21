@@ -221,9 +221,10 @@ type BjjCiphertext struct {
 }
 
 // ReencryptionEntry holds the re-encryption data for one voter.
+// The per-voter scalar has been replaced by a single sequencer-private
+// seed on ReencryptionData; both host and guest derive the per-field
+// scalars from that seed chained to the state root before the batch.
 type ReencryptionEntry struct {
-	// K is the re-encryption seed (before Poseidon hash), 32-byte BE hex.
-	K string `json:"k"`
 	// Original contains the original ciphertexts from the ballot proof.
 	Original [NumFields]BjjCiphertext `json:"original"`
 	// Reencrypted contains the re-encrypted ciphertexts stored in the state tree.
@@ -236,6 +237,12 @@ type ReencryptionData struct {
 	EncryptionKeyX string `json:"encryption_key_x"`
 	// EncryptionKeyY is the y-coordinate of the ElGamal encryption public key.
 	EncryptionKeyY string `json:"encryption_key_y"`
+	// Seed is the sequencer-private seed for the batch re-encryption
+	// scalar chain, encoded as a 32-byte big-endian hex string. The guest
+	// derives every per-field offset scalar as
+	// r_0 = SHA256("davinci-reenc-v1" || be32(seed) || be32(old_root))
+	// then r_{t+1} = SHA256(be32(r_t)), each reduced mod BN254 Fr.
+	Seed string `json:"seed"`
 	// Entries holds one entry per real voter.
 	Entries []ReencryptionEntry `json:"entries"`
 }

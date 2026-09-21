@@ -82,7 +82,7 @@ func TestCSPChainedStateTransitions(t *testing.T) {
 		}
 
 		// Build re-encryption block.
-		reencBlock, reencBallots, err := election.BuildReencBlock(batch.Results)
+		reencBlock, reencBallots, err := election.BuildReencBlock(oldRoot, batch.Results)
 		if err != nil {
 			t.Fatalf("transition %d: BuildReencBlock: %v", txIdx, err)
 		}

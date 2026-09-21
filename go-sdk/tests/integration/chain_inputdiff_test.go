@@ -38,7 +38,7 @@ func TestChainInputDiff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateBallotBatch: %v", err)
 	}
-	reencBlock, reencBallots, err := election.BuildReencBlock(batch.Results)
+	reencBlock, reencBallots, err := election.BuildReencBlock(election.OldRoot, batch.Results)
 	if err != nil {
 		t.Fatalf("BuildReencBlock: %v", err)
 	}

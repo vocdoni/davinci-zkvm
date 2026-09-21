@@ -9,9 +9,20 @@
 //!
 //! ## Re-encryption verification
 //!
-//! Per-field offset scalar chained through SHA-256: `k_0 = H(k)`,
-//! `k_{i+1} = H(k_i)`, where `H(x) = sha256(x_be32) mod r`.
-//! For each field i: `newC1[i] = origC1[i] + k_i*B8`, `newC2[i] = origC2[i] + k_i*pubKey`.
+//! One secret seed per transition, chained through SHA-256 to produce every
+//! per-ciphertext offset scalar. `H(bytes) = sha256(bytes)` read as a
+//! big-endian 256-bit integer, reduced mod r. The chain starts at
+//! `r_0 = H(b"davinci-reenc-v1" || be32(seed) || be32(old_root))` and
+//! advances with `r_{t+1} = H(be32(r_t))`. Each ACTIVE field consumes one
+//! chain element (in block order, then field order) — `newC1 = origC1 + r_t*B8`
+//! and `newC2 = origC2 + r_t*pubKey` — then the chain advances. Padded fields
+//! (`i >= num_fields`) keep the identity assertion and consume nothing.
+//!
+//! The seed is the only source of secrecy; the tag and `old_root` are public
+//! and only serve to move chains from different transitions onto distinct
+//! starting points, so no scalar can repeat within or across transitions
+//! (a scalar used twice would let anyone holding both originals link them
+//! to their stored ciphertexts).
 //!
 //! ## Hardware acceleration
 //!
@@ -30,18 +41,11 @@ use crate::hash::sha256_once;
 use crate::types::{FrRaw, BjjCiphertext, ReencEntry, FAIL_REENC};
 use ziskos::syscalls::{syscall_babyjubjub_add, SyscallBabyJubJubAddParams, SyscallPoint256};
 
-/// One step of the re-encryption offset-scalar chain: `sha256(k_be32)` read as a
-/// big-endian 256-bit integer, reduced into BN254 Fr. Mirrors the producer
-/// (davinci-node `elgamal` re-encryption). Replaces the former Poseidon chain to
-/// move the work onto the `sha256f` precompile.
-fn sha256_to_scalar(k: &FrRaw) -> FrRaw {
-    // k (< r) → 32-byte big-endian.
-    let mut buf = [0u8; 32];
-    for i in 0..4 {
-        let off = (3 - i) * 8;
-        buf[off..off + 8].copy_from_slice(&k[i].to_be_bytes());
-    }
-    let digest = sha256_once(&buf);
+/// `H(bytes) = sha256(bytes)` read as a big-endian 256-bit integer, reduced
+/// into BN254 Fr. Shared by the chain start (arbitrary-length preimage) and
+/// each chain step (32-byte preimage).
+fn sha256_to_scalar_bytes(preimage: &[u8]) -> FrRaw {
+    let digest = sha256_once(preimage);
     // 32-byte big-endian digest → raw [u64; 4] LE limbs (may be ≥ r).
     let mut raw = [0u64; 4];
     for i in 0..4 {
@@ -49,6 +53,39 @@ fn sha256_to_scalar(k: &FrRaw) -> FrRaw {
         raw[i] = u64::from_be_bytes(digest[off..off + 8].try_into().unwrap());
     }
     bn254_fr::reduce(&raw)
+}
+
+/// Serialize an FrRaw as its 32-byte big-endian encoding.
+#[inline]
+fn fr_to_be32(k: &FrRaw) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    for i in 0..4 {
+        let off = (3 - i) * 8;
+        buf[off..off + 8].copy_from_slice(&k[i].to_be_bytes());
+    }
+    buf
+}
+
+/// One step of the offset-scalar chain: `H(be32(k))`. Runs on the `sha256f`
+/// precompile and closes with a single `arith256_mod` reduction.
+fn sha256_to_scalar(k: &FrRaw) -> FrRaw {
+    sha256_to_scalar_bytes(&fr_to_be32(k))
+}
+
+/// Domain tag for the re-encryption chain start. 16 bytes; keep in sync with
+/// the producer (`elgamal.NewReencChain` in go-sdk).
+const REENC_CHAIN_TAG: &[u8; 16] = b"davinci-reenc-v1";
+
+/// Chain start: `r_0 = H(tag || be32(seed) || be32(old_root))`. The seed is
+/// the per-batch sequencer secret; `old_root` is the STATETX `old_root` word
+/// as the guest holds it. Binding the start to `old_root` keeps chains from
+/// different transitions disjoint even if a producer reuses a seed.
+pub fn reenc_chain_start(seed: &FrRaw, old_root: &FrRaw) -> FrRaw {
+    let mut buf = [0u8; 16 + 32 + 32];
+    buf[..16].copy_from_slice(REENC_CHAIN_TAG);
+    buf[16..48].copy_from_slice(&fr_to_be32(seed));
+    buf[48..80].copy_from_slice(&fr_to_be32(old_root));
+    sha256_to_scalar_bytes(&buf)
 }
 
 // Curve constants
@@ -215,18 +252,16 @@ fn is_on_bjj_curve(x: &BnFr, y: &BnFr) -> bool {
 
 // Public API
 
-/// Verify that `reencrypted[i] = original[i] + encZero(k_i, pubKey)` for all
-/// active fields, where each field uses a *distinct* scalar chained through
-/// SHA-256: `k_0 = H(k)`, `k_{i+1} = H(k_i)` with `H(x) = sha256(x_be32) mod r`.
-/// This matches davinci-node `Ballot.Reencrypt`/`EncryptedZero`, which advances
-/// the offset scalar once per field. `k` is the raw re-encryption seed.
-/// Padded fields `i >= num_fields` carry the TE identity on both sides and are
-/// asserted (cheap field compares) rather than re-encrypted, so their per-field
-/// scalar mults are skipped entirely.
-/// `pk_table` is the fixed-base window table for the (already
-/// curve-validated) ElGamal public key; B8 uses the compile-time table.
+/// Verify that `reencrypted[i] = original[i] + encZero(r_t, pubKey)` for every
+/// ACTIVE field, threading the batch-scoped chain `chain` through the entry.
+/// For each active field the current chain value is used once
+/// (`newC1 = origC1 + r_t*B8`, `newC2 = origC2 + r_t*pubKey`), then the chain
+/// advances via `sha256_to_scalar`. Padded fields (`i >= num_fields`) keep the
+/// TE-identity assertion and consume nothing, so the next entry resumes exactly
+/// where this one left off. `pk_table` is the fixed-base window table for the
+/// (already curve-validated) ElGamal public key; B8 uses the compile-time table.
 fn verify_reencryption(
-    k: &FrRaw,
+    chain: &mut FrRaw,
     pk_table: &BjjFixedBase,
     num_fields: usize,
     original: &[BjjCiphertext],
@@ -236,15 +271,10 @@ fn verify_reencryption(
         return false;
     }
 
-    // Per-field offset scalar, chained through SHA-256. k_0 = H(k).
-    let mut k_i = sha256_to_scalar(k);
-
-    // For each active field: delta1_i = k_i * B8, delta2_i = k_i * pubKey, then
-    // newC1 = origC1 + delta1_i, newC2 = origC2 + delta2_i. Advance k_i once
-    // per field.
     for i in 0..original.len() {
         if i >= num_fields {
-            // Padded slot: assert identity on both sides, skip EC work.
+            // Padded slot: assert identity on both sides, skip EC work and
+            // do not advance the chain.
             let o = &original[i];
             let r = &reencrypted[i];
             if o.c1x != bn254_fr::ZERO || o.c1y != bn254_fr::ONE
@@ -255,8 +285,8 @@ fn verify_reencryption(
             }
             continue;
         }
-        let delta1 = b8_mul(&k_i);
-        let delta2 = pk_table.mul(&k_i);
+        let delta1 = b8_mul(chain);
+        let delta2 = pk_table.mul(chain);
 
         // newC = origC + delta; compare against the claimed affine point. The
         // precompile returns canonical coordinates, and the producer emits
@@ -271,18 +301,26 @@ fn verify_reencryption(
             return false;
         }
 
-        // Advance the offset scalar for the next field.
-        k_i = sha256_to_scalar(&k_i);
+        // Advance the chain for the next active field.
+        *chain = sha256_to_scalar(chain);
     }
     true
 }
 
 /// Verify all re-encryption entries from the ParsedInput REENCBLK.
-/// Returns true if all are valid (or if the block is absent).
-/// The public key is curve-checked once and its fixed-base window table
-/// built once, shared by all entries; B8 uses the compile-time table.
+/// Returns true if all are valid; an absent block sets `FAIL_MISSING_BLOCK`.
+///
+/// The chain is started ONCE per batch from `(reenc_seed, old_root)` and
+/// threaded through every entry in block order: entry N+1 continues where
+/// entry N left off. This guarantees every chain element is consumed by
+/// exactly one ciphertext, so no scalar can be reused within (or across —
+/// `old_root` differs) a transition. The public key is curve-checked once
+/// and its fixed-base window table built once, shared by all entries; B8
+/// uses the compile-time table.
 pub fn verify_batch_from_parsed(
     reenc_pub_key: &Option<(FrRaw, FrRaw)>,
+    reenc_seed: &FrRaw,
+    old_root: &FrRaw,
     reenc_entries: &[ReencEntry],
     num_fields: usize,
     fail_mask: &mut u32,
@@ -304,9 +342,10 @@ pub fn verify_batch_from_parsed(
     }
     let expected_muls = reenc_entries.len() * num_fields;
     let pk_table = BjjFixedBase::new(pub_key_x, pub_key_y, expected_muls);
+    let mut chain = reenc_chain_start(reenc_seed, old_root);
     for entry in reenc_entries {
         if !verify_reencryption(
-            &entry.k,
+            &mut chain,
             &pk_table,
             num_fields,
             &entry.original,
@@ -434,6 +473,133 @@ mod tests {
         for s in &SCALARS {
             assert_eq!(b8_mul(s), scalar_mult(&b8, s));
         }
+    }
+
+    // Re-encryption chain
+
+    /// Big-endian hex to FrRaw limbs (test helper).
+    fn fr_from_be_hex(hex: &str) -> FrRaw {
+        let bytes: Vec<u8> = (0..64)
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        let mut out = [0u64; 4];
+        for i in 0..4 {
+            let off = (3 - i) * 8;
+            out[i] = u64::from_be_bytes(bytes[off..off + 8].try_into().unwrap());
+        }
+        out
+    }
+
+    /// Frozen vector shared with the Go producer: seed = 1, old_root = 2.
+    #[test]
+    fn reenc_chain_test_vector() {
+        let r0 = reenc_chain_start(&[1, 0, 0, 0], &[2, 0, 0, 0]);
+        let r1 = sha256_to_scalar(&r0);
+        let r2 = sha256_to_scalar(&r1);
+        assert_eq!(r0, fr_from_be_hex("0a63922a58b3fe4dbec15e6db1be5438713862d2fa6fa543af70812000d38d7d"));
+        assert_eq!(r1, fr_from_be_hex("1d7152578cfe912cf8cc3185201ade4d7d81f22d91173f16fb8e88da028240ed"));
+        assert_eq!(r2, fr_from_be_hex("2848f34e5de5c01ed168f2be00d066ba64d30e1229318b7ed98ab934f78a2137"));
+    }
+
+    /// Round trip: build two entries whose reencrypted ciphertexts are the
+    /// original + encZero(r_t, pubKey) sequence produced by the chain, then
+    /// check that swapping entries, mutating old_root, or mutating the seed
+    /// makes verification fail.
+    #[test]
+    fn reenc_batch_roundtrip_and_tamper_detection() {
+        use crate::types::{BjjCiphertext, ReencEntry};
+
+        let seed: FrRaw = [42, 0, 0, 0];
+        let old_root: FrRaw = [0xdead_beef, 0, 0, 0];
+
+        // Public key = 7 * B8 (small, valid on-curve point in the prime-order
+        // subgroup, since B8 generates the subgroup).
+        let pk_scalar: FrRaw = [7, 0, 0, 0];
+        let pk = b8_mul(&pk_scalar);
+        assert!(bjj_on_curve(&pk));
+
+        // Two entries, num_fields = 3 (so field slots 3..NUM_FIELDS are padded).
+        let num_fields = 3usize;
+        let pk_table = BjjFixedBase::new(&pk.0, &pk.1, 2 * num_fields);
+        // Identity ciphertext: ((0,1),(0,1)).
+        let identity_ct = BjjCiphertext {
+            c1x: bn254_fr::ZERO, c1y: bn254_fr::ONE,
+            c2x: bn254_fr::ZERO, c2y: bn254_fr::ONE,
+        };
+
+        // Build entries by picking distinct originals for each active field
+        // (each original is a small multiple of B8, so on-curve) and computing
+        // the reencrypted ciphertexts from the chain.
+        let mut chain = reenc_chain_start(&seed, &old_root);
+        let mut entries: Vec<ReencEntry> = Vec::with_capacity(2);
+        for e in 0..2u64 {
+            let mut original: [BjjCiphertext; crate::types::NUM_FIELDS] = Default::default();
+            let mut reencrypted: [BjjCiphertext; crate::types::NUM_FIELDS] = Default::default();
+            for i in 0..crate::types::NUM_FIELDS {
+                if i < num_fields {
+                    // Pick distinct originals: c1 = (10 + e*100 + i)*B8, c2 = (20 + e*100 + i)*B8.
+                    let s1: FrRaw = [10 + e * 100 + i as u64, 0, 0, 0];
+                    let s2: FrRaw = [20 + e * 100 + i as u64, 0, 0, 0];
+                    let c1 = b8_mul(&s1);
+                    let c2 = b8_mul(&s2);
+                    original[i] = BjjCiphertext { c1x: c1.0, c1y: c1.1, c2x: c2.0, c2y: c2.1 };
+
+                    let delta1 = b8_mul(&chain);
+                    let delta2 = pk_table.mul(&chain);
+                    let new_c1 = affine_add(&canon(&c1), &delta1);
+                    let new_c2 = affine_add(&canon(&c2), &delta2);
+                    reencrypted[i] = BjjCiphertext {
+                        c1x: new_c1.0, c1y: new_c1.1,
+                        c2x: new_c2.0, c2y: new_c2.1,
+                    };
+                    chain = sha256_to_scalar(&chain);
+                } else {
+                    // Identity in padded slots.
+                    original[i] = identity_ct.clone();
+                    reencrypted[i] = identity_ct.clone();
+                }
+            }
+            entries.push(ReencEntry { original, reencrypted });
+        }
+
+        // Sanity: valid batch verifies.
+        let mut mask = 0u32;
+        let ok = verify_batch_from_parsed(
+            &Some((pk.0, pk.1)), &seed, &old_root, &entries, num_fields, &mut mask,
+        );
+        assert!(ok && mask == 0, "valid batch should pass, mask={mask:#x}");
+
+        // Swap entries -> fails.
+        let mut mask = 0u32;
+        let swapped = vec![entries[1].clone(), entries[0].clone()];
+        let ok = verify_batch_from_parsed(
+            &Some((pk.0, pk.1)), &seed, &old_root, &swapped, num_fields, &mut mask,
+        );
+        assert!(!ok && (mask & FAIL_REENC) != 0, "swapped entries must fail");
+
+        // Different old_root -> fails.
+        let mut mask = 0u32;
+        let bad_root: FrRaw = [0xdead_beef ^ 1, 0, 0, 0];
+        let ok = verify_batch_from_parsed(
+            &Some((pk.0, pk.1)), &seed, &bad_root, &entries, num_fields, &mut mask,
+        );
+        assert!(!ok && (mask & FAIL_REENC) != 0, "different old_root must fail");
+
+        // Different seed -> fails.
+        let mut mask = 0u32;
+        let bad_seed: FrRaw = [42 ^ 1, 0, 0, 0];
+        let ok = verify_batch_from_parsed(
+            &Some((pk.0, pk.1)), &bad_seed, &old_root, &entries, num_fields, &mut mask,
+        );
+        assert!(!ok && (mask & FAIL_REENC) != 0, "different seed must fail");
+
+        // Missing block -> FAIL_MISSING_BLOCK.
+        let mut mask = 0u32;
+        let ok = verify_batch_from_parsed(
+            &None, &seed, &old_root, &entries, num_fields, &mut mask,
+        );
+        assert!(!ok && (mask & crate::types::FAIL_MISSING_BLOCK) != 0, "missing block must set FAIL_MISSING_BLOCK");
     }
 
     /// Regenerates `src/b8_table.rs`. Run manually after changing the layout:

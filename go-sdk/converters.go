@@ -258,11 +258,11 @@ func BjjCiphertextFromBigInts(c1x, c1y, c2x, c2y *big.Int) BjjCiphertext {
 
 // ReencryptionEntryFromBigInts builds a ReencryptionEntry from raw big.Int
 // coordinates. Each ballot is BallotFields big.Int values (NumFields
-// ciphertexts × 4 coords). k is the re-encryption random seed. original and
-// reencrypted are each slices of BallotFields *big.Int in the order produced
-// by elgamal.Ballot.BigInts():
-// [ct0.c1x, ct0.c1y, ct0.c2x, ct0.c2y, ct1.c1x, ct1.c1y, ...]
-func ReencryptionEntryFromBigInts(k *big.Int, original, reencrypted []*big.Int) (ReencryptionEntry, error) {
+// ciphertexts × 4 coords). original and reencrypted are each slices of
+// BallotFields *big.Int in the order produced by elgamal.Ballot.BigInts():
+// [ct0.c1x, ct0.c1y, ct0.c2x, ct0.c2y, ct1.c1x, ct1.c1y, ...].
+// The batch's shared re-encryption seed lives on ReencryptionData.
+func ReencryptionEntryFromBigInts(original, reencrypted []*big.Int) (ReencryptionEntry, error) {
 	if len(original) != BallotFields {
 		return ReencryptionEntry{}, fmt.Errorf("original must have %d values, got %d", BallotFields, len(original))
 	}
@@ -270,7 +270,6 @@ func ReencryptionEntryFromBigInts(k *big.Int, original, reencrypted []*big.Int) 
 		return ReencryptionEntry{}, fmt.Errorf("reencrypted must have %d values, got %d", BallotFields, len(reencrypted))
 	}
 	var entry ReencryptionEntry
-	entry.K = bigIntToHex32BE(k)
 	for i := 0; i < NumFields; i++ {
 		off := i * 4
 		entry.Original[i] = BjjCiphertextFromBigInts(
@@ -319,13 +318,39 @@ func NewKZGRequest(processID, rootHashBefore *big.Int,
 // Re-encryption Data Constructor
 
 // NewReencryptionData creates a ReencryptionData block from the encryption
-// public key coordinates and a slice of per-voter entries.
-func NewReencryptionData(encKeyX, encKeyY *big.Int, entries []ReencryptionEntry) *ReencryptionData {
+// public key coordinates, the batch's sequencer-private re-encryption seed,
+// and a slice of per-voter entries.
+func NewReencryptionData(encKeyX, encKeyY, seed *big.Int, entries []ReencryptionEntry) *ReencryptionData {
 	return &ReencryptionData{
 		EncryptionKeyX: bigIntToHex32BE(encKeyX),
 		EncryptionKeyY: bigIntToHex32BE(encKeyY),
+		Seed:           bigIntToHex32BE(seed),
 		Entries:        entries,
 	}
+}
+
+// LeHexToBigInt decodes an arbo little-endian 32-byte hex root (with or
+// without a "0x" prefix) into a *big.Int. It matches how the guest reads
+// the STATETX old_root word (leHexToFr → 4 LE limbs). Use it to compute
+// the oldRoot argument for elgamal.NewReencChain from the state root hex
+// that ChainConfig/StateTransitionData use.
+func LeHexToBigInt(s string) (*big.Int, error) {
+	h := s
+	if len(h) >= 2 && h[0] == '0' && (h[1] == 'x' || h[1] == 'X') {
+		h = h[2:]
+	}
+	if len(h) != 64 {
+		return nil, fmt.Errorf("LeHexToBigInt: expected 64 hex chars, got %d", len(h))
+	}
+	b, err := hex.DecodeString(h)
+	if err != nil {
+		return nil, fmt.Errorf("LeHexToBigInt: invalid hex: %w", err)
+	}
+	// Reverse in place to interpret bytes as big-endian.
+	for i, j := 0, len(b)-1; i < j; i, j = i+1, j-1 {
+		b[i], b[j] = b[j], b[i]
+	}
+	return new(big.Int).SetBytes(b), nil
 }
 
 // State Transition Data Constructor

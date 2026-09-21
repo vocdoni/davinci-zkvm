@@ -157,9 +157,11 @@ fn main() {
         smt::verify_state(parsed.state.as_ref(), &mut fail_mask);
 
     // Re-encryption: verify that each stored ballot is the original
-    //     ballot re-encrypted with a deterministic key derived from k_seed.
-    //     This ensures votes are blinded (unlinkable to the voter after storage)
-    //     while preserving the homomorphic structure for tallying.
+    //     ballot re-encrypted with per-field offset scalars produced by a
+    //     single sequencer-private seed per batch. The chain starts at
+    //     H(tag || be32(seed) || be32(old_root)) so scalars never repeat
+    //     within or across transitions, keeping stored ballots unlinkable to
+    //     the voter while preserving the homomorphic tally structure.
 
     // Read num_fields from the BallotMode config leaf (process_proofs[1],
     // key 0x02), low byte of the 32-byte LE arbo leaf. Bounds the skip-work
@@ -177,6 +179,8 @@ fn main() {
 
     let reenc_ok = babyjubjub::verify_batch_from_parsed(
         &parsed.reenc_pub_key,
+        &parsed.reenc_seed,
+        &old_root,
         &parsed.reenc_entries,
         num_fields,
         &mut fail_mask,
@@ -419,7 +423,7 @@ fn main() {
     // census_root is the Merkle root or CSP Ethereum address depending on censusOrigin.
 
     // Build the 46 u32 output registers and emit as a byte slice.
-    // This is the v0.18.0 approach: set_output is private, use commit_slice instead.
+    // ziskos keeps set_output private; commit_slice is the public API.
     let mut out = [0u32; 46];
 
     // Status

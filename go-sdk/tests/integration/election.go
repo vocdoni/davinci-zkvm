@@ -576,10 +576,14 @@ func (e *Election) BuildCensusProofs(batchVoters []*Voter) ([]davinci.CensusProo
 	return proofs, nil
 }
 
-// BuildReencBlock builds the REENCBLK protocol block for a batch.
-// It re-encrypts each voter's ElGamal ballot with a random k and returns
-// the re-encryption data along with the re-encrypted ballots for tally accumulation.
-func (e *Election) BuildReencBlock(ballotResults []*BallotResult) (*davinci.ReencryptionData, []wideBallot, error) {
+// BuildReencBlock builds the REENCBLK protocol block for a batch. It draws
+// one sequencer-private seed, seeds the shared re-encryption chain with it
+// and the state root before the batch, and re-encrypts every voter's active
+// ciphertexts using the chained scalars. oldRoot is the state root before
+// this batch (the same value the caller passes to BuildKZGBlock); it must
+// match the STATETX old_root the batch is proved against, or the guest
+// will derive a different scalar chain and reject the batch.
+func (e *Election) BuildReencBlock(oldRoot string, ballotResults []*BallotResult) (*davinci.ReencryptionData, []wideBallot, error) {
 	pkX, pkY := bjjPointToFr32Hex(e.EncKey)
 	entries := make([]davinci.ReencryptionEntry, len(ballotResults))
 	reencBallots := make([]wideBallot, len(ballotResults))
@@ -596,6 +600,18 @@ func (e *Election) BuildReencBlock(ballotResults []*BallotResult) (*davinci.Reen
 		C2: davinci.BjjPoint{X: idZeroHex, Y: idOneHex},
 	}
 
+	// One seed per batch; the chain binds every derived scalar to oldRoot so
+	// no scalar repeats within or across transitions.
+	seed, err := rand.Int(rand.Reader, e.EncKey.Order())
+	if err != nil {
+		return nil, nil, fmt.Errorf("rand reenc seed: %w", err)
+	}
+	oldRootInt, err := davinci.LeHexToBigInt(oldRoot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse oldRoot: %w", err)
+	}
+	reencChain := elgamal.NewReencChain(seed, oldRootInt)
+
 	for idx, res := range ballotResults {
 		// Reconstruct the elgamal.Ballot: active fields from the cast ballot,
 		// padded fields as the TE identity (so re-encryption leaves them identity).
@@ -611,20 +627,14 @@ func (e *Election) BuildReencBlock(ballotResults []*BallotResult) (*davinci.Reen
 			}
 		}
 
-		// Re-encrypt with a random k.
-		rawK, err := rand.Int(rand.Reader, e.EncKey.Order())
+		reencBallot, err := ballot.ReencryptChained(e.EncKey, reencChain, nf)
 		if err != nil {
-			return nil, nil, fmt.Errorf("rand.Int[%d]: %w", idx, err)
-		}
-		reencBallot, _, err := ballot.Reencrypt(e.EncKey, rawK)
-		if err != nil {
-			return nil, nil, fmt.Errorf("Reencrypt[%d]: %w", idx, err)
+			return nil, nil, fmt.Errorf("ReencryptChained[%d]: %w", idx, err)
 		}
 
 		// Wide carrier: active re-encrypted fields + TE identity padding.
-		// Padded slots stay identity (not the re-encryption delta) so the state
-		// leaf, results accumulator and reenc block all agree with the guest's
-		// num_fields-aware skip.
+		// ReencryptChained already copies padded slots unchanged, but the
+		// tally accumulator wants the shared identityCiphertext instance.
 		wide := make(wideBallot, NumFields)
 		for i := 0; i < NumFields; i++ {
 			if i < nf {
@@ -635,7 +645,7 @@ func (e *Election) BuildReencBlock(ballotResults []*BallotResult) (*davinci.Reen
 		}
 		reencBallots[idx] = wide
 
-		entry := davinci.ReencryptionEntry{K: bigIntToFr32(rawK)}
+		var entry davinci.ReencryptionEntry
 		for i := 0; i < NumFields; i++ {
 			if i >= nf {
 				entry.Original[i] = idEntry
@@ -661,6 +671,7 @@ func (e *Election) BuildReencBlock(ballotResults []*BallotResult) (*davinci.Reen
 	return &davinci.ReencryptionData{
 		EncryptionKeyX: pkX,
 		EncryptionKeyY: pkY,
+		Seed:           bigIntToFr32(seed),
 		Entries:        entries,
 	}, reencBallots, nil
 }

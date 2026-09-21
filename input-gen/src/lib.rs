@@ -784,9 +784,11 @@ pub struct BjjCiphertextData {
     pub c2y: [u64; 4],
 }
 
-/// Re-encryption data for one voter: seed k, original + re-encrypted ciphertexts.
+/// Re-encryption data for one voter: original + re-encrypted ciphertexts.
+/// The batch-scoped seed lives at block scope (see `write_reenc_block`); each
+/// voter's offset scalars are derived in-guest from that seed and the STATETX
+/// `old_root`, so no per-voter secret is carried in the wire format.
 pub struct ReencEntryData {
-    pub k: [u64; 4],
     pub original: [BjjCiphertextData; NUM_FIELDS],
     pub reencrypted: [BjjCiphertextData; NUM_FIELDS],
 }
@@ -798,14 +800,15 @@ pub struct ReencEntryData {
 /// n_voters:  u64
 /// pub_key_x: [u64; 4]
 /// pub_key_y: [u64; 4]
+/// seed:      [u64; 4]     (batch-scoped chain seed, LE limbs)
 /// Per voter:
-///   k:             [u64; 4]
-///   original[8]:   8 × (c1x, c1y, c2x, c2y)  each [u64; 4]
-///   reencrypted[8]: 8 × (c1x, c1y, c2x, c2y)  each [u64; 4]
+///   original[16]:    16 × (c1x, c1y, c2x, c2y)  each [u64; 4]
+///   reencrypted[16]: 16 × (c1x, c1y, c2x, c2y)  each [u64; 4]
 /// ```
 pub fn write_reenc_block(
     pub_key_x: [u64; 4],
     pub_key_y: [u64; 4],
+    seed: [u64; 4],
     entries: &[ReencEntryData],
 ) -> Result<Vec<u8>> {
     if entries.is_empty() {
@@ -821,10 +824,10 @@ pub fn write_reenc_block(
     for w in &pub_key_y {
         buf.extend_from_slice(&w.to_le_bytes());
     }
+    for w in &seed {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
     for e in entries {
-        for w in &e.k {
-            buf.extend_from_slice(&w.to_le_bytes());
-        }
         for ct in &e.original {
             for w in &ct.c1x {
                 buf.extend_from_slice(&w.to_le_bytes());

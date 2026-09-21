@@ -315,8 +315,19 @@ func EncodeCensusBlock(proofs []CensusProof) ([]byte, error) {
 }
 
 // EncodeReencBlock serialises the REENCBLK for the ZisK circuit.
-// Magic = "REENCBLK" (8 bytes LE u64), followed by n_voters, pub_key_x/y,
-// then per-voter: k, then NumFields×(c1x,c1y,c2x,c2y) original, NumFields×(c1x,c1y,c2x,c2y) reencrypted.
+//
+// Layout (all Fr words are 4×u64 little-endian limbs):
+//
+//	"REENCBLK" (8-byte LE u64 magic)
+//	n_voters   u64
+//	pub_key_x  [u64; 4]
+//	pub_key_y  [u64; 4]
+//	seed       [u64; 4]                      // batch-wide, drives the scalar chain
+//	per voter: original    16 × (c1x, c1y, c2x, c2y)
+//	           reencrypted 16 × (c1x, c1y, c2x, c2y)
+//
+// The per-voter k word is gone: every re-encryption scalar is derived in
+// the guest from `seed` and the state root before the batch.
 func EncodeReencBlock(r *ReencryptionData) ([]byte, error) {
 	if r == nil || len(r.Entries) == 0 {
 		return nil, nil
@@ -330,6 +341,10 @@ func EncodeReencBlock(r *ReencryptionData) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reenc pub_key_y: %w", err)
 	}
+	seed, err := beHexToFrLE(r.Seed)
+	if err != nil {
+		return nil, fmt.Errorf("reenc seed: %w", err)
+	}
 
 	// Magic "REENCBLK": the guest reads it as u64::from_le_bytes(b"REENCBLK"),
 	// whose little-endian serialisation is exactly these ASCII bytes.
@@ -337,14 +352,9 @@ func EncodeReencBlock(r *ReencryptionData) ([]byte, error) {
 	buf = appendU64(buf, uint64(len(r.Entries)))
 	buf = appendFr(buf, pKeyX)
 	buf = appendFr(buf, pKeyY)
+	buf = appendFr(buf, seed)
 
 	for i, entry := range r.Entries {
-		k, err := beHexToFrLE(entry.K)
-		if err != nil {
-			return nil, fmt.Errorf("reenc entry[%d] k: %w", i, err)
-		}
-		buf = appendFr(buf, k)
-
 		buf, err = appendCiphertexts(buf, entry.Original[:])
 		if err != nil {
 			return nil, fmt.Errorf("reenc entry[%d] original: %w", i, err)

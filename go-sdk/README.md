@@ -28,6 +28,7 @@ batch := &davinci.ProveBatch{
     Voters:          voters,   // []VoterBallot — one per voter
     State:           state,    // *StateTransitionData — SMT chain transitions
     EncryptionKey:   encKey,   // *BjjPoint — ElGamal re-encryption key
+    ReencryptionSeed: seed,    // *big.Int — the batch seed the re-encryptions were derived from
     KZG:             kzgData,  // *KZGRequest — blob evaluation (optional)
 }
 
@@ -59,6 +60,7 @@ type ProveBatch struct {
     Voters              []VoterBallot       // Per-voter ballot proofs
     State               *StateTransitionData // SMT state transitions
     EncryptionKey       *BjjPoint           // ElGamal re-encryption public key
+    ReencryptionSeed    *big.Int            // Batch-wide seed; guest derives every per-field scalar from it
     KZG                 *KZGRequest         // EIP-4844 blob evaluation data
 }
 ```

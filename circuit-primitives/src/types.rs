@@ -183,11 +183,12 @@ pub struct BjjCiphertext {
     pub c2y: FrRaw,
 }
 
-/// Re-encryption entry for one voter: seed k, original ballot, re-encrypted ballot.
+/// Re-encryption entry for one voter: original ballot + re-encrypted ballot.
+/// The per-voter offset scalars are derived in-guest from a single
+/// batch-scoped seed (see `babyjubjub::reenc_chain_start`), so nothing
+/// per-voter beyond the two ciphertext sets is carried in the wire format.
 #[derive(Clone)]
 pub struct ReencEntry {
-    /// The re-encryption seed k (before Poseidon hash).
-    pub k: FrRaw,
     /// Original ciphertexts from the voter's ballot proof.
     pub original: [BjjCiphertext; NUM_FIELDS],
     /// Re-encrypted ciphertexts stored in the state tree.

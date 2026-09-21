@@ -70,7 +70,7 @@ little-endian ASCII magic number.
 | 2     | `STATETX!`  | `io.rs`   | Full state-transition data               |
 | 3     | `CENSUS!!`  | `io.rs`   | Census lean-IMT Poseidon proofs (censusOrigin 1-3) |
 | 3'    | `CSPBLK!!`  | `io.rs`   | CSP ECDSA census proofs (censusOrigin 4) |
-| 4     | `REENCBLK`  | `io.rs`   | Re-encryption entries + public key       |
+| 4     | `REENCBLK`  | `io.rs`   | Re-encryption entries, public key, batch-scoped seed |
 | 5     | `KZGBLK!!`  | `io.rs`   | KZG blob + evaluation claim              |
 
 > Blocks 3 and 3' are mutually exclusive based on `censusOrigin`.
@@ -489,20 +489,26 @@ preserving the homomorphic structure needed for tallying.
 
 #### Algorithm
 
-For each voter, the re-encryption uses a per-field offset scalar chained with
-SHA-256: `H(x) = sha256(x_be32) mod r`, advanced once per ciphertext.
+The REENCBLK carries ONE batch-scoped `seed` (the sequencer's per-transition
+secret). The guest derives every per-ciphertext offset scalar in-circuit
+through a single SHA-256 chain: `H(bytes) = sha256(bytes) mod r`. The chain
+starts from the seed and the STATETX `old_root`. Every ACTIVE ciphertext, in block order then field order, consumes one
+chain element and the chain advances once. Entry N+1 continues where entry N
+left off — every chain element is consumed exactly once.
 
 ```
-k₀ = H(k)                                   // first re-encryption scalar
-For each active ciphertext i in [0..num_fields):
-  δ₁ = kᵢ · B8                              // delta for C1 (BabyJubJub generator)
-  δ₂ = kᵢ · pubKey                          // delta for C2 (election public key)
-  newC1[i] = origC1[i] + δ₁                 // twisted Edwards point addition
-  newC2[i] = origC2[i] + δ₂
-  kᵢ₊₁ = H(kᵢ)                              // advance the chain
+r₀ = H( "davinci-reenc-v1" || be32(seed) || be32(old_root) )   // chain start
+r_{t+1} = H( be32(r_t) )                                       // chain step
 
-For each padded ciphertext i in [num_fields..16):
-  assert origC*[i] == newC*[i] == identity  // (0,1); EC work skipped
+For each entry in block order:
+  For each active ciphertext i in [0..num_fields):
+    δ₁ = r_t · B8                              // delta for C1
+    δ₂ = r_t · pubKey                          // delta for C2
+    newC1[i] = origC1[i] + δ₁                 // twisted Edwards point add
+    newC2[i] = origC2[i] + δ₂
+    r_{t+1} = H( be32(r_t) )                  // advance the chain
+  For each padded ciphertext i in [num_fields..16):
+    assert origC*[i] == newC*[i] == identity  // (0,1); EC work skipped, chain not advanced
 ```
 
 #### Constraint checks
@@ -512,7 +518,18 @@ For each padded ciphertext i in [num_fields..16):
 | 4.3.1 | Re-encryption block is present (public key exists) | FAIL_MISSING_BLOCK |
 | 4.3.2 | Public key `(x, y)` satisfies BabyJubJub curve equation: `a·x² + y² = 1 + d·x²·y²` | FAIL_REENC |
 | 4.3.3 | `original.len() == reencrypted.len()` per entry | FAIL_REENC |
-| 4.3.4 | For each of the 8 ciphertexts: `newC1 == origC1 + k'·B8` and `newC2 == origC2 + k'·pubKey` | FAIL_REENC |
+| 4.3.4 | Padded slots (`i ≥ num_fields`) carry the TE identity `(0,1)` on both sides | FAIL_REENC |
+| 4.3.5 | For every active ciphertext, in block order then field order: `newC1 == origC1 + r_t·B8` and `newC2 == origC2 + r_t·pubKey`, where `r_t` is the next unused chain element derived from `(seed, old_root)` | FAIL_REENC |
+
+#### Security rationale
+
+The seed is the ONLY source of secrecy; the tag and `old_root` are public and
+only exist to move chains from different transitions onto disjoint starting
+points. Because every chain element is used exactly once, no offset scalar
+can repeat within (or across — `old_root` differs) a transition, so the same
+plaintext re-encrypted twice never produces the same delta. Removing the
+per-voter `k` also removes the sequencer's ability to reuse a scalar by
+accident or on purpose — scalar reuse becomes impossible by construction.
 
 **BabyJubJub parameters (iden3 standard):**
 
@@ -753,10 +770,16 @@ state root.
 
 ### 12.6 Vote Privacy
 
-Ballots are re-encrypted with a deterministic key before storage. The
-re-encryption is verified to be correct (original + EncryptedZero = re-encrypted).
-The re-encryption key matches the election's public key stored in the process
-configuration.
+Ballots are re-encrypted before storage with per-ciphertext offset scalars
+derived in-guest from a single sequencer-private, batch-scoped seed and the
+STATETX `old_root` (SHA-256 chain, one element per active ciphertext,
+threaded across all voters). The re-encryption is verified to be correct
+(`original + EncryptedZero = reencrypted`); the election public key used for
+`EncryptedZero` matches the encryption key stored in the process
+configuration. Because every chain element is consumed exactly once and
+`old_root` differs across transitions, no offset scalar can repeat within or
+across transitions. Scalar reuse, which would let anyone holding two
+originals link them to their stored ciphertexts, is impossible by construction.
 
 ### 12.7 Tally Correctness
 
@@ -777,20 +800,16 @@ specific state transition.
 
 ### 13.1 Ballot-to-Re-encryption Binding
 
-The ballot proof's public inputs are `[address, voteID, inputsHash]`. The raw
-ciphertext data (8 × ElGamal `(C1, C2)` pairs) is **not** exposed as public
-inputs of the Circom ballot circuit. Therefore, the circuit cannot directly
-verify that the re-encryption `original` ciphertexts match the ballot proven
-by the Groth16 proof.
-
-The `inputsHash` public input is a commitment to the ballot data. A future
-enhancement could verify that `SHA-256(original_ciphertexts) == inputsHash`,
-which would close this gap.
-
-**Mitigation:** The sequencer generates both the ballot proof and the
-re-encryption data from the same source ballot. A dishonest sequencer could
-substitute different ballot data, but this would be detectable during
-decryption/tallying (the decrypted tally would not match the expected results).
+The ballot proof's public inputs are `[address, voteID, inputsHash]`; the
+ciphertexts themselves are not public inputs of the Circom circuit. Phase 6
+closes the gap: the guest recomputes `inputsHash` as the Poseidon commitment
+over `(processID, ballotMode, encKey, address, voteID, the 16 original
+ciphertexts, weight)` and requires it to equal `public_inputs[2]`, which binds
+`reenc_entries[i].original` to the proven ballot. It then requires
+`reenc_entries[i].reencrypted` to equal `state.voter_ballots[i]`, which binds
+the SMT ballot leaf and the results accumulator to the verified
+re-encryption. A sequencer cannot pair a valid proof with a different
+ballot, nor store anything but the chain-derived re-encryption of it.
 
 ### 13.2 BabyJubJub Subgroup Check
 

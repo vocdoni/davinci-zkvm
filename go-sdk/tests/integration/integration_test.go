@@ -150,7 +150,7 @@ func TestChainedStateTransitions(t *testing.T) {
 
 		// Build re-encryption block before building the state block so the
 		// re-encrypted ballots can be accumulated into the net Results leaf.
-		reencBlock, reencBallots, err := election.BuildReencBlock(batch.Results)
+		reencBlock, reencBallots, err := election.BuildReencBlock(oldRoot, batch.Results)
 		if err != nil {
 			t.Fatalf("transition %d: BuildReencBlock: %v", txIdx, err)
 		}

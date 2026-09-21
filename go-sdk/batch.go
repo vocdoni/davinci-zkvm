@@ -46,10 +46,9 @@ type VoterBallot struct {
 
 // VoterReencryption holds the re-encryption data for one voter.
 // This is a convenience wrapper around ReencryptionEntry that accepts
-// structured BjjCiphertext values rather than flat hex strings.
+// structured BjjCiphertext values rather than flat hex strings. The
+// batch-wide re-encryption seed lives on ProveBatch.ReencryptionSeed.
 type VoterReencryption struct {
-	// K is the re-encryption random seed (before Poseidon hash).
-	K *big.Int
 	// Original contains the NumFields original ElGamal ciphertexts from the ballot proof.
 	Original [NumFields]BjjCiphertext
 	// Reencrypted contains the NumFields re-encrypted ciphertexts stored in the state tree.
@@ -93,6 +92,13 @@ type ProveBatch struct {
 	// Required when any voter has re-encryption data. Coordinates are 32-byte
 	// big-endian hex strings.
 	EncryptionKey *BjjPoint
+
+	// ReencryptionSeed is the sequencer-private seed for the batch's
+	// re-encryption scalar chain. Required when any voter carries
+	// re-encryption data. Draw fresh per batch from a CSPRNG; the guest
+	// derives every per-field offset scalar from it and the state root
+	// before the batch.
+	ReencryptionSeed *big.Int
 
 	// KZG is the data-availability blob proof. Nil when blobs are not used.
 	KZG *KZGRequest
@@ -193,7 +199,6 @@ func (b *ProveBatch) toRequest() (*ProveRequest, error) {
 		if v.Reencryption != nil {
 			hasReenc = true
 			entry := ReencryptionEntry{
-				K:           bigIntToHex32BE(v.Reencryption.K),
 				Original:    v.Reencryption.Original,
 				Reencrypted: v.Reencryption.Reencrypted,
 			}
@@ -226,9 +231,13 @@ func (b *ProveBatch) toRequest() (*ProveRequest, error) {
 		if b.EncryptionKey == nil {
 			return nil, fmt.Errorf("encryption key is required when voters have re-encryption data")
 		}
+		if b.ReencryptionSeed == nil {
+			return nil, fmt.Errorf("reencryption seed is required when voters have re-encryption data")
+		}
 		req.Reencryption = &ReencryptionData{
 			EncryptionKeyX: b.EncryptionKey.X,
 			EncryptionKeyY: b.EncryptionKey.Y,
+			Seed:           bigIntToHex32BE(b.ReencryptionSeed),
 			Entries:        reencEntries,
 		}
 	}

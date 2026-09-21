@@ -102,13 +102,12 @@ func TestProveBatchWithReencryption(t *testing.T) {
 					PubKeyX: big.NewInt(3), PubKeyY: big.NewInt(4),
 					VoteID: 1, Address: big.NewInt(5),
 				},
-				Census: CensusProof{Root: "0x" + zeroHex64, Leaf: "0x" + zeroHex64},
-				Reencryption: &VoterReencryption{
-					K: big.NewInt(42),
-				},
+				Census:       CensusProof{Root: "0x" + zeroHex64, Leaf: "0x" + zeroHex64},
+				Reencryption: &VoterReencryption{},
 			},
 		},
-		EncryptionKey: &BjjPoint{X: bigIntToHex32BE(big.NewInt(10)), Y: bigIntToHex32BE(big.NewInt(20))},
+		EncryptionKey:    &BjjPoint{X: bigIntToHex32BE(big.NewInt(10)), Y: bigIntToHex32BE(big.NewInt(20))},
+		ReencryptionSeed: big.NewInt(42),
 	}
 
 	req, err := batch.toRequest()
@@ -124,6 +123,9 @@ func TestProveBatchWithReencryption(t *testing.T) {
 	}
 	if req.Reencryption.EncryptionKeyX != bigIntToHex32BE(big.NewInt(10)) {
 		t.Errorf("wrong encryption key X: %s", req.Reencryption.EncryptionKeyX)
+	}
+	if req.Reencryption.Seed != bigIntToHex32BE(big.NewInt(42)) {
+		t.Errorf("wrong reencryption seed: %s", req.Reencryption.Seed)
 	}
 }
 
@@ -155,10 +157,30 @@ func TestProveBatchValidation(t *testing.T) {
 						PubKeyX: big.NewInt(3), PubKeyY: big.NewInt(4),
 						Address: big.NewInt(5),
 					},
-					Reencryption: &VoterReencryption{K: big.NewInt(1)},
+					Reencryption: &VoterReencryption{},
 				}},
+				ReencryptionSeed: big.NewInt(1),
 			},
 			want: "encryption key is required",
+		},
+		{
+			name: "reenc without seed",
+			batch: ProveBatch{
+				VerificationKeyJSON: json.RawMessage(`{}`),
+				Voters: []VoterBallot{{
+					ProofJSON:    json.RawMessage(`{}`),
+					PublicInputs: NewPublicInput(big.NewInt(1)),
+					Signature: &EcdsaSignature{
+						R: big.NewInt(1), S: big.NewInt(2),
+						PubKeyX: big.NewInt(3), PubKeyY: big.NewInt(4),
+						Address: big.NewInt(5),
+					},
+					Census:       CensusProof{Root: "0x" + zeroHex64, Leaf: "0x" + zeroHex64},
+					Reencryption: &VoterReencryption{},
+				}},
+				EncryptionKey: &BjjPoint{X: bigIntToHex32BE(big.NewInt(10)), Y: bigIntToHex32BE(big.NewInt(20))},
+			},
+			want: "reencryption seed is required",
 		},
 	}
 	for _, tt := range tests {

@@ -160,7 +160,7 @@ func buildCheatInput(t *testing.T) (*cheatElectionInput, *Election, []*BallotRes
 
 	// Build re-encryption block before the state block so that re-encrypted
 	// ballots are available for net Results accumulation.
-	reencData, reencBallots, err := election.BuildReencBlock(batch.Results)
+	reencData, reencBallots, err := election.BuildReencBlock(oldRoot, batch.Results)
 	if err != nil {
 		t.Fatalf("BuildReencBlock: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestCheatWrongReencKey(t *testing.T) {
 	base, election, results := buildCheatInput(t)
 
 	// Build a reenc block with the correct entries but a wrong public key.
-	reencData, _, err := election.BuildReencBlock(results)
+	reencData, _, err := election.BuildReencBlock(base.oldRoot, results)
 	if err != nil {
 		t.Fatalf("BuildReencBlock: %v", err)
 	}
@@ -419,6 +419,54 @@ func TestCheatWrongReencKey(t *testing.T) {
 	assertCircuitFails(t, tampered, failReenc, "wrong_reenc_key")
 }
 
+// TestCheatWrongReencSeed verifies that a tampered batch re-encryption seed
+// causes FAIL_REENC: the guest re-derives the scalar chain from the seed and
+// the old state root, so a swapped seed produces different offset scalars and
+// the re-encrypted ciphertexts no longer match.
+func TestCheatWrongReencSeed(t *testing.T) {
+	base, election, results := buildCheatInput(t)
+
+	reencData, _, err := election.BuildReencBlock(base.oldRoot, results)
+	if err != nil {
+		t.Fatalf("BuildReencBlock: %v", err)
+	}
+	// Replace the seed with an obviously different 32-byte value.
+	reencData.Seed = bigIntToFr32(new(big.Int).SetUint64(0xC0DE1234DEADBEEF))
+
+	tamperedReenc, err := davinci.EncodeReencBlock(reencData)
+	if err != nil {
+		t.Fatalf("EncodeReencBlock: %v", err)
+	}
+
+	tampered := append(append(base.baseBin, base.stateBlock...), base.censusBlock...)
+	tampered = append(tampered, tamperedReenc...)
+	tampered = append(tampered, base.kzgBlock...)
+	assertCircuitFails(t, tampered, failReenc, "wrong_reenc_seed")
+}
+
+// TestCheatReencStaleRoot verifies that building the reenc block against a
+// different old state root (e.g. the zero root) produces a chain the guest
+// cannot reproduce, so re-encryption verification fails.
+func TestCheatReencStaleRoot(t *testing.T) {
+	base, election, results := buildCheatInput(t)
+
+	staleRoot := "0x" + hex.EncodeToString(make([]byte, 32))
+	reencData, _, err := election.BuildReencBlock(staleRoot, results)
+	if err != nil {
+		t.Fatalf("BuildReencBlock: %v", err)
+	}
+
+	tamperedReenc, err := davinci.EncodeReencBlock(reencData)
+	if err != nil {
+		t.Fatalf("EncodeReencBlock: %v", err)
+	}
+
+	tampered := append(append(base.baseBin, base.stateBlock...), base.censusBlock...)
+	tampered = append(tampered, tamperedReenc...)
+	tampered = append(tampered, base.kzgBlock...)
+	assertCircuitFails(t, tampered, failReenc, "stale_reenc_root")
+}
+
 // TestCheatTamperPaddedSlot verifies the soundness of the num_fields-aware skip:
 // the guest skips the per-field EC re-encryption work on padded slots
 // (i >= num_fields) but guards it by asserting those slots carry the TE identity.
@@ -433,7 +481,7 @@ func TestCheatTamperPaddedSlot(t *testing.T) {
 	}
 	padIdx := election.NumFields // first padded (skipped) ciphertext slot
 
-	reencData, _, err := election.BuildReencBlock(results)
+	reencData, _, err := election.BuildReencBlock(base.oldRoot, results)
 	if err != nil {
 		t.Fatalf("BuildReencBlock: %v", err)
 	}

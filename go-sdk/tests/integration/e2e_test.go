@@ -146,7 +146,7 @@ func TestFullE2E(t *testing.T) {
 		if err != nil {
 			t.Fatalf("tx %d: BuildKZGBlock: %v", txIdx+1, err)
 		}
-		reencBlock, reencBallots, err := election.BuildReencBlock(batch.Results)
+		reencBlock, reencBallots, err := election.BuildReencBlock(oldRoot, batch.Results)
 		if err != nil {
 			t.Fatalf("tx %d: BuildReencBlock: %v", txIdx+1, err)
 		}
