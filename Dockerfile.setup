@@ -26,10 +26,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openmpi-common \
     && rm -rf /var/lib/apt/lists/*
 
-# ZISK_TAG is the upstream git tag ("v0.18.0"). ZISK_VERSION is the bare
-# semver ziskup wants on the CLI ("0.18.0" — ziskup prepends 'v' itself).
-ARG ZISK_TAG=v0.18.0
-ARG ZISK_VERSION=0.18.0
+# ZISK_TAG is the upstream git tag ("v1.3.0-alpha"). ZISK_VERSION is the
+# bare version ziskup wants on the CLI ("1.3.0-alpha" — ziskup prepends
+# 'v' itself).
+ARG ZISK_TAG=v1.3.0-alpha
+ARG ZISK_VERSION=1.3.0-alpha
 
 # Bake the matching ziskup script into the image so the container is
 # pinned to the same ZisK version the prover image was built for. Sourced

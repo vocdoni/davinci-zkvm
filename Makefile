@@ -7,8 +7,8 @@ REPO_ROOT := $(CURDIR)
 # All Docker targets read the same env vars docker-compose does. Override
 # any of these on the command line or in a .env file at the repo root.
 
-ZISK_TAG         ?= v0.18.0
-ZISK_VERSION     ?= 0.18.0
+ZISK_TAG         ?= v1.3.0-alpha
+ZISK_VERSION     ?= 1.3.0-alpha
 ZISK_KEYS_DIR    ?= $(REPO_ROOT)/zisk-keys
 LISTEN_PORT      ?= 8080
 API_URL          ?= http://127.0.0.1:$(LISTEN_PORT)
@@ -27,8 +27,7 @@ INSTALL_SYSTEM_DEPS ?= auto
 RUN_SETUP        ?= 1
 RUN_SETUP_TREES  ?= 1
 ADD_TO_SHELL_RC  ?= 1
-PROVING_KEY_PATH ?= $(HOME)/.zisk/provingKey
-PROVING_KEY_PLONK_PATH ?= $(HOME)/.zisk/provingKeySnark
+ZISK_HOME        ?= $(HOME)/.zisk
 PROVER_MODE      ?= auto
 ZISK_MPI_PROCS   ?=
 ZISK_MPI_THREADS ?=
@@ -63,14 +62,14 @@ install: keys build ## Download keys + build the runtime image (one-shot setup)
 keys: ## Download both ZisK proving keys via ziskup into $(ZISK_KEYS_DIR)
 	@mkdir -p $(ZISK_KEYS_DIR)
 	@echo "=== Downloading ZisK proving keys into $(ZISK_KEYS_DIR) ==="
-	@echo "    This takes 10–30 min depending on bandwidth (~37 GB)."
+	@echo "    STARK ~73 GB, PLONK ~25 GB (~100 GB total); 20–60 min depending on bandwidth."
 	$(COMPOSE) --profile setup build key-installer
 	$(COMPOSE) --profile setup run --rm key-installer
 
 build: ## Build the CUDA prover image
 	$(COMPOSE) --profile cuda build
 
-up: ## Start the prover service (first boot builds GPU consttrees, ~10 min)
+up: ## Start the prover service (first boot builds the GPU setup artifacts, ~1 min)
 	@if [ ! -d $(ZISK_KEYS_DIR)/provingKey ] || [ ! -d $(ZISK_KEYS_DIR)/provingKeySnark ]; then \
 		echo "Proving keys missing at $(ZISK_KEYS_DIR). Run 'make keys' first."; \
 		exit 1; \
@@ -125,8 +124,7 @@ local-setup: ## Install ZisK + build davinci-zkvm on the host (no Docker)
 	RUN_SETUP=$(RUN_SETUP) \
 	RUN_SETUP_TREES=$(RUN_SETUP_TREES) \
 	ADD_TO_SHELL_RC=$(ADD_TO_SHELL_RC) \
-	PROVING_KEY_PATH=$(PROVING_KEY_PATH) \
-	PROVING_KEY_PLONK_PATH=$(PROVING_KEY_PLONK_PATH) \
+	ZISK_HOME=$(ZISK_HOME) \
 	ZISK_VERSION=$(ZISK_VERSION) \
 	PROVER_MODE=$(PROVER_MODE) \
 	./scripts/install.sh

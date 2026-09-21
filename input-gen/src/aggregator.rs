@@ -9,8 +9,10 @@
 //!   4. n_batch vote-batch proof blobs
 //!
 //! Proof blobs use the `get_proof_bytes()` layout consumed by
-//! `ziskos::zisklib::verify_zisk_proof_c` (ZisK v0.18.0):
-//!   words = [minimal][n_publics=68][program_vk(4)][publics(64)][proof][zisk_vk(4)]
+//! `ziskos::zisklib::verify_zisk_proof_c` (ZisK 1.3):
+//!   words = [minimal][n_publics][flag?|program_vk(4)|publics(64)][proof][zisk_vk(4)][hash_tag]
+//! where the `is_vadcop_final_proof` flag word is present for final and
+//! recurser proofs (n_publics = 69) and absent for minimal ones.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};

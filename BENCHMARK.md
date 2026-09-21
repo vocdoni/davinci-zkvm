@@ -132,9 +132,10 @@ result still verifies and soundness is unaffected. The speed cost is small: a
 matched A/B on one batch-128 num_fields=16 input measured 138.4 s plain vs
 142.1 s with `--minimal-memory` (+2.7%); on a lighter input it was +0.7%.
 
-## Per-batch mode on ZisK 1.3.0-alpha + BabyJubJub precompile
+## Per-batch mode on ZisK v1.3.0-alpha + BabyJubJub precompile
 
-Same GPU, toolchain per the "ZisK 1.3" section of CLAUDE.md, measured with
+Same GPU, release binaries via ziskup (64 and 128; the starred rows were
+measured on the pre-release build of the same version), measured with
 `TestPlonkBenchmark` (`BENCH_SIZES`, `BALLOT_NUM_FIELDS`). "proof" is the
 service's job time for one batch: witness generation, STARK, recursion, PLONK
 wrap and ZisK's own verification of the result. The sequencer's per-batch
@@ -144,8 +145,8 @@ verify (0.3–0.7 s on the simulated chain).
 
 | batch | proof (num_fields=2) | votes/min | proof (num_fields=16) | votes/min |
 |---:|---:|---:|---:|---:|
-|  64 |  22.8 s | 168 |  29.1 s | 132 |
-| 128 |  31.6 s | 243 |  43.7 s | 176 |
+|  64 |  22.6 s | 170 |  28.2 s | 136 |
+| 128 |  29.9 s | 257 |  40.3 s | 190 |
 | 256* |  51.1 s | 300 |  73.8 s | 208 |
 | 512* |  71.3 s | 431 | 123.5 s | 249 |
 
@@ -158,10 +159,10 @@ reproduce. Raising the cap for production is a rebuild of both guests (new
 program vks, `CircuitRelease` refreeze).
 
 Against the v0.18 table above, batch 128 at 16 fields went from 164 s to
-43.7 s (3.8x) and batch 64 at 2 fields from 38 s to 22.8 s. The fixed
-per-proof cost (recursion + PLONK wrap, ~14 s) now dominates small batches,
+40.3 s (4.1x) and batch 64 at 2 fields from 38 s to 22.6 s. The fixed
+per-proof cost (recursion + PLONK wrap, ~15 s) now dominates small batches,
 which is why votes/min keeps climbing with batch size: the marginal cost is
-~0.14 s per vote at 2 fields and ~0.24 s at 16.
+~0.11 s per vote at 2 fields and ~0.19 s at 16.
 
 ## Comparing the modes
 

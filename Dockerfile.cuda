@@ -1,6 +1,7 @@
 # ── Stage 1: Download ZisK prebuilt GPU binary ───────────────────────────────
 # Uses the official prebuilt cargo-zisk-gpu for linux/amd64 from the ZisK release.
-# This avoids a multi-hour CUDA source build during docker image construction.
+# The GPU binary is statically linked against the CUDA runtime, so no CUDA
+# toolkit is needed at build or run time — only the NVIDIA driver on the host.
 FROM ubuntu:24.04 AS zisk-downloader
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -10,21 +11,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-ARG ZISK_VERSION=v0.18.0
+ARG ZISK_VERSION=v1.3.0-alpha
 
 # Download and extract the prebuilt ZisK GPU bundle for linux/amd64.
-# The tarball layout: ./bin/{cargo-zisk-gpu,cargo-zisk-cpu,...} + ./zisk/emulator-asm/...
+# The tarball layout: ./bin/{cargo-zisk-gpu,cargo-zisk-dev-gpu,ziskemu,...} +
+# ./zisk/{emulator-asm,lib-c}.
 RUN curl -fL \
     "https://github.com/0xPolygonHermez/zisk/releases/download/${ZISK_VERSION}/cargo_zisk_linux_amd64.tar.gz" \
     -o /tmp/cargo_zisk.tar.gz && \
     mkdir -p /opt/zisk && \
     tar --ignore-zeros -xzf /tmp/cargo_zisk.tar.gz -C /opt/zisk && \
     rm /tmp/cargo_zisk.tar.gz && \
-    # Symlink cargo-zisk -> cargo-zisk-gpu for backward compatibility
-    ln -sf /opt/zisk/bin/cargo-zisk-gpu /opt/zisk/bin/cargo-zisk
+    # Relative links: the directory is copied to /root/.zisk/bin later.
+    ln -sf cargo-zisk-gpu /opt/zisk/bin/cargo-zisk && \
+    ln -sf cargo-zisk-dev-gpu /opt/zisk/bin/cargo-zisk-dev
 
 # ── Stage 2: Build the Rust service ───────────────────────────────────────────
-FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04 AS service-builder
+# The service does not touch CUDA; a plain Ubuntu + rustup toolchain is enough.
+FROM ubuntu:24.04 AS service-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -63,7 +67,9 @@ RUN find target/release/.fingerprint -maxdepth 1 -name "davinci*" -exec rm -rf {
 RUN cargo build --release -p davinci-zkvm-service -p davinci-zkvm-input-gen
 
 # ── Stage 3: CUDA runtime image ───────────────────────────────────────────────
-FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04
+# The prebuilt cargo-zisk-gpu is statically linked to the CUDA runtime; only
+# the NVIDIA driver is needed at run time (via nvidia-container-toolkit).
+FROM nvidia/cuda:12.8.0-base-ubuntu24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -75,26 +81,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openmpi-bin \
     openmpi-common \
     libomp5-18 \
-    build-essential \
-    nasm \
-    libgmp-dev \
+    libgmp10 \
+    python3 \
+    binutils \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
+
+# `cargo-zisk prove --plonk --verify-proof` shells out to `snarkjs plonk verify`.
+RUN npm install -g snarkjs@0.7.6
 
 WORKDIR /app
 
-# Ensure ~/.zisk/bin exists for cargo-zisk support files
-RUN mkdir -p /root/.zisk/bin
-
-# Copy ZisK GPU binary and supporting files from the downloader stage.
-# v0.18.0 ships cargo-zisk-gpu; cargo-zisk symlink is set in the downloader stage.
-COPY --from=zisk-downloader /opt/zisk/bin/cargo-zisk-gpu /usr/local/bin/cargo-zisk-gpu
-COPY --from=zisk-downloader /opt/zisk/bin/cargo-zisk /usr/local/bin/cargo-zisk
-COPY --from=zisk-downloader /opt/zisk/bin/ziskemu /usr/local/bin/ziskemu
-# riscv2zisk converts RISC-V ELF to ZisK assembly during ROM setup (first prove)
-COPY --from=zisk-downloader /opt/zisk/bin/riscv2zisk /usr/local/bin/riscv2zisk
-# libziskclib.a is required at ~/.zisk/bin/ by cargo-zisk prove (pre-built C library)
-COPY --from=zisk-downloader /opt/zisk/bin/libziskclib.a /root/.zisk/bin/libziskclib.a
-# zisk support files needed by check-setup and proving (emulator-asm, lib-c)
+# Install the ZisK bundle exactly like ziskup lays it out under $HOME/.zisk:
+# ~/.zisk/bin/* and ~/.zisk/zisk/{emulator-asm,lib-c}. Everything the prover
+# needs (cargo-zisk, cargo-zisk-dev, ziskemu, zisk-transpiler-riscv,
+# libziskclib.a, ...) lives in ~/.zisk/bin.
+COPY --from=zisk-downloader /opt/zisk/bin /root/.zisk/bin
 COPY --from=zisk-downloader /opt/zisk/zisk /root/.zisk/zisk
 
 # Copy service binary
@@ -104,12 +107,13 @@ COPY --from=service-builder /build/target/release/davinci-zkvm /app/davinci-zkvm
 COPY circuit/elf/circuit.elf /app/circuit.elf
 COPY circuit-aggregator/elf/aggregator.elf /app/aggregator.elf
 
+ENV PATH=/root/.zisk/bin:$PATH
 ENV LISTEN_ADDR=0.0.0.0:8080
 ENV PROVING_KEY_PATH=/proving-key
 ENV PROVING_KEY_PLONK_PATH=/proving-key-plonk
 ENV CIRCUIT_ELF_PATH=/app/circuit.elf
 ENV AGGREGATOR_ELF_PATH=/app/aggregator.elf
-ENV CARGO_ZISK_BIN=/usr/local/bin/cargo-zisk
+ENV CARGO_ZISK_BIN=/root/.zisk/bin/cargo-zisk
 ENV PROOF_OUTPUT_DIR=/proofs
 ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 # Restrict OpenMPI to loopback/shared-memory transport only — prevents any
@@ -122,19 +126,11 @@ ENV OMPI_MCA_btl_smcuda_use_cuda_ipc=0
 ENV OMPI_ALLOW_RUN_AS_ROOT=1
 ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 
-# Install python3 and binutils so the entrypoint can patch final.so's
-# executable-stack flag (see below) using stock tools.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 binutils \
-    && rm -rf /var/lib/apt/lists/*
-
 # Entrypoint:
 #   1. Patch the PLONK key's final.so to drop the executable-stack flag that
 #      modern Linux refuses to grant at dlopen time. Idempotent.
-#   2. Build STARK + PLONK constant trees if missing.
-#   3. Warm up the CUDA context so the first prove doesn't pay the
-#      cold-start penalty.
-#   4. Start the service.
+#   2. Build the GPU setup artifacts once (cargo-zisk-dev check-setup).
+#   3. Start the service.
 COPY <<'EOF' /app/entrypoint.sh
 #!/bin/bash
 set -e
@@ -166,25 +162,18 @@ PYEOF
     fi
 fi
 
-STARK_TREE="${PROVING_KEY_PATH}/zisk/Zisk/airs/ArithEq/compressor/compressor.consttree_gpu"
-if [ ! -f "${STARK_TREE}" ]; then
-    echo "=== Building STARK constant trees (one-time, ~10 min) ==="
-    /usr/local/bin/cargo-zisk check-setup \
-        --proving-key "${PROVING_KEY_PATH}" \
-        --gpu
+# One-time GPU setup artifacts: check-setup -g writes the GPU const layouts
+# (*.const_gpu) for every STARK setup and the recursivef (PLONK) trees. The
+# prover regenerates missing ones lazily, so this only moves the cost off the
+# first job. About a minute on top of the trees ziskup already built.
+GPU_SENTINEL="${PROVING_KEY_PLONK_PATH}/recursivef/recursivef.consttree_gpu"
+if [ ! -f "${GPU_SENTINEL}" ]; then
+    echo "=== Building GPU setup artifacts (one-time, ~1 min) ==="
+    cargo-zisk-dev check-setup \
+        -k "${PROVING_KEY_PATH}" \
+        -w "${PROVING_KEY_PLONK_PATH}" \
+        -s -g
 fi
-
-PLONK_TREE="${PROVING_KEY_PLONK_PATH}/recursivef/recursivef.consttree_gpu"
-if [ -d "${PROVING_KEY_PLONK_PATH}" ] && [ ! -f "${PLONK_TREE}" ]; then
-    echo "=== Building PLONK constant trees (one-time, ~30 s) ==="
-    /usr/local/bin/cargo-zisk check-setup \
-        --proving-key "${PROVING_KEY_PATH}" \
-        --proving-key-plonk "${PROVING_KEY_PLONK_PATH}" \
-        --plonk --gpu
-fi
-
-echo "=== GPU warmup: initializing CUDA context ==="
-/usr/local/bin/cargo-zisk check-setup --proving-key "${PROVING_KEY_PATH}" --gpu 2>/dev/null || true
 
 exec /app/davinci-zkvm "$@"
 EOF

@@ -44,9 +44,9 @@ startup; chained mode additionally needs `AGGREGATOR_ELF_PATH`.
 | `service/` | Axum HTTP API. Always emits PLONK. |
 | `service/src/prover/worker.rs` | Runs `cargo-zisk prove --plonk …`, with retry logic for transient ZisK flakes. |
 | `service/src/prover/snark.rs` | Bincode-decodes `proof.bin` into the four Solidity-ready byte strings (`programVK`, `rootCVadcopFinal`, `publicValues`, `proofBytes`). |
-| `solidity/` | Vendored upstream PLONK verifier, byte-identical to `~/.zisk-1.3/provingKeySnark/final/*.sol` (the 1.3 snark setup; the vkey constants and `rootCVadcopFinal` change with every setup). **Don't edit these in-tree** — the Go helper patches them on a temp copy at compile time, so re-copying after a new ZisK release just works. |
+| `solidity/` | Vendored upstream PLONK verifier, byte-identical to `~/.zisk/provingKeySnark/final/*.sol` (the 1.3 snark setup; the vkey constants and `rootCVadcopFinal` change with every setup). **Don't edit these in-tree** — the Go helper patches them on a temp copy at compile time, so re-copying after a new ZisK release just works. |
 | `go-sdk/` | Go client. Exposes `PlonkSnark` (the 4-tuple) and `client.Prove(ctx, batch) -> ProveResult.Snark`. Never exposes STARK/VADCOP internals (chained mode only sees job IDs + the final PLONK). |
-| `go-sdk/chain/` | Chained-mode orchestrator: `Sequencer` (fold cadence, finalize), `State` (process SMT owner, reencryption, results accumulators), `Digest` (53×u32 "DAG1" publics parser + external vk-binding checks). `snapshot.go` serializes/restores `State` for crash recovery (reencryption uses a random `k` per ballot, so replay isn't reproducible). `commitment.go`+`release.go` recompute the guest's `config_commitment` host-side and pin the canonical circuit-release vks (`CircuitRelease`) for independent end-to-end verification. Self-contained — must NOT import test code. |
+| `go-sdk/chain/` | Chained-mode orchestrator: `Sequencer` (fold cadence, finalize), `State` (process SMT owner, reencryption, results accumulators), `Digest` (53×u32 "DAG1" publics parser + external vk-binding checks). `snapshot.go` serializes/restores `State` for crash recovery (each batch draws a random re-encryption seed, so replay isn't reproducible). `commitment.go`+`release.go` recompute the guest's `config_commitment` host-side and pin the canonical circuit-release vks (`CircuitRelease`) for independent end-to-end verification. Self-contained — must NOT import test code. |
 | `go-sdk/solidity/solidity.go` | `VerifyOnSimulated(dir, snark)` — compiles the verifier (local `solc` or `docker run ethereum/solc:stable`) and runs it on `go-ethereum/ethclient/simulated.NewBackend`. |
 | `go-sdk/vocdoni/` | Vendored davinci-node light crypto (ElGamal, hashing, ballot spec types) so `go-sdk` doesn't depend on the full davinci-node module. Exported so external consumers (davinci-fold) can build chain.Config/chain.Vote values; don't import davinci-node directly from go-sdk. |
 | `davinci-node/`, `recursion-experiment/` | Untracked reference checkouts (gitignored, not part of this repo). Read for context; never edit or stage. |
@@ -218,11 +218,6 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   be retried.
 - **The GPU power cap was 500 W** on this machine; raised persistently
   to 575 W via `/etc/systemd/system/nvidia-power-limit.service`.
-- **The host `~/.zisk/provingKey` is stale**: recursion-stage witness gen
-  fails with `Failed assert in … VerifyEvaluations0/VerifyFinalPol0`.
-  Prove with `--proving-key ./zisk-keys/provingKey`
-  (the dockerized installer's copy; mounted at `/proving-key` in the
-  container).
 - **Chained mode: 32-byte fields are arbo-LE hex** (no `0x` prefix) in
   `ChainConfig`/`ResultsPayload`, and STATETX `ProcessID` must be arbo-LE
   too — BE encoding makes the batch circuit silently commit `ok=0` and
@@ -283,47 +278,59 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   encryption-of-zero), and the guest asserts each padded slot is identity
   before skipping its reencryption-verify and accumulator EC adds
   (`verify_reencryption` / `ballot_net` in `circuit-primitives/src/`). The
-  SHA-256 ballot leaf still covers all 16 coords. Reencryption uses a
-  distinct offset scalar per field, chained with SHA-256:
-  `k_0 = H(k)`, `k_{i+1} = H(k_i)` where `H(x) = sha256(x_be32) mod r`
-  (`sha256_to_scalar` in `circuit-primitives/src/babyjubjub.rs`, mirrored by
-  the producer in davinci-node `crypto/elgamal/ballot.go::reencryptScalar`).
-  SHA-256 keeps the k-chain on the `sha256f` precompile instead of the ArithEq
-  state machine (one `arith256_mod` row per step for the Fr reduction); this
-  diverges from davinci-node's own gnark circuit, which is acceptable since the
-  zkVM is the production prover. `TestCheatTamperPaddedSlot` guards the skip;
+  SHA-256 ballot leaf still covers all 16 coords. Re-encryption scalars come from one
+  sequencer-private seed per batch:
+  `r_0 = H("davinci-reenc-v1" ‖ seed_be32 ‖ old_root_be32)`, `r_{t+1} = H(r_t)`
+  with `H(x) = sha256(x) mod r`, consumed once per active ciphertext in block
+  order (`reenc_chain_start`/`verify_reencryption` in
+  `circuit-primitives/src/babyjubjub.rs`, mirrored by `elgamal.NewReencChain`
+  and `Ballot.ReencryptChained` in `go-sdk/vocdoni/crypto/elgamal/reenc.go`).
+  The seed is the only secret; binding to `old_root` just keeps the chains of
+  different transitions apart. davinci-node's own sequencer still chains a
+  per-ballot `k` the old way, which overlaps 15 of 16 scalars between
+  consecutive ballots, so it must adopt the seed chain before feeding this
+  guest. SHA-256 keeps the chain on the `sha256f` precompile. `TestCheatTamperPaddedSlot` guards the skip;
   sweep configs in tests with `BALLOT_NUM_FIELDS`.
 
-## ZisK 1.3.0-alpha + BabyJubJub precompile
+## ZisK v1.3.0-alpha
 
-The guests build against upstream `ziskos` pinned by rev
-(`9e9291d2`, branch `pre-develop-1.3.0-alpha`), which carries the BabyJubJub
-precompile. `circuit-primitives/src/babyjubjub.rs` is affine and
-syscall-backed: no projective coordinates, no field inversions.
+The guests build against `ziskos = "=1.3.0-alpha"` from crates.io, which
+carries the BabyJubJub precompile. `circuit-primitives/src/babyjubjub.rs` is
+affine and syscall-backed: no projective coordinates, no field inversions.
 
-Toolchain lives in `~/.zisk-1.3` (binaries, both proving keys, guest
-toolchain). Build and prove with `PATH=$HOME/.zisk-1.3/bin:$PATH`.
+The toolchain is the stock release install: `ziskup -v 1.3.0-alpha --gpu
+--provingkey -y` followed by `ziskup setup_snark` puts the binaries, both
+proving keys and the guest toolchain under `~/.zisk` (`scripts/install.sh`
+runs exactly that; the Docker path does the same inside the setup container).
+No source or toolchain patches; the one local tweak is the `final.so`
+executable-stack bit (see the gotcha above). The STARK key is ~73 GB, the
+PLONK key ~25 GB.
 
 - **`cargo-zisk` hardcodes the rustup toolchain name `zisk`**
-  (`RUSTUP_TOOLCHAIN_NAME` in `ziskbuild`), so the 1.3 toolchain must be
-  linked under exactly that name or it silently pairs the new driver with an
-  old target spec. The symptom is a link error, `region 'rom' already
-  defined`. Fix: `rustup toolchain link zisk ~/.zisk-1.3/toolchains/zisk-4.0.0`.
-- **`program-setup` is now `setup`**, and `--gpu` was dropped from it (hash
-  mode comes from the proving key's `global_info.json`).
+  (`RUSTUP_TOOLCHAIN_NAME` in `ziskbuild`); ziskup links it. A stale link pairs
+  the driver with an old target spec and fails with `region 'rom' already
+  defined`. After any toolchain change clear `circuit/target` and
+  `circuit-aggregator/target`: cached artifacts from the previous std fail
+  with `E0460 found possibly newer version of crate std`.
+- **`program-setup` is now `setup`** and prints the program vk as `Root hash`.
+  `check-setup` moved to `cargo-zisk-dev` (`-k` STARK key, `-w` PLONK key,
+  `-a` all setups, `-s` PLONK trees, `-g` GPU). GPU constant trees carry a
+  `.consttree_gpu` suffix; the key tarball only ships the CPU `.consttree`.
 - **`cargo-zisk prove` dropped `--emulator`** (the Rust emulator is the
   default; `--asm` selects the assembly one) and renamed `--verify-proofs` to
-  `--verify-proof`.
-- **The proving key must be a Poseidon hash mode.** 1.3 defaults to Blake3,
-  which cannot do PLONK wrapping at all. The installed key is Poseidon1.
-- **`ziskos` 1.3 drags a CUDA prover into guest builds** via
-  `zisk-verifier` -> `proofman-fields` -> `proofman-starks-lib-c`, which is
-  unconditional. `circuit-primitives/Cargo.toml` declares that crate solely to
-  force its `cpu-only` feature through feature unification. It must stay a
-  `branch` ref, matching upstream: a cargo source id includes the git ref, so
-  pinning `rev` would resolve a second copy of the crate and break the
-  unification. Also note nvcc rejects gcc > 14, so CUDA builds need
-  `CUDAHOSTCXX=/usr/bin/g++-14`.
+  `--verify-proof`. `cargo-zisk verify` takes trusted keys (`--setup-vk`,
+  `-k plonk-vk`) instead of trusting the ones carried in the proof.
+- **`cargo-zisk prove --plonk --verify-proof` shells out to `snarkjs plonk
+  verify`**, so `snarkjs` must be on the PATH of whatever runs the worker. The
+  image installs node + snarkjs 0.7.6; `scripts/install.sh` does the same on a
+  host. Without it every PLONK job fails with `Failed to execute snarkjs`.
+- **The proving key must be a Poseidon hash mode.** Blake3 setups exist
+  (`ziskup --blake3`) but cannot be PLONK-wrapped; the installed key is
+  Poseidon1.
+- **`ziskos` drags a CUDA prover into guest builds** via
+  `zisk-verifier` -> `proofman-fields` -> `proofman-starks-lib-c`.
+  `circuit-primitives/Cargo.toml` declares that crate solely to force its
+  `cpu-only` feature through unification; keep its version equal to ziskos'.
 - **1.3 weakened `is_on_curve_bn254`**: it now ends in
   `eq(lhs, rhs) || eq(p, G1_IDENTITY)` and so accepts the all-zero identity,
   where v0.18's plain `eq(lhs, rhs)` rejected it. `g1_is_valid` in
@@ -336,51 +343,15 @@ toolchain). Build and prove with `PATH=$HOME/.zisk-1.3/bin:$PATH`.
   the public point API and the reencryption inputs — which keeps `affine_add`
   syscall-only on the hot path.
 
-**PLONK works on 1.3, but only with a consistently built toolchain.** The
-binaries in `~/.zisk-1.3/bin` are built from `~/zisk-1.3` (branch head, proofman
-`20f09bff`) with three local patches to the proofman checkout under
-`~/.cargo/git/checkouts/pil2-proofman-*/20f09bf` (saved as
-`~/.zisk-1.3/patches/*.patch`, re-apply after any `cargo clean`/re-fetch):
-
-- `provers/starks-lib-c/build.rs`: link `cudart_static` from `$CUDA_HOME/lib64`.
-  Upstream hardcodes `/usr/local/cuda/lib64`, which is CUDA 12.8 here, while
-  nvcc has to be 13.1 (12.8 cannot compile against glibc 2.43). Mixing them
-  breaks the `cudaDeviceProp` layout: `multiProcessorCount` reads as 1, sppark
-  launches a 0-block grid, every PLONK MSM fails with
-  `cudaErrorInvalidConfiguration`, and the proof comes out with T1/T2/T3/Wxi/Wxiw
-  zeroed (A/B/C/Z only look populated because of the host-side blinding
-  correction). That was the "SNARK verification failed" of the first port.
-- `src/bn128/src/msm/msm_bn128.cu`: log the CUDA error instead of silently
-  returning the point at infinity.
-- `src/bn128/src/poseidon/poseidon_bn128.cu`: `__launch_bounds__(512)` on the
-  grinding kernel; without it the 512-thread launch does not fit on sm_120 and
-  recursivef aborts with `too many resources requested for launch`.
-
-Build recipe (cargo treats git checkouts as immutable, so after touching a
-patched C++ file run `make -j starks_lib_gpu` in `pil2-stark/` and
-`cargo clean -p proofman-starks-lib-c` before the build):
-
-```bash
-cd ~/zisk-1.3 && CUDA_HOME=/usr/local/cuda-13.1 PATH=/usr/local/cuda-13.1/bin:$PATH \
-  NVCC_PREPEND_FLAGS="-ccbin g++-14" CUDAHOSTCXX=/usr/bin/g++-14 CUDA_ARCHS=120 \
-  cargo build --release --target x86_64-unknown-linux-gnu
-cp target/x86_64-unknown-linux-gnu/release/{cargo-zisk,cargo-zisk-dev,ziskemu,zisk-transpiler-riscv,zisk-coordinator,zisk-worker} ~/.zisk-1.3/bin/
-```
-
-Two consumer-side changes came with it: `solidity/` is re-vendored from the
-1.3 snark setup, and the on-chain `publicValues` is now the 512-byte
-`snark_inputs_bytes` encoding (see the API notes), which `snark.rs` derives from
-`publics_full`. Batch 64 PLONK proves in ~26 s and `TestChainOrchestrator`
-passes with the final PLONK verified on the simulated chain.
-
-The Docker/`ziskup` install path (`Makefile`, `Dockerfile.*`,
-`scripts/install*.sh`) still targets the v0.18.0 **release** and cannot work
-against an unreleased branch. Use the local toolchain in `~/.zisk-1.3` for 1.3
-work.
+Consumer-side facts that came with 1.3: `solidity/` is vendored from the
+release snark setup (byte-identical to `~/.zisk/provingKeySnark/final/*.sol`),
+and the on-chain `publicValues` is the 512-byte `snark_inputs_bytes` encoding
+(see the API notes), which `snark.rs` derives from `publics_full`.
 
 ### Measured (RTX 5090, num_fields=6, STARK, GPU)
 
-Same input files proved on both stacks, both verified:
+Same input files proved on both stacks (the 1.3 column on the pre-release
+build of the same version), both verified:
 
 | batch | v0.18.0 | 1.3 + precompile | speedup | votes/min |
 |---:|---:|---:|---:|---:|
@@ -390,14 +361,14 @@ Same input files proved on both stacks, both verified:
 Two variables move at once there (ZisK version and the precompile), so treat
 the speedup as the combination, not the precompile alone.
 
-Per-batch PLONK on the same stack (`TestPlonkBenchmark`, service job time,
-votes/min = batch / proof; 256 and 512 measured on a scratch guest with the
-cap raised, see `BENCHMARK.md`):
+Per-batch PLONK on the release binaries (`TestPlonkBenchmark`, service job
+time, votes/min = batch / proof; 256 and 512 measured on the pre-release build
+with a scratch guest and the cap raised, see `BENCHMARK.md`):
 
 | batch | num_fields=2 | votes/min | num_fields=16 | votes/min |
 |---:|---:|---:|---:|---:|
-|  64 |  22.8 s | 168 |  29.1 s | 132 |
-| 128 |  31.6 s | 243 |  43.7 s | 176 |
+|  64 |  22.6 s | 170 |  28.2 s | 136 |
+| 128 |  29.9 s | 257 |  40.3 s | 190 |
 | 256 |  51.1 s | 300 |  73.8 s | 208 |
 | 512 |  71.3 s | 431 | 123.5 s | 249 |
 

@@ -5,5 +5,5 @@ edition = "2021"
 default-run = "davinci-zkvm-aggregator"
 
 [dependencies]
-ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", rev = "9e9291d244867aaa6334e6dabef3cba4f604db86" }
+ziskos = "=1.3.0-alpha"
 circuit-primitives = { path = "../circuit-primitives" }

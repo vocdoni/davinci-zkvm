@@ -5,7 +5,7 @@
 # flag so modern Linux will load it at prove time.
 set -euo pipefail
 
-ZISK_VERSION="${ZISK_VERSION:-0.18.0}"
+ZISK_VERSION="${ZISK_VERSION:-1.3.0-alpha}"
 ZISK_DIR="${ZISK_DIR:-/zisk}"
 
 export HOME="${HOME:-/root}"
@@ -20,21 +20,17 @@ log() { echo "[install-keys] $*"; }
 # container — root already exists and runs the container. --with-snark
 # pulls both the STARK and PLONK keys in one invocation.
 #
-# Idempotent: ziskup bails early if the requested version is already
-# present at the prefix unless --force is passed.
-if [ ! -d "${ZISK_DIR}/provingKey" ] || [ ! -d "${ZISK_DIR}/provingKeySnark" ]; then
-    log "Running ziskup -v ${ZISK_VERSION} --system --provingkey --with-snark --cpu..."
-    ziskup -v "${ZISK_VERSION}" \
-        --system \
-        --prefix "${ZISK_DIR}" \
-        --owner root:root \
-        --provingkey \
-        --with-snark \
-        --cpu \
-        --yes
-else
-    log "Both proving keys already present at ${ZISK_DIR} (skipping ziskup)"
-fi
+# Idempotent: ziskup reads the version stamped in ${ZISK_DIR}/.zisk-bundle,
+# skips a matching install and replaces the keys of any other version.
+log "Running ziskup -v ${ZISK_VERSION} --system --provingkey --with-snark --cpu..."
+ziskup -v "${ZISK_VERSION}" \
+    --system \
+    --prefix "${ZISK_DIR}" \
+    --owner root:root \
+    --provingkey \
+    --with-snark \
+    --cpu \
+    --yes
 
 # Drop the executable-stack flag on final.so. ZisK ships a Circom-generated
 # shared object that requests RWE on its GNU_STACK segment; modern Linux

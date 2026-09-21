@@ -1,7 +1,7 @@
 # Solidity verifier for davinci-zkvm PLONK SNARK
 
 These contracts come straight from the ZisK PLONK proving-key bundle
-(`~/.zisk-1.3/provingKeySnark/final/` from the 1.3 snark setup; `~/.zisk/provingKeySnark/final/` after `ziskup --provingkey-plonk` on a release). We
+(`~/.zisk/provingKeySnark/final/`, installed by `ziskup setup_snark`). We
 vendor them here so the Go integration tests can compile and deploy
 against `simulated.NewBackend` without reaching into the host machine's
 `~/.zisk` directory.
@@ -17,7 +17,7 @@ against `simulated.NewBackend` without reaching into the host machine's
 When the ZisK PLONK proving key is bumped, copy the new `.sol` files in:
 
 ```bash
-cp ~/.zisk-1.3/provingKeySnark/final/{ZiskVerifier.sol,PlonkVerifier.sol,IZiskVerifier.sol} \
+cp ~/.zisk/provingKeySnark/final/{ZiskVerifier.sol,PlonkVerifier.sol,IZiskVerifier.sol} \
    davinci-zkvm/solidity/
 ```
 

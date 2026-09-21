@@ -151,8 +151,11 @@ davinci-zkvm/
 - NVIDIA GPU with **~30 GB VRAM** (RTX 5090 32 GB and A100 40 GB work;
   RTX 4090 at 24 GB does not). The PLONK aggregation pass is what
   pushes memory usage; first boot allocates the full working set.
-- NVIDIA driver 570+, CUDA 12.8, `nvidia-container-toolkit`
-- About 40 GB of free disk for the two ZisK proving keys.
+- NVIDIA driver 570+ and `nvidia-container-toolkit` on the host. The
+  prebuilt `cargo-zisk-gpu` is statically linked against the CUDA
+  runtime, so no CUDA toolkit is needed on the host.
+- About 100 GB of free disk for the two ZisK proving keys (STARK ~73 GB,
+  PLONK ~25 GB).
 
 ### Install and run
 
@@ -168,11 +171,11 @@ make test       # runs the Go integration test suite
 ```
 
 `make install` runs `ziskup` inside a small container and writes both
-keys into `./zisk-keys/` on the host (~37 GB, 10–30 min depending on
-bandwidth). It also patches the PLONK `final.so` to drop its
+keys into `./zisk-keys/` on the host (~100 GB total, 20–60 min depending
+on bandwidth). It also patches the PLONK `final.so` to drop its
 executable-stack flag, which modern Linux refuses to grant at dlopen
-time. The runtime container builds the GPU constant trees on first
-boot (~10 min) and skips that step on subsequent starts.
+time. The runtime container builds the GPU setup artifacts on first
+boot (about a minute) and skips that step on subsequent starts.
 
 Other Make targets: `make logs`, `make status`, `make shell`,
 `make down`, `make restart`, `make clean`. Run `make help` for the
@@ -194,6 +197,7 @@ batch := &davinci.ProveBatch{
     Voters:          voters,   // []VoterBallot with proofs + ECDSA sigs
     State:           state,    // SMT chain transitions
     EncryptionKey:   encKey,   // ElGamal re-encryption key
+    ReencryptionSeed: seed,    // the seed the voters' re-encryptions were derived from
     KZG:             kzg,      // EIP-4844 blob evaluation
 }
 
@@ -267,9 +271,9 @@ These four fields map straight onto the arguments of
 
 ## Performance
 
-All numbers below are from an NVIDIA RTX 5090 (driver 580, CUDA 12.8)
-running the [full pipeline](#what-the-circuit-checks). Ballot generation
-isn't counted; the time column is just SNARK generation.
+All numbers below are from an NVIDIA RTX 5090 (driver 580) running the
+[full pipeline](#what-the-circuit-checks). Ballot generation isn't
+counted; the time column is just SNARK generation.
 
 | batch | PLONK SNARK | votes/s | on-chain verify |
 |---:|---:|---:|---:|
@@ -308,7 +312,9 @@ make test
 
 If you'd rather build and run the service directly on the host without
 Docker — useful when iterating on the Rust code — see `make local-setup`,
-`make local-run`, `make local-test`. Those drive `scripts/install.sh`.
+`make local-run`, `make local-test`. Those drive `scripts/install.sh`, which
+also installs `snarkjs`: the prover's own PLONK verification shells out to
+it (the Docker image ships it).
 
 ## Circuit specification
 

@@ -3,8 +3,9 @@
 # Profiles:
 #   setup — Run ziskup inside a container to download the two ZisK proving
 #           keys into ${ZISK_KEYS_DIR} (./zisk-keys by default). One-shot.
-#   cuda  — NVIDIA GPU prover. Requires driver 570+, CUDA 12.8, and
-#           nvidia-container-toolkit on the host.
+#   cuda  — NVIDIA GPU prover. Requires driver 570+ and
+#           nvidia-container-toolkit on the host (no CUDA toolkit — the
+#           prebuilt cargo-zisk-gpu is statically linked to the CUDA runtime).
 #
 # Typical workflow is driven by the top-level Makefile (`make help`):
 #   make keys     → docker compose --profile setup run --rm key-installer
@@ -22,12 +23,12 @@ services:
       context: .
       dockerfile: Dockerfile.setup
       args:
-        ZISK_TAG: ${ZISK_TAG:-v0.18.0}
-        ZISK_VERSION: ${ZISK_VERSION:-0.18.0}
+        ZISK_TAG: ${ZISK_TAG:-v1.3.0-alpha}
+        ZISK_VERSION: ${ZISK_VERSION:-1.3.0-alpha}
     volumes:
       - ${ZISK_KEYS_DIR:-./zisk-keys}:/zisk
     environment:
-      - ZISK_VERSION=${ZISK_VERSION:-0.18.0}
+      - ZISK_VERSION=${ZISK_VERSION:-1.3.0-alpha}
       - ZISK_DIR=/zisk
       - HOST_UID=${HOST_UID:-}
       - HOST_GID=${HOST_GID:-}
@@ -38,6 +39,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.cuda
+      args:
+        ZISK_VERSION: ${ZISK_TAG:-v1.3.0-alpha}
     ports:
       - "${LISTEN_PORT:-8080}:8080"
     volumes:
