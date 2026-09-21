@@ -241,7 +241,7 @@ No Anvil, ganache, or RPC endpoint needed.
 {
   "program_vk":           "0x…32 bytes",
   "root_c_vadcop_final":  "0x…32 bytes",
-  "public_values":        "0x…256 bytes",
+  "public_values":        "0x…512 bytes",
   "proof_bytes":          "0x…768 bytes (ABI-encoded uint256[24])"
 }
 ```

@@ -318,13 +318,11 @@ async fn run_prove(config: &Config, task: &ProveTask, minimal_memory: bool) -> a
                 }
                 Err(e) => warn!("serialize snark.json: {}", e),
             }
-            if let Some(stripped) = snark.public_values.strip_prefix("0x") {
-                if let Ok(bytes) = hex::decode(stripped) {
-                    let publics_path = task.output_dir.join("publics.bin");
-                    if let Err(e) = tokio::fs::write(&publics_path, &bytes).await {
-                        warn!("write publics.bin: {}", e);
-                    }
-                }
+            // publics.bin keeps the guest's u32 view (what the digest parsers
+            // read), not the 8-byte-word string the contract hashes.
+            let publics_path = task.output_dir.join("publics.bin");
+            if let Err(e) = tokio::fs::write(&publics_path, &snark.program_publics).await {
+                warn!("write publics.bin: {}", e);
             }
         }
         Err(e) => warn!("parse proof.bin into SNARK payload: {}", e),

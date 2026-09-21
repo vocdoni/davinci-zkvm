@@ -36,8 +36,9 @@ type PlonkSnark struct {
 	// a hardcoded `getRootCVadcopFinal()`; this field lets callers verify
 	// off-chain without reading the contract; 32 bytes.
 	RootCVadcopFinal [32]byte
-	// PublicValues is the program's `commit_slice` output (256 bytes for
-	// the current `ZISK_PUBLICS=64` setup).
+	// PublicValues is the byte string the on-chain verifier hashes: the 64
+	// program publics as 8-byte little-endian words (512 bytes on ZisK 1.3).
+	// The guest's u32 view is served separately by `GET /jobs/{id}/publics`.
 	PublicValues []byte
 	// ProofBytes is the PLONK proof already ABI-encoded as `uint256[24]`
 	// (768 bytes). Pass it straight as the `bytes proofBytes` argument to

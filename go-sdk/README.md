@@ -42,7 +42,7 @@ fmt.Printf("snark ready (job %s, %s)\n", result.JobID, result.Elapsed)
 snark := result.Snark
 _ = snark.ProgramVK        // bytes32 programVK
 _ = snark.RootCVadcopFinal // bytes32 rootCVadcopFinal
-_ = snark.PublicValues     // bytes publicValues (256 B)
+_ = snark.PublicValues     // bytes publicValues (512 B on ZisK 1.3)
 _ = snark.ProofBytes       // bytes proofBytes   (768 B = uint256[24])
 ```
 
@@ -150,7 +150,7 @@ type PublicOutputs struct {
 type PlonkSnark struct {
     ProgramVK        [32]byte // bytes32 programVK
     RootCVadcopFinal [32]byte // bytes32 rootCVadcopFinal
-    PublicValues     []byte   // bytes publicValues   (256 B)
+    PublicValues     []byte   // bytes publicValues   (512 B on ZisK 1.3)
     ProofBytes       []byte   // bytes proofBytes     (768 B = uint256[24])
 }
 ```

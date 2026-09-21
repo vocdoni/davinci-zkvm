@@ -1,6 +1,9 @@
 # Benchmarks
 
-Measured on a single NVIDIA RTX 5090 (59 GB host RAM), ZisK v0.18.0.
+Measured on a single NVIDIA RTX 5090 (59 GB host RAM). The chained-mode
+and historical per-batch tables are ZisK v0.18.0; the current per-batch
+numbers on ZisK 1.3.0-alpha with the BabyJubJub precompile are in the
+"Per-batch mode on ZisK 1.3" section.
 Reproduce with `make benchmark` (see `benchmark/README.md`); raw logs and
 the auto-generated table land in `benchmark/results/`.
 
@@ -111,7 +114,7 @@ the 16-field max (sweep with `BALLOT_NUM_FIELDS`):
 | ~~256~~ | 102 s | 289 s (min-mem) | ~0.3 s |
 
 128 is the `MAX_BATCH_SIZE` cap; the 256 row is retained as the corner that
-motivated it. `proofBytes` is 768 B / `publicValues` 256 B regardless of
+motivated it. `proofBytes` is 768 B / `publicValues` 256 B (512 B on ZisK 1.3) regardless of
 batch or field count.
 
 **Why the cap is 128.** At num_fields=16 the per-field chained reencryption
@@ -128,6 +131,37 @@ doesn't change the circuit, constraints, or the proven statement, so the
 result still verifies and soundness is unaffected. The speed cost is small: a
 matched A/B on one batch-128 num_fields=16 input measured 138.4 s plain vs
 142.1 s with `--minimal-memory` (+2.7%); on a lighter input it was +0.7%.
+
+## Per-batch mode on ZisK 1.3.0-alpha + BabyJubJub precompile
+
+Same GPU, toolchain per the "ZisK 1.3" section of CLAUDE.md, measured with
+`TestPlonkBenchmark` (`BENCH_SIZES`, `BALLOT_NUM_FIELDS`). "proof" is the
+service's job time for one batch: witness generation, STARK, recursion, PLONK
+wrap and ZisK's own verification of the result. The sequencer's per-batch
+throughput is batch / proof; nothing else sits on that path. Ballot generation
+(voter side, ~1.4 s per vote on this CPU) is excluded, as is the on-chain
+verify (0.3–0.7 s on the simulated chain).
+
+| batch | proof (num_fields=2) | votes/min | proof (num_fields=16) | votes/min |
+|---:|---:|---:|---:|---:|
+|  64 |  22.8 s | 168 |  29.1 s | 132 |
+| 128 |  31.6 s | 243 |  43.7 s | 176 |
+| 256* |  51.1 s | 300 |  73.8 s | 208 |
+| 512* |  71.3 s | 431 | 123.5 s | 249 |
+
+\* Above the production `MAX_BATCH_SIZE` (128). Measured on a scratch guest
+with the cap raised to 512 (the three mirrored constants, nothing else); the
+tracked ELF and vks are unchanged. Both sizes proved on the first attempt
+with no `--minimal-memory` fallback: 1.3 reserves its ~28 GiB unified GPU
+buffer up front and schedules inside it, so the v0.18 batch-256 OOM does not
+reproduce. Raising the cap for production is a rebuild of both guests (new
+program vks, `CircuitRelease` refreeze).
+
+Against the v0.18 table above, batch 128 at 16 fields went from 164 s to
+43.7 s (3.8x) and batch 64 at 2 fields from 38 s to 22.8 s. The fixed
+per-proof cost (recursion + PLONK wrap, ~14 s) now dominates small batches,
+which is why votes/min keeps climbing with batch size: the marginal cost is
+~0.14 s per vote at 2 fields and ~0.24 s at 16.
 
 ## Comparing the modes
 

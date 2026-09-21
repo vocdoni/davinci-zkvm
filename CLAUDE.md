@@ -44,7 +44,7 @@ startup; chained mode additionally needs `AGGREGATOR_ELF_PATH`.
 | `service/` | Axum HTTP API. Always emits PLONK. |
 | `service/src/prover/worker.rs` | Runs `cargo-zisk prove --plonk …`, with retry logic for transient ZisK flakes. |
 | `service/src/prover/snark.rs` | Bincode-decodes `proof.bin` into the four Solidity-ready byte strings (`programVK`, `rootCVadcopFinal`, `publicValues`, `proofBytes`). |
-| `solidity/` | Vendored upstream PLONK verifier, byte-identical to `~/.zisk/provingKeySnark/final/*.sol`. **Don't edit these in-tree** — the Go helper patches them on a temp copy at compile time, so re-copying after a new ZisK release just works. |
+| `solidity/` | Vendored upstream PLONK verifier, byte-identical to `~/.zisk-1.3/provingKeySnark/final/*.sol` (the 1.3 snark setup; the vkey constants and `rootCVadcopFinal` change with every setup). **Don't edit these in-tree** — the Go helper patches them on a temp copy at compile time, so re-copying after a new ZisK release just works. |
 | `go-sdk/` | Go client. Exposes `PlonkSnark` (the 4-tuple) and `client.Prove(ctx, batch) -> ProveResult.Snark`. Never exposes STARK/VADCOP internals (chained mode only sees job IDs + the final PLONK). |
 | `go-sdk/chain/` | Chained-mode orchestrator: `Sequencer` (fold cadence, finalize), `State` (process SMT owner, reencryption, results accumulators), `Digest` (53×u32 "DAG1" publics parser + external vk-binding checks). `snapshot.go` serializes/restores `State` for crash recovery (reencryption uses a random `k` per ballot, so replay isn't reproducible). `commitment.go`+`release.go` recompute the guest's `config_commitment` host-side and pin the canonical circuit-release vks (`CircuitRelease`) for independent end-to-end verification. Self-contained — must NOT import test code. |
 | `go-sdk/solidity/solidity.go` | `VerifyOnSimulated(dir, snark)` — compiles the verifier (local `solc` or `docker run ethereum/solc:stable`) and runs it on `go-ethereum/ethclient/simulated.NewBackend`. |
@@ -178,7 +178,9 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   the arguments of `ZiskVerifier.verifySnarkProof`.
 - `GET /jobs/{id}/snark/raw` — raw `proof.bin` (bincode), for
   `cargo-zisk verify`.
-- `GET /jobs/{id}/publics` — just the 256-byte `publicValues` blob.
+- `GET /jobs/{id}/publics` — the guest's 256-byte u32 publics (`publics.bin`).
+  Not the on-chain `publicValues` string, which since ZisK 1.3 is the same 64
+  publics as 8-byte LE words (512 B); `snark.rs` builds that from `publics_full`.
 - `GET /jobs/{id}/inputs` — the raw `input.bin` for audit / re-proving.
 - `GET /health`.
 
@@ -334,12 +336,42 @@ toolchain). Build and prove with `PATH=$HOME/.zisk-1.3/bin:$PATH`.
   the public point API and the reencryption inputs — which keeps `affine_add`
   syscall-only on the hot path.
 
-**The PLONK wrap is currently broken on 1.3.** STARK proving and verification
-work, but `--plonk` produces a proof that fails its own verification
-(`✗ SNARK verification failed`). The two keys are mutually consistent (the
-`vadcop_final.verkey.json` in `provingKeySnark` matches `provingKey`), so the
-freshly generated alpha snark setup is the prime suspect. Per-batch PLONK and
-chained finalize are blocked until this is resolved.
+**PLONK works on 1.3, but only with a consistently built toolchain.** The
+binaries in `~/.zisk-1.3/bin` are built from `~/zisk-1.3` (branch head, proofman
+`20f09bff`) with three local patches to the proofman checkout under
+`~/.cargo/git/checkouts/pil2-proofman-*/20f09bf` (saved as
+`~/.zisk-1.3/patches/*.patch`, re-apply after any `cargo clean`/re-fetch):
+
+- `provers/starks-lib-c/build.rs`: link `cudart_static` from `$CUDA_HOME/lib64`.
+  Upstream hardcodes `/usr/local/cuda/lib64`, which is CUDA 12.8 here, while
+  nvcc has to be 13.1 (12.8 cannot compile against glibc 2.43). Mixing them
+  breaks the `cudaDeviceProp` layout: `multiProcessorCount` reads as 1, sppark
+  launches a 0-block grid, every PLONK MSM fails with
+  `cudaErrorInvalidConfiguration`, and the proof comes out with T1/T2/T3/Wxi/Wxiw
+  zeroed (A/B/C/Z only look populated because of the host-side blinding
+  correction). That was the "SNARK verification failed" of the first port.
+- `src/bn128/src/msm/msm_bn128.cu`: log the CUDA error instead of silently
+  returning the point at infinity.
+- `src/bn128/src/poseidon/poseidon_bn128.cu`: `__launch_bounds__(512)` on the
+  grinding kernel; without it the 512-thread launch does not fit on sm_120 and
+  recursivef aborts with `too many resources requested for launch`.
+
+Build recipe (cargo treats git checkouts as immutable, so after touching a
+patched C++ file run `make -j starks_lib_gpu` in `pil2-stark/` and
+`cargo clean -p proofman-starks-lib-c` before the build):
+
+```bash
+cd ~/zisk-1.3 && CUDA_HOME=/usr/local/cuda-13.1 PATH=/usr/local/cuda-13.1/bin:$PATH \
+  NVCC_PREPEND_FLAGS="-ccbin g++-14" CUDAHOSTCXX=/usr/bin/g++-14 CUDA_ARCHS=120 \
+  cargo build --release --target x86_64-unknown-linux-gnu
+cp target/x86_64-unknown-linux-gnu/release/{cargo-zisk,cargo-zisk-dev,ziskemu,zisk-transpiler-riscv,zisk-coordinator,zisk-worker} ~/.zisk-1.3/bin/
+```
+
+Two consumer-side changes came with it: `solidity/` is re-vendored from the
+1.3 snark setup, and the on-chain `publicValues` is now the 512-byte
+`snark_inputs_bytes` encoding (see the API notes), which `snark.rs` derives from
+`publics_full`. Batch 64 PLONK proves in ~26 s and `TestChainOrchestrator`
+passes with the final PLONK verified on the simulated chain.
 
 The Docker/`ziskup` install path (`Makefile`, `Dockerfile.*`,
 `scripts/install*.sh`) still targets the v0.18.0 **release** and cannot work
@@ -358,6 +390,17 @@ Same input files proved on both stacks, both verified:
 Two variables move at once there (ZisK version and the precompile), so treat
 the speedup as the combination, not the precompile alone.
 
+Per-batch PLONK on the same stack (`TestPlonkBenchmark`, service job time,
+votes/min = batch / proof; 256 and 512 measured on a scratch guest with the
+cap raised, see `BENCHMARK.md`):
+
+| batch | num_fields=2 | votes/min | num_fields=16 | votes/min |
+|---:|---:|---:|---:|---:|
+|  64 |  22.8 s | 168 |  29.1 s | 132 |
+| 128 |  31.6 s | 243 |  43.7 s | 176 |
+| 256 |  51.1 s | 300 |  73.8 s | 208 |
+| 512 |  71.3 s | 431 | 123.5 s | 249 |
+
 ## Historical baseline (RTX 5090, ZisK v0.18.0)
 
 Ballot capacity is 16 fields (`NUM_FIELDS`), but the guest reads the
@@ -375,7 +418,7 @@ the *declared* field count, not the 16-field maximum. PLONK SNARK time
 
 128 is now the `MAX_BATCH_SIZE` cap; the 256 row is retained for context
 (it is the corner that motivated the cap — see below). SNARK size is 768 B
-`proofBytes` / 256 B `publicValues`, invariant across batch size and field
+`proofBytes` / 256 B `publicValues` (512 B on 1.3), invariant across batch size and field
 count (the on-chain interface does not change with `num_fields`). On-chain
 verify is field-count independent.
 
