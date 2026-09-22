@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"os"
 	"sort"
 
 	"github.com/ethereum/go-ethereum/crypto"
@@ -137,9 +138,21 @@ func NewElection(nVoters int) (*Election, error) {
 	// ElGamal encryption key
 	// Generated BEFORE tree setup because the encryption key hash is stored
 	// in the process config tree under key 0x03.
-	encKeyPoint, encPrivKey, err := elgamal.GenerateKey(bjjgnark.New())
-	if err != nil {
-		return nil, fmt.Errorf("elgamal.GenerateKey: %w", err)
+	// A seeded key (DAVINCI_TEST_ELECTION_SEED) makes the election, and so
+	// every ballot proof, reproducible across runs; CachedBallotBatch keys
+	// its on-disk cache on it.
+	var (
+		encKeyPoint ecc.Point
+		encPrivKey  *big.Int
+		err         error
+	)
+	if seed := os.Getenv("DAVINCI_TEST_ELECTION_SEED"); seed != "" {
+		encKeyPoint, encPrivKey = elgamalKeyFromSeed(seed)
+	} else {
+		encKeyPoint, encPrivKey, err = elgamal.GenerateKey(bjjgnark.New())
+		if err != nil {
+			return nil, fmt.Errorf("elgamal.GenerateKey: %w", err)
+		}
 	}
 	encKey := encKeyPoint.(*bjjgnark.BJJ)
 
@@ -1130,4 +1143,20 @@ func sampleN(cand []int, k int) ([]int, error) {
 		pool[i], pool[ji] = pool[ji], pool[i]
 	}
 	return pool[:k], nil
+}
+
+// elgamalKeyFromSeed derives a fixed ElGamal key from a test seed. Test use
+// only: it exists so generated ballots can be cached across runs.
+func elgamalKeyFromSeed(seed string) (ecc.Point, *big.Int) {
+	h := sha256.Sum256([]byte("davinci-test-election|" + seed))
+	curve := bjjgnark.New()
+	d := new(big.Int).SetBytes(h[:])
+	d.Mod(d, curve.Order())
+	if d.Sign() == 0 {
+		d.SetInt64(1)
+	}
+	pub := curve.New()
+	pub.SetGenerator()
+	pub.ScalarMult(pub, d)
+	return pub, d
 }

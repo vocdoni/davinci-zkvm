@@ -130,7 +130,7 @@ offset  size            field
 0       8               magic ("KZGBLK!!" LE)
 8       32              process_id (FrRaw LE, arbo hex)
 40      32              root_hash_before (FrRaw LE)
-72      8               n_blobs (u64 LE, 1..=MAX_BLOBS = 8)
+72      8               n_blobs (u64 LE, 1..=MAX_BLOBS = 32)
 80      n_blobs × 48    commitments (compressed BLS12-381 G1, 48 B each, big-endian)
 ```
 
@@ -662,7 +662,7 @@ Policy: the sequencer must include at least
 `min(target, occupied_before − n_overwritten)` refreshes per batch, where
 `target = min(MAX_REFRESH, max(REFRESH_MIN, REFRESH_TAU · n_overwritten,
 REFRESH_KAPPA · n_voters))` and the constants are
-`MAX_REFRESH = 256, REFRESH_MIN = 16, REFRESH_TAU = 2, REFRESH_KAPPA = 1`
+`MAX_REFRESH = 2048, REFRESH_MIN = 16, REFRESH_TAU = 2, REFRESH_KAPPA = 1`
 (`circuit-primitives/src/types.rs`).
 
 | # | Check | Fails on |
@@ -752,7 +752,7 @@ Cell count:
 
 ```
 T = 2 + n_vids + n_updates · (1 + 2·nf) + 2·nf
-n_blobs = ceil(T / 4096)          // 1 ≤ n_blobs ≤ MAX_BLOBS = 8
+n_blobs = ceil(T / 4096)          // 1 ≤ n_blobs ≤ MAX_BLOBS = 32
 ```
 
 ### Evaluation point derivation
@@ -794,7 +794,7 @@ Emitted at registers [28..35] as 8 × u32 LE; `NBlobs` at [36].
 | # | Check | Fails on |
 |---|-------|----------|
 | 5.1 | KZG block absent (or STATETX absent): Phase 5 short-circuits with digest = 0, NBlobs = 0. The chained-mode path relies on that; STATETX absence is caught by the rest of the pipeline (`FAIL_MISSING_BLOCK`) so Phase 5 does not double-count it | — |
-| 5.2 | `1 ≤ n_blobs ≤ MAX_BLOBS = 8` | FAIL_KZG |
+| 5.2 | `1 ≤ n_blobs ≤ MAX_BLOBS = 32` | FAIL_KZG |
 | 5.3 | `n_blobs == ceil(T / 4096)`, with T from the reconstructed cell count. Under- or over-commitment forbidden | FAIL_KZG |
 | 5.4 | For every `b`: `y_b = eval_barycentric(cells_b, z_b)` where `z_b = SHA-256(pid_BE32 ‖ root_before_BE32 ‖ com_b) mod r_bls`. Emitted BlobsDigest = SHA-256 of the ordered `(com_b, y_b)` pairs | — |
 
@@ -824,7 +824,7 @@ result, not as a `FAIL_KZG` bit.
 
 Each blob costs ~28k `arith256_mod` precompile calls (the 4096-entry batch
 inverse dominates). Small transitions fit in one blob; large batches cap at
-`MAX_BLOBS = 8` (32k cells).
+`MAX_BLOBS = 32` (128k cells; a 1024-vote batch with 1024 refreshes at 16 fields needs 17).
 
 ---
 

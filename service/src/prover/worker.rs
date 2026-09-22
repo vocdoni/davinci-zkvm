@@ -29,6 +29,9 @@ struct ProveTask {
     output_dir: PathBuf,
     elf_path: PathBuf,
     plonk: bool,
+    /// Ballot proofs in the batch (0 for fold/finalize jobs); decides
+    /// whether the first attempt already runs with --minimal-memory.
+    proof_count: usize,
 }
 
 impl ProverHandle {
@@ -56,6 +59,7 @@ impl ProverHandle {
         kind: JobKind,
         elf_path: PathBuf,
         parent_job_ids: Vec<Uuid>,
+        proof_count: usize,
     ) -> anyhow::Result<Uuid> {
         let job_id = Uuid::new_v4();
         self.jobs.insert(job_id, Job::new(job_id, kind, parent_job_ids));
@@ -79,6 +83,7 @@ impl ProverHandle {
             output_dir: job_dir,
             elf_path,
             plonk: kind.is_plonk(),
+            proof_count,
         };
         self.sender
             .try_send(task)
@@ -217,7 +222,12 @@ async fn run_prove_with_retry(config: &Config, task: &ProveTask) -> anyhow::Resu
         // GPU for large batches at high num_fields (deterministic OOM otherwise)
         // and is byte-identical to a normal prove, so it can never weaken a
         // result. The first attempt stays fast unless the operator forces it.
-        let minimal_memory = config.zisk_minimal_memory || attempt > 1;
+        // Large batches go straight to --minimal-memory: without it a 1024-vote
+        // transition with its refreshes needs ~54 GB of host RAM and gets
+        // OOM-killed on a 64 GB machine, with it ~41 GB.
+        let minimal_memory = config.zisk_minimal_memory
+            || attempt > 1
+            || task.proof_count >= config.zisk_minimal_memory_from;
         match run_prove(config, task, minimal_memory).await {
             Ok(()) => return Ok(()),
             Err(e) if attempt <= MAX_PROVE_RETRIES && is_transient_prover_error(&e.to_string()) => {

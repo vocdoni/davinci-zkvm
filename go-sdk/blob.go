@@ -15,7 +15,7 @@ import (
 // MaxBlobs mirrors the guest's MAX_BLOBS: the guest rejects any KZG block
 // carrying more than this many blob commitments. Raising the cap requires
 // bumping the constant in both places (and in the settlement contract).
-const MaxBlobs = 8
+const MaxBlobs = 32
 
 // cellsPerBlob is the EIP-4844 fixed cell count per blob (matches
 // da_blob::CELLS_PER_BLOB and kzg::N in the guest).

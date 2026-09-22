@@ -236,7 +236,7 @@ pub async fn submit_prove(
     // Submit to prover queue
     let proof_output_dir = state.config.proof_output_dir.clone();
     let elf = state.config.circuit_elf_path.clone();
-    match state.prover.submit(input_bytes, &proof_output_dir, kind, elf, Vec::new()).await {
+    match state.prover.submit(input_bytes, &proof_output_dir, kind, elf, Vec::new(), num_proofs).await {
         Ok(job_id) => {
             info!("Job {} queued: {} ballot proof(s), queue_position={}", job_id, num_proofs, state.prover.queue_len());
             (

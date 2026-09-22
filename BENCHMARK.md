@@ -174,19 +174,29 @@ refresh; "steady" is the second, which refreshes `RefreshTarget(size, 0,
 size) = size` slots on top of its own votes and is the number that matters
 for throughput. Both include ZisK's own verification of the result.
 
-| batch | first (nf=2) | steady (nf=2) | votes/min | first (nf=16) | steady (nf=16) | votes/min |
-|---:|---:|---:|---:|---:|---:|---:|
-|   2 | 15.8 s | 15.8 s |   8 | 15.9 s | 15.8 s |   8 |
-|  64 | 21.9 s | 23.9 s | 161 | 27.7 s | 31.2 s | 123 |
-| 128 | 29.3 s | 31.6 s | 243 | 40.5 s | 46.5 s | 165 |
+| batch | first (nf=2) | steady (nf=2) | votes/min | blobs | first (nf=16) | steady (nf=16) | votes/min | blobs |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+|    2 |  15.8 s |  15.8 s |   8 | 1 |  15.9 s |  15.8 s |   8 | 1 |
+|   64 |  21.9 s |  23.9 s | 161 | 1 |  27.7 s |  31.2 s | 123 | 2 |
+|  128 |  29.3 s |  31.6 s | 243 | 1 |  40.5 s |  46.5 s | 165 | 3 |
+|  256 |  46.9 s |  51.9 s | 296 | 1 |  67.2 s |  80.2 s | 192 | 5 |
+|  512 |  63.1 s |  77.7 s | 395 | 2 | 123.0 s | 151.8 s | 202 | 9 |
+| 1024 | 114.5 s | 151.1 s | 407 | 3 | 260.8 s | 322.1 s | 191 | 17 |
 
 A refresh costs about 18 ms at 2 fields and 45 ms at 16 fields (the
 re-encryption, one SMT update, two leaf hashes and its share of the blob
 evaluation); at `KAPPA = 1` that is +8% and +15% on a 128-vote batch. The
-fixed cost is 15.8 s. The worst legal transition (128 overwrites with 256
-refreshes at 16 fields, four blobs) proved in 54 s and peaked at 30.4 GiB of
-GPU memory without the minimal-memory fallback, which is why `MAX_BATCH_SIZE`
-stays at 128.
+fixed cost is 15.8 s; per-vote cost flattens past 512, so throughput
+plateaus near 400 votes/min at 2 fields and 200 at 16.
+
+`MAX_BATCH_SIZE` is 1024. The limit is host RAM, not the GPU: the GPU peaks
+at ~30.4 GiB for every size from 128 up, while the prover's resident memory
+for the 1024-vote steady transition is ~54 GB without `--minimal-memory`
+(OOM-killed on this 64 GB machine) and 41.5 GB with it. The service therefore
+uses the flag from 512 proofs up (`ZISK_MINIMAL_MEMORY_FROM`); the 512 row at
+2 fields predates the threshold, the rest of the >= 512 rows carry it (a few
+percent). 1024 votes at 16 fields spans 17 blobs, above the 9 blobs per block
+Ethereum allows today, so that row is a proving figure only.
 
 Settling a transition through `solidity/DavinciSettlement.sol` on the
 simulated chain (PLONK verification, root and census checks, the

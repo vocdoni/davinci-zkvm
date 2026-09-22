@@ -14,17 +14,16 @@ import "encoding/json"
 // Must be a power of two. Matches the MAX_BATCH_SIZE constant in the circuit
 // and input-gen crate. Change this value in both places when increasing the limit.
 //
-// Capped at 128 for GPU-memory safety: batch 256 at full ballot capacity
-// (num_fields=16) peaks ~31.3 GB even under --minimal-memory, leaving no
-// headroom on a 32 GB GPU.
-const MaxBatchSize = 128
+// 1024 is the largest size proved end to end on a 64 GB host (the prover's
+// host RAM, ~41 GB with --minimal-memory, is the limit, not the GPU).
+const MaxBatchSize = 1024
 
 // Silent revoting: every batch must re-randomize occupied ballot slots it did
 // not write, so an observer cannot tell an overwrite from a routine refresh.
 // Mirrors MAX_REFRESH / REFRESH_* in circuit_primitives::types.
 const (
 	// MaxRefresh caps the refresh entries per batch (input size, proving time).
-	MaxRefresh = 256
+	MaxRefresh = 2048
 	// RefreshMin is the floor, so small batches still churn the tree.
 	RefreshMin = 16
 	// RefreshTau refreshes per overwrite: a changed occupied slot is an

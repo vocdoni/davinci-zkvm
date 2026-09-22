@@ -7,10 +7,14 @@ package integration
 
 import (
 	ecdsapkg "crypto/ecdsa"
+	"crypto/sha256"
+	"encoding/gob"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/circuits/ballotproof"
@@ -238,4 +242,54 @@ func injectCurveField(proofJSON string, curve string) (string, error) {
 	}
 	out, err := json.Marshal(m)
 	return string(out), err
+}
+
+// CachedBallotBatch is GenerateBallotBatch with an on-disk gob cache. The
+// proofs bind the encryption key, so the cache is only used when the election
+// is seeded (DAVINCI_TEST_ELECTION_SEED); the file name carries the seed, the
+// field count, the voter range and the ballot seed. Files live in
+// BENCH_CACHE_DIR (default benchmark/cache).
+func CachedBallotBatch(e *Election, voters []*Voter, seedBase int64) (*BatchProveComponents, error) {
+	seed := os.Getenv("DAVINCI_TEST_ELECTION_SEED")
+	if seed == "" || len(voters) == 0 {
+		return GenerateBallotBatch(e.ProcessID, e.EncKey, voters, seedBase)
+	}
+	_, nf := ballotModeLeaf()
+	tag := sha256.Sum256([]byte(seed))
+	name := fmt.Sprintf("plonk-ballots-nf%d-v%d-%d-s%d-%s.gob",
+		nf, voters[0].CensusIdx, voters[len(voters)-1].CensusIdx, seedBase, hex.EncodeToString(tag[:4]))
+	dir := os.Getenv("BENCH_CACHE_DIR")
+	if dir == "" {
+		dir = filepath.Join("..", "..", "..", "benchmark", "cache")
+	}
+	path := filepath.Join(dir, name)
+	if f, err := os.Open(path); err == nil {
+		var b BatchProveComponents
+		decErr := gob.NewDecoder(f).Decode(&b)
+		f.Close()
+		if decErr == nil && len(b.Results) == len(voters) {
+			return &b, nil
+		}
+	}
+	b, err := GenerateBallotBatch(e.ProcessID, e.EncKey, voters, seedBase)
+	if err != nil {
+		return nil, err
+	}
+	// Best effort: a cache write failure just means the next run regenerates.
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return b, nil
+	}
+	tmp := path + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return b, nil
+	}
+	if err := gob.NewEncoder(f).Encode(b); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return b, nil
+	}
+	f.Close()
+	_ = os.Rename(tmp, path)
+	return b, nil
 }

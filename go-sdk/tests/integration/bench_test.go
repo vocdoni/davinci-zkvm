@@ -69,6 +69,10 @@ func TestPlonkBenchmark(t *testing.T) {
 		wallMs    int64
 		verifyMs  int64
 	}
+	// Seed the election so ballots are cached across runs (CachedBallotBatch).
+	if os.Getenv("DAVINCI_TEST_ELECTION_SEED") == "" {
+		t.Setenv("DAVINCI_TEST_ELECTION_SEED", "plonk-bench")
+	}
 	results := make([]result, 0, len(sizes))
 
 	t.Log("=== TestPlonkBenchmark: PLONK SNARK time vs batch size ===")
@@ -126,11 +130,11 @@ func proveBench(t *testing.T, client *davinci.Client, election *Election, voters
 	t.Helper()
 	size := len(voters)
 	wallStart := time.Now()
-	batch, err := GenerateBallotBatch(election.ProcessID, election.EncKey, voters, seedBase)
+	batch, err := CachedBallotBatch(election, voters, seedBase)
 	if err != nil {
-		t.Fatalf("size=%d: GenerateBallotBatch: %v", size, err)
+		t.Fatalf("size=%d: CachedBallotBatch: %v", size, err)
 	}
-	t.Logf("  size=%d: ballot proofs generated in %.1fs", size, time.Since(wallStart).Seconds())
+	t.Logf("  size=%d: ballot proofs ready in %.1fs", size, time.Since(wallStart).Seconds())
 	oldRoot := election.OldRoot
 	reencBlock, reencBallots, err := election.BuildReencBlock(oldRoot, batch.Results)
 	if err != nil {

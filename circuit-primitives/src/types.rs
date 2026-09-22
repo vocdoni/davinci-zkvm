@@ -61,14 +61,13 @@ pub const BALLOT_FIELDS: usize = NUM_FIELDS * 4;
 /// Maximum number of ballot proofs per batch.
 /// Must be a power of two. Increase here to support larger batches.
 ///
-/// Capped at 128 for GPU-memory safety. At full ballot capacity
-/// (num_fields = NUM_FIELDS = 16) the per-field chained reencryption makes the
-/// ArithEq trace large enough that batch 256 peaks at ~31.3 GB even with
-/// `cargo-zisk prove --minimal-memory` — within ~0.7 GB of the 32 GB GPU
-/// ceiling, with no softer knob left. 128 keeps a comfortable margin and leaves
-/// headroom for future circuit growth. Raise only after re-measuring peak GPU
-/// memory at the new worst case (and bump input-gen + go-sdk to match).
-pub const MAX_BATCH_SIZE: usize = 128;
+/// 1024 is the largest size measured end to end on ZisK 1.3 (RTX 5090, 64 GB
+/// host): 1024 votes plus 1024 silent refreshes at num_fields = 16 prove in
+/// ~322 s with the GPU at ~30 GB. Host RAM is the binding limit, not the GPU:
+/// that transition needs ~41 GB with `cargo-zisk prove --minimal-memory` and
+/// ~54 GB without, so the service uses the flag from 512 proofs up. Raise only
+/// after re-measuring both (and bump input-gen + go-sdk to match).
+pub const MAX_BATCH_SIZE: usize = 1024;
 
 // Silent-refresh policy constants (§4.5). The sequencer must include at least
 // `min(target, occupied_before - n_overwritten)` refresh entries per batch,
@@ -78,7 +77,7 @@ pub const MAX_BATCH_SIZE: usize = 128;
 // refresh count at `MAX_REFRESH`; the count rule is enforced in
 // `smt::verify_state`; per-entry validity in the same module; the accumulator
 // pick-up in `results::verify_results`.
-pub const MAX_REFRESH: usize = 256;
+pub const MAX_REFRESH: usize = 2048;
 pub const REFRESH_MIN: u64 = 16;
 pub const REFRESH_TAU: u64 = 2;
 pub const REFRESH_KAPPA: u64 = 1;
@@ -178,7 +177,7 @@ pub const FAIL_CSP: u32 = 1 << 23;
 
 /// Maximum number of KZG blobs per batch (§8). Caps the parsed
 /// `commitments` vector and bounds the T -> n_blobs arithmetic.
-pub const MAX_BLOBS: usize = 8;
+pub const MAX_BLOBS: usize = 32;
 
 /// KZG EIP-4844 DA blob binding block. Carries the process context and the
 /// per-blob commitments; the blob bytes and Y are NOT shipped — the guest

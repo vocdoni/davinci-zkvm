@@ -126,10 +126,12 @@ DAVINCI_API_URL=http://127.0.0.1:8080 DAVINCI_PROOF_TIMEOUT=30m \
   go test -run TestPlonkBenchmark -v -timeout 60m ./integration/
 ```
 
-The main benchmark is `TestPlonkBenchmark` (sizes 64/128/256,
-~12 min full sweep). Single-size smoke test: edit the `sizes` slice in
-`bench_test.go` to `[]int{64}`, run, restore to `[]int{64, 128, 256}`
-before committing.
+The main benchmark is `TestPlonkBenchmark`: `BENCH_SIZES=64,128` (default
+64/128/256) and `BALLOT_NUM_FIELDS=2|16`; it proves two batches per size on
+one seeded election (the second carries `size` silent refreshes) and caches
+the generated ballots under `benchmark/cache/`. Sizes up to 1024 are
+supported; 1024 at 16 fields takes ~50 min of ballot generation the first
+time and ~10 min of proving.
 
 Chained-mode tests (gated by env, need GPU service):
 
@@ -258,18 +260,19 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   folded into `config_commitment` and pinned externally by `CircuitRelease`,
   which is what makes the chain's program authorization hold. Refreeze
   `SETUP_VK` whenever the ZisK release or its setup key changes.
-- **128 is the maximum batch size** (`MAX_BATCH_SIZE` in
+- **1024 is the maximum batch size** (`MAX_BATCH_SIZE` in
   `circuit-primitives/src/types.rs`, mirrored in `input-gen` and
-  `go-sdk/types.go`): the circuit rejects any batch with more than 128
-  proofs. Raising it means changing all three constants and rebuilding
-  both ELFs (new program_vk). **Lowered from 256 to 128 for GPU-memory
-  safety:** batch 256 at full ballot capacity (`num_fields = 16`) peaks at
-  ~31.3 GB even with `--minimal-memory`, within ~0.7 GB of the 32 GB GPU
-  ceiling and with no softer knob left — so any future circuit growth would
-  push it over with no recovery path. 128 keeps a comfortable margin. Before
-  raising the cap again, re-measure peak GPU memory at the new worst case
-  (`batch × num_fields = 16`); `--minimal-memory` is still auto-enabled on
-  retry as a backstop (see Performance baseline).
+  `go-sdk/types.go`, with `MAX_REFRESH = 2048` and `MAX_BLOBS = 32` beside
+  it). Raising it means changing the mirrors and rebuilding both ELFs (new
+  program_vk). The limit is the prover's host RAM, not the GPU: a 1024-vote
+  transition with 1024 refreshes needs ~54 GB without `--minimal-memory`
+  (OOM-killed on this 64 GB host, and the thrash took the whole session
+  with it twice) and ~41 GB with it, while the GPU sits at ~30 GB for every
+  size from 128 up. The worker therefore passes `--minimal-memory` from the
+  first attempt for batches of `ZISK_MINIMAL_MEMORY_FROM` (default 512)
+  proofs or more, and still escalates to it on any retry. Run the service
+  under a memory-capped unit (`systemd-run --user -p MemoryMax=56G`) when
+  probing larger sizes so an overflow kills only the prover.
 - **Ballot capacity is `NUM_FIELDS = 16`** (`circuit-primitives/src/types.rs`,
   mirrored in `input-gen/src/lib.rs` and `go-sdk/types.go`;
   davinci-node calls it `FieldsPerBallot`). The fixed-size gnark/circom
@@ -416,20 +419,30 @@ the speedup as the combination, not the precompile alone.
 
 Per-batch PLONK on the release binaries with silent refreshes and DA binding
 (`TestPlonkBenchmark`, service job time; "steady" = second batch of the
-election, which carries `size` refreshes; votes/min = batch / steady):
+election, which carries `size` refreshes; votes/min = batch / steady; blobs
+= EIP-4844 blobs of the steady transition):
 
-| batch | first (nf=2) | steady (nf=2) | votes/min | first (nf=16) | steady (nf=16) | votes/min |
-|---:|---:|---:|---:|---:|---:|---:|
-|   2 | 15.8 s | 15.8 s |   8 | 15.9 s | 15.8 s |   8 |
-|  64 | 21.9 s | 23.9 s | 161 | 27.7 s | 31.2 s | 123 |
-| 128 | 29.3 s | 31.6 s | 243 | 40.5 s | 46.5 s | 165 |
+| batch | first (nf=2) | steady (nf=2) | votes/min | blobs | first (nf=16) | steady (nf=16) | votes/min | blobs |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+|    2 |  15.8 s |  15.8 s |   8 | 1 |  15.9 s |  15.8 s |   8 | 1 |
+|   64 |  21.9 s |  23.9 s | 161 | 1 |  27.7 s |  31.2 s | 123 | 2 |
+|  128 |  29.3 s |  31.6 s | 243 | 1 |  40.5 s |  46.5 s | 165 | 3 |
+|  256 |  46.9 s |  51.9 s | 296 | 1 |  67.2 s |  80.2 s | 192 | 5 |
+|  512 |  63.1 s |  77.7 s | 395 | 2 | 123.0 s | 151.8 s | 202 | 9 |
+| 1024 | 114.5 s | 151.1 s | 407 | 3 | 260.8 s | 322.1 s | 191 | 17 |
 
-Worst legal transition (128 overwrites + 256 refreshes, nf=16, four blobs):
-54 s, 30.4 GiB GPU peak, no minimal-memory retry. Settlement gas on the
-simulated chain: ~498 k with one blob, ~56 k per extra blob. `TestFullE2E`'s
-tally model assumes the default field count; use `BALLOT_NUM_FIELDS=16` with
-`TestPlonkBenchmark` (or accept that the scaled e2e fails only in its final
-tally check after every transition has been proved and settled).
+Sizes >= 512 prove with `--minimal-memory` (host RAM peak 41.5 GB at 1024,
+nf=2; GPU peak 30.4 GB throughout); 512 at nf=2 was measured before the
+threshold existed. Ethereum currently allows 9 blobs per block, so 1024 votes
+at nf=16 (17 blobs) is a proving figure, not a settleable transition on
+mainnet today. Settlement gas on the simulated chain: ~498 k with one blob,
+~56 k per extra blob. Ballots for the benchmark are cached under
+`benchmark/cache/plonk-ballots-*.gob` (seeded election, see
+`CachedBallotBatch`); the first run of a size pays ~1.4 s per ballot, later
+runs seconds. `TestFullE2E`'s tally model assumes the default field count;
+use `BALLOT_NUM_FIELDS=16` with `TestPlonkBenchmark` (or accept that the
+scaled e2e fails only in its final tally check after every transition has
+been proved and settled).
 
 ## Historical baseline (RTX 5090, ZisK v0.18.0)
 
@@ -446,13 +459,13 @@ the *declared* field count, not the 16-field maximum. PLONK SNARK time
 | 128 |   73 s |   164 s | ~0.5 s |
 | ~~256~~ |  102 s | 289 s (min-mem) | ~0.3 s |
 
-128 is now the `MAX_BATCH_SIZE` cap; the 256 row is retained for context
-(it is the corner that motivated the cap — see below). SNARK size is 768 B
+The cap was 128 from this measurement until ZisK 1.3; it is 1024 now (see
+the gotcha above), and the 256 row is kept as the corner that motivated it. SNARK size is 768 B
 `proofBytes` / 256 B `publicValues` (512 B on 1.3), invariant across batch size and field
 count (the on-chain interface does not change with `num_fields`). On-chain
 verify is field-count independent.
 
-**Why the cap is 128: batch 256 at num_fields=16 sits at the GPU edge.**
+**Why the cap was 128 on v0.18: batch 256 at num_fields=16 sat at the GPU edge.**
 The per-field chained reencryption (a distinct SHA-256-chained offset scalar
 per ciphertext field) means ~16 EC scalar-muls per ballot at full capacity;
 at 256 ballots the default GPU schedule overflows
@@ -468,8 +481,10 @@ verifies and soundness is unaffected (the proof bytes differ run-to-run anyway:
 the PLONK wrap is zero-knowledge). The speed cost is small: a matched A/B on
 one batch-128 num_fields=16 input measured 138.4 s plain vs 142.1 s with
 `--minimal-memory` (+2.7%); on a lighter input it was +0.7%. The worker
-auto-escalates to it on any retry, and `ZISK_MINIMAL_MEMORY=1` forces it from
-the first attempt — relevant only if the cap is ever raised back toward 256.
+auto-escalates to it on any retry, `ZISK_MINIMAL_MEMORY=1` forces it from the
+first attempt, and since the cap went to 1024 the worker turns it on from
+`ZISK_MINIMAL_MEMORY_FROM` proofs (default 512) because host RAM, not the
+GPU, is what the flag saves there.
 
 Chained-mode numbers (STARK batches + folds + one final PLONK) live in
 `BENCHMARK.md`.

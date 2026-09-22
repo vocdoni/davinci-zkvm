@@ -41,6 +41,10 @@ pub struct Config {
     /// is only needed to skip the doomed first attempt for workloads known to
     /// exceed GPU memory (e.g. batch 256 at high `num_fields`).
     pub zisk_minimal_memory: bool,
+    /// Batches with at least this many ballot proofs use `--minimal-memory`
+    /// from the first attempt (default 512): it caps the prover's host RAM,
+    /// which is what limits the largest batches, at a few percent of speed.
+    pub zisk_minimal_memory_from: usize,
     /// Keep each job's `input.bin` after proving and serve it on
     /// `GET /jobs/:id/inputs` (default false). The input is the private
     /// witness: the re-encryption seed, which slots were overwritten and which
@@ -85,6 +89,10 @@ impl Config {
             zisk_minimal_memory: env::var("ZISK_MINIMAL_MEMORY")
                 .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            zisk_minimal_memory_from: env::var("ZISK_MINIMAL_MEMORY_FROM")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(512),
             keep_inputs: env::var("DAVINCI_KEEP_INPUTS")
                 .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),

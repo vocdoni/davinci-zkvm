@@ -107,6 +107,7 @@ pub async fn submit_finalize(
             JobKind::Finalize,
             elf,
             vec![req.fold_job],
+            0,
         )
         .await
     {
@@ -215,7 +216,7 @@ pub async fn submit_fold(
     let elf = state.config.aggregator_elf_path.clone();
     match state
         .prover
-        .submit(input_bytes, &proof_output_dir, JobKind::Fold, elf, parents)
+        .submit(input_bytes, &proof_output_dir, JobKind::Fold, elf, parents, 0)
         .await
     {
         Ok(job_id) => {

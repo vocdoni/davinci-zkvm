@@ -298,6 +298,8 @@ These four fields map straight onto the arguments of
 | `AGGREGATOR_ELF_PATH` | `/app/aggregator.elf` | Pre-built aggregator ELF (chained mode). |
 | `CARGO_ZISK_BIN` | `cargo-zisk` | `cargo-zisk` binary to invoke. |
 | `PROOF_OUTPUT_DIR` | `/tmp/proofs` | Per-job artifact directory. |
+| `ZISK_MINIMAL_MEMORY` | `0` | Force `cargo-zisk prove --minimal-memory` on every attempt (it is auto-enabled on retries). |
+| `ZISK_MINIMAL_MEMORY_FROM` | `512` | Batches with at least this many ballot proofs use `--minimal-memory` from the first attempt: it caps the prover's host RAM (a 1024-vote transition needs ~54 GB without it, ~41 GB with it) at a few percent of speed. |
 | `DAVINCI_KEEP_INPUTS` | `0` | Keep each job's `input.bin` and serve `GET /jobs/{id}/inputs`. The input is the private witness (re-encryption seed, overwrite and refresh sets); leave it off outside development. |
 | `MAX_QUEUE_SIZE` | `100` | Maximum queued jobs. |
 | `ZISK_MPI_PROCS` | `1` | MPI processes for proving (`>1` runs `mpirun`). |
@@ -314,11 +316,16 @@ writes. `nf` is the election's declared field count.
 
 | batch | PLONK (nf=2) | votes/s | PLONK (nf=16) | votes/s | settlement gas |
 |---:|---:|---:|---:|---:|---:|
-|  64 | 23.9 s | 2.7 | 31.2 s | 2.1 | ~500 k |
-| 128 | 31.6 s | 4.1 | 46.5 s | 2.8 | ~500 k (1 blob) / ~612 k (3 blobs) |
+|   64 |  23.9 s | 2.7 |  31.2 s | 2.1 | ~500 k |
+|  128 |  31.6 s | 4.1 |  46.5 s | 2.8 | ~500 k (1 blob) / ~612 k (3 blobs) |
+|  256 |  51.9 s | 4.9 |  80.2 s | 3.2 | ~500 k (1) / ~724 k (5) |
+|  512 |  77.7 s | 6.6 | 151.8 s | 3.4 | ~554 k (2) / ~948 k (9) |
+| 1024 | 151.1 s | 6.8 | 322.1 s | 3.2 | ~612 k (3) / 17 blobs, above the mainnet limit |
 
-The fixed cost (recursion, PLONK wrap, verification) is about 16 s, so
-per-vote cost keeps dropping up to the batch cap of 128. Settlement gas is
+The fixed cost (recursion, PLONK wrap, verification) is about 16 s; the
+batch cap is 1024, set by the prover's host RAM (~41 GB with
+`--minimal-memory`, which the service enables from 512 proofs). Gas for more
+than one blob is extrapolated at ~56 k per blob. Settlement gas is
 for `DavinciSettlement.submitTransition` on the simulated chain, one
 point-evaluation check per blob included. Proof size stays at
 768 B of proof plus 512 B of public values regardless of batch. See
