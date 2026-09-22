@@ -323,34 +323,36 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
 
     // --- KZG block (optional, after re-encryption block) ---
     // Format: KZGBLK!! (u64) | processID (FrRaw) | rootHashBefore (FrRaw) |
-    //         commitment (48 bytes) | y_claimed (32 bytes) | blob (131072 bytes)
-    const BLOB_BYTES: usize = 4096 * 32;
-    const KZG_BLOCK_SIZE: usize = 8 + 32 + 32 + 48 + 32 + BLOB_BYTES;
-    if off + KZG_BLOCK_SIZE <= input.len() {
+    //         n_blobs (u64) | n_blobs × commitment (48 raw bytes each)
+    // The guest rebuilds the DA blob cells from verified state and evaluates
+    // each polynomial itself, so no blob bytes or claimed Y are shipped.
+    const KZG_HEADER_SIZE: usize = 8 + 32 + 32 + 8;
+    if off + KZG_HEADER_SIZE <= input.len() {
         let maybe_magic = u64::from_le_bytes(input[off..off + 8].try_into().unwrap());
         if maybe_magic == KZG_MAGIC {
             off += 8;
             let process_id = read_fr!(&mut off);
             let root_hash_before = read_fr!(&mut off);
-
-            // commitment: 48 raw bytes
-            let commitment: [u8; 48] = input[off..off + 48].try_into().unwrap();
-            off += 48;
-
-            // y_claimed: 32 raw bytes
-            let y_claimed: [u8; 32] = input[off..off + 32].try_into().unwrap();
-            off += 32;
-
-            // blob: 4096 × 32 = 131072 raw bytes
-            let blob = input[off..off + BLOB_BYTES].to_vec();
-            off += BLOB_BYTES;
+            let n_blobs = read1!(&mut off, 0) as usize;
+            if n_blobs > crate::types::MAX_BLOBS {
+                *fail_mask |= 1 << 31;
+            }
+            let n_blobs = n_blobs.min(crate::types::MAX_BLOBS);
+            let mut commitments = Vec::with_capacity(n_blobs);
+            for _ in 0..n_blobs {
+                if off + 48 > input.len() {
+                    *fail_mask |= 1 << 31;
+                    break;
+                }
+                let c: [u8; 48] = input[off..off + 48].try_into().unwrap();
+                off += 48;
+                commitments.push(c);
+            }
 
             kzg = Some(KZGBlock {
                 process_id,
                 root_hash_before,
-                commitment,
-                y_claimed,
-                blob,
+                commitments,
             });
         }
     }
@@ -456,6 +458,10 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
 
     let n_voters = read1!(0) as usize;
     let n_overwritten = read1!(0) as usize;
+    // §STATETX header: occupied_before is a u64 count of ballot leaves that
+    // existed before this batch. Used for the refresh count rule (§4.5.2) and
+    // echoed to output register 42 for the fold guest to cross-check.
+    let occupied_before = read1!(0);
     let process_id = read_fr!();
     let old_state_root = read_fr!();
     let new_state_root = read_fr!();
@@ -490,6 +496,24 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
     let mut ballot_chain = Vec::with_capacity(ballot_n);
     for _ in 0..ballot_n {
         ballot_chain.push(parse_smt_transition(input, off, ballot_n_levels, fail_mask));
+    }
+
+    // Silent-refresh chain (§4.5). Sits between the ballot chain and the
+    // Results transition. Each entry is an UPDATE on a ballot slot the batch
+    // did not itself write; cap at MAX_REFRESH.
+    let refresh_n = read1!(0) as usize;
+    if refresh_n > crate::types::MAX_REFRESH {
+        *fail_mask |= 1 << 31;
+    }
+    let refresh_n = refresh_n.min(crate::types::MAX_REFRESH);
+    let refresh_n_levels = read1!(0) as usize;
+    if refresh_n_levels > 256 {
+        *fail_mask |= 1 << 31;
+    }
+    let refresh_n_levels = refresh_n_levels.min(256);
+    let mut refresh_chain = Vec::with_capacity(refresh_n);
+    for _ in 0..refresh_n {
+        refresh_chain.push(parse_smt_transition(input, off, refresh_n_levels, fail_mask));
     }
 
     // Net Results transition (0 or 1)
@@ -537,7 +561,7 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
     // has_ballot_data: 0 = absent (zeros), 1 = present
     let has_ballot_data = read1!(0) != 0;
     let zero_ballot: [FrRaw; BALLOT_FIELDS] = [ZERO_FR; BALLOT_FIELDS];
-    let (old_results, voter_ballots, overwritten_ballots) = if has_ballot_data {
+    let (old_results, voter_ballots, overwritten_ballots, refreshed_ballots) = if has_ballot_data {
         let mut old_r = [ZERO_FR; BALLOT_FIELDS];
         for i in 0..BALLOT_FIELDS {
             old_r[i] = read_fr!();
@@ -570,24 +594,43 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
             }
             ob.push(b);
         }
-        (old_r, vb, ob)
+
+        // Per-refresh OLD ballot data, one BallotData per refresh_chain entry.
+        // Same MAX_REFRESH cap so we allocate at most a fixed slab.
+        let n_rb = read1!(0) as usize;
+        if n_rb > crate::types::MAX_REFRESH {
+            *fail_mask |= 1 << 31;
+        }
+        let n_rb = n_rb.min(crate::types::MAX_REFRESH);
+        let mut rb = Vec::with_capacity(n_rb);
+        for _ in 0..n_rb {
+            let mut b = [ZERO_FR; BALLOT_FIELDS];
+            for i in 0..BALLOT_FIELDS {
+                b[i] = read_fr!();
+            }
+            rb.push(b);
+        }
+        (old_r, vb, ob, rb)
     } else {
-        (zero_ballot, Vec::new(), Vec::new())
+        (zero_ballot, Vec::new(), Vec::new(), Vec::new())
     };
 
     StateBlock {
         n_voters,
         n_overwritten,
+        occupied_before,
         process_id,
         old_state_root,
         new_state_root,
         vote_id_chain,
         ballot_chain,
+        refresh_chain,
         results,
         process_proofs,
         n_levels,
         old_results,
         voter_ballots,
         overwritten_ballots,
+        refreshed_ballots,
     }
 }

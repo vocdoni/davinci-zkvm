@@ -27,6 +27,7 @@ func EncodeStateBlock(sd *StateTransitionData) ([]byte, error) {
 	// Metadata
 	buf = appendU64(buf, sd.VotersCount)
 	buf = appendU64(buf, sd.OverwrittenCount)
+	buf = appendU64(buf, sd.OccupiedBefore)
 
 	// Process ID, old/new roots
 	for _, field := range []string{sd.ProcessID, sd.OldStateRoot, sd.NewStateRoot} {
@@ -48,6 +49,16 @@ func EncodeStateBlock(sd *StateTransitionData) ([]byte, error) {
 	chain, err = encodeSMTChain(sd.BallotSmt)
 	if err != nil {
 		return nil, fmt.Errorf("ballot_smt: %w", err)
+	}
+	buf = append(buf, chain...)
+
+	// Silent-refresh chain (may be empty: n=0, n_levels=0)
+	if len(sd.RefreshSmt) > MaxRefresh {
+		return nil, fmt.Errorf("refresh_smt has %d entries, max %d", len(sd.RefreshSmt), MaxRefresh)
+	}
+	chain, err = encodeSMTChain(sd.RefreshSmt)
+	if err != nil {
+		return nil, fmt.Errorf("refresh_smt: %w", err)
 	}
 	buf = append(buf, chain...)
 
@@ -118,6 +129,21 @@ func EncodeStateBlock(sd *StateTransitionData) ([]byte, error) {
 			buf, err = appendFrHexSlice(buf, ob, beHexToFrLE)
 			if err != nil {
 				return nil, fmt.Errorf("overwritten_ballots[%d]: %w", i, err)
+			}
+		}
+
+		if len(bp.RefreshedBallots) != len(sd.RefreshSmt) {
+			return nil, fmt.Errorf("refreshed_ballots has %d entries, refresh_smt has %d",
+				len(bp.RefreshedBallots), len(sd.RefreshSmt))
+		}
+		buf = appendU64(buf, uint64(len(bp.RefreshedBallots)))
+		for i, rb := range bp.RefreshedBallots {
+			if len(rb) != BallotFields {
+				return nil, fmt.Errorf("refreshed_ballots[%d] must have %d elements, got %d", i, BallotFields, len(rb))
+			}
+			buf, err = appendFrHexSlice(buf, rb, beHexToFrLE)
+			if err != nil {
+				return nil, fmt.Errorf("refreshed_ballots[%d]: %w", i, err)
 			}
 		}
 	} else {
@@ -367,33 +393,34 @@ func EncodeReencBlock(r *ReencryptionData) ([]byte, error) {
 	return buf, nil
 }
 
-// KZGEvalData holds all inputs needed to encode a KZG blob barycentric evaluation block.
+// KZGEvalData holds the inputs needed to encode a KZG binding block.
+// The guest re-derives cells, evaluation points and openings itself from
+// verified state; the host only ships the ordered per-blob commitments.
 type KZGEvalData struct {
 	// ProcessID is the BN254 Fr process identifier (big-endian bytes, up to 32).
 	ProcessID []byte
 	// RootHashBefore is the Arbo state root before the batch (big-endian bytes, up to 32).
 	RootHashBefore []byte
-	// Commitment is the 48-byte compressed BLS12-381 G1 KZG commitment.
-	Commitment [48]byte
-	// YClaimed is the 32-byte big-endian BLS12-381 Fr claimed evaluation result Y = P(Z).
-	YClaimed [32]byte
-	// Blob is the full EIP-4844 blob data (131072 bytes = 4096 × 32-byte big-endian cells).
-	Blob []byte
+	// Commitments is the ordered per-blob KZG commitments (1..=MaxBlobs of them).
+	Commitments [][48]byte
 }
 
-// EncodeKZGBlock encodes the KZG blob barycentric evaluation block.
+// EncodeKZGBlock encodes the KZG binding block.
 //
 // Block format (binary, appended after the last optional block):
 //
-// KZGBLK!! (8 bytes LE magic)
-// processID       (32 bytes: 4×u64 LE words, converted from big-endian input)
-// rootHashBefore  (32 bytes: 4×u64 LE words)
-// commitment      (48 raw bytes, big-endian compressed BLS12-381 G1)
-// y_claimed       (32 raw bytes, big-endian BLS12-381 Fr)
-// blob            (131072 bytes = 4096 × 32-byte big-endian cells)
+// KZGBLK!!          (8 bytes LE magic)
+// processID         (32 bytes: 4×u64 LE words, converted from big-endian input)
+// rootHashBefore    (32 bytes: 4×u64 LE words)
+// n_blobs           (8 bytes LE, 1..=MaxBlobs)
+// commitments       (n_blobs × 48 raw bytes, big-endian compressed BLS12-381 G1)
 func EncodeKZGBlock(d *KZGEvalData) ([]byte, error) {
-	if len(d.Blob) != 4096*32 {
-		return nil, fmt.Errorf("blob must be exactly 131072 bytes, got %d", len(d.Blob))
+	if d == nil {
+		return nil, nil
+	}
+	n := len(d.Commitments)
+	if n < 1 || n > MaxBlobs {
+		return nil, fmt.Errorf("commitments count out of range: got %d, want 1..=%d", n, MaxBlobs)
 	}
 	if len(d.ProcessID) > 32 {
 		return nil, fmt.Errorf("processID too large: %d bytes", len(d.ProcessID))
@@ -410,9 +437,10 @@ func EncodeKZGBlock(d *KZGEvalData) ([]byte, error) {
 	buf := []byte("KZGBLK!!")
 	buf = appendFr(buf, pid)
 	buf = appendFr(buf, rhb)
-	buf = append(buf, d.Commitment[:]...)
-	buf = append(buf, d.YClaimed[:]...)
-	buf = append(buf, d.Blob...)
+	buf = appendU64(buf, uint64(n))
+	for _, c := range d.Commitments {
+		buf = append(buf, c[:]...)
+	}
 	return buf, nil
 }
 

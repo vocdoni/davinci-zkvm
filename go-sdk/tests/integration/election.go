@@ -12,13 +12,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"sort"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	arbo "github.com/vocdoni/arbo"
 	"github.com/vocdoni/arbo/memdb"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/circuits/ballotproof"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/blobs"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc"
 	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/bjj_gnark"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/format"
@@ -101,6 +101,28 @@ type Election struct {
 	// Ciphertext slots [NumFields, NumFields_max) carry the TE identity so the
 	// guest's num_fields-aware reencryption/accumulator can skip them.
 	NumFields int
+	// reencChain is the current batch's re-encryption chain. BuildReencBlock
+	// creates it and stashes it here; BuildStateBlock continues it to derive
+	// the silent-refresh scalars for the same batch.
+	reencChain *elgamal.ReencChain
+
+	// lastDA holds the DA blob inputs produced by BuildStateBlock for this
+	// batch: vote id first-limbs, every (key, ballot) update — batch ballots
+	// then silent refreshes — and the NEW net accumulator (BallotFields BE
+	// hex coords). BuildKZGBlock reads them to build the transition blobs.
+	// Rebuilt by every BuildStateBlock call; a BuildKZGBlock before the first
+	// BuildStateBlock errors out.
+	lastDA *daBatchState
+}
+
+// daBatchState is the per-batch DA blob input, stashed by BuildStateBlock and
+// consumed by BuildKZGBlock. Kept private — tests that want to override any
+// of these values must go through the RefreshKeysOverride knob or reach for
+// the stash directly.
+type daBatchState struct {
+	VoteIDs     []uint64
+	Updates     []davinci.SlotUpdate
+	Accumulator []string
 }
 
 // NewElection creates a new test election with nVoters registered voters.
@@ -429,6 +451,15 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 		return nil, nil, fmt.Errorf("buildArboReadProofs: %w", err)
 	}
 
+	// Snapshot occupied-slot count and the pre-batch VotedBallots keys before the
+	// ballot chain mutates the map. Refresh candidates = pre-batch entries not
+	// touched by this batch.
+	occupiedBefore := len(e.VotedBallots)
+	preBatchIndices := make([]int, 0, occupiedBefore)
+	for idx := range e.VotedBallots {
+		preBatchIndices = append(preBatchIndices, idx)
+	}
+
 	// Insert voteID keys for each voter (always a fresh INSERT => even for overwrites,
 	// each ballot submission carries a new unique voteID).
 	var voteIDChain []davinci.SmtEntry
@@ -436,7 +467,7 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 		entry, err := buildArboInsertEntry(
 			e.ProcTree,
 			new(big.Int).SetUint64(res.VoteID),
-			new(big.Int).SetUint64(uint64(1000+i)),
+			big.NewInt(davinci.VoteIDLeafValue),
 			procLevels,
 		)
 		if err != nil {
@@ -486,11 +517,11 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 		e.VotedBallots[v.CensusIdx] = reencBallots[i]
 	}
 
-	// Results: net accumulate (add all re-encrypted ballots, subtract overwritten)
-	// and update key 0x04. Snapshot old accumulator for BallotProofData before mutation.
+	// Snapshot old accumulator for BallotProofData before mutation.
 	oldResults := e.Results
 
 	// net = old + Σ(all ballots) − Σ(overwritten ballots), coordinate-wise on BJJ.
+	// Refresh deltas (added below) also fold into newResults before the leaf hash.
 	newResults := e.Results
 	for _, rb := range reencBallots {
 		newResults = frAccumAdd(newResults, frAccumFromBallot(rb))
@@ -498,6 +529,83 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 	for _, ob := range overwrittenBallots {
 		newResults = frAccumSub(newResults, frAccumFromBallot(ob))
 	}
+
+	// Silent-refresh chain: re-randomize a target number of untouched occupied
+	// slots so overwrites don't stand out. Sits between the ballot chain and the
+	// Results transition; scalars continue the batch's re-encryption chain.
+	batchIdx := make(map[int]bool, n)
+	for _, v := range batchVoters {
+		batchIdx[v.CensusIdx] = true
+	}
+	candidates := make([]int, 0, len(preBatchIndices))
+	for _, idx := range preBatchIndices {
+		if !batchIdx[idx] {
+			candidates = append(candidates, idx)
+		}
+	}
+	w := len(overwrittenBallots)
+	target := davinci.RefreshTarget(n, w, occupiedBefore)
+	selected, err := sampleN(candidates, target)
+	if err != nil {
+		return nil, nil, fmt.Errorf("refresh sample: %w", err)
+	}
+	// Sort by ballot key ascending; the guest enforces strictly increasing keys.
+	type refreshItem struct {
+		idx int
+		key uint64
+	}
+	items := make([]refreshItem, len(selected))
+	for i, idx := range selected {
+		voter := e.Voters[idx]
+		addrBig := new(big.Int).SetBytes(voter.AddressBytes)
+		addrLo16 := addrBig.Uint64() & 0xFFFF
+		items[i] = refreshItem{idx: idx, key: ballotMin + uint64(idx)<<16 + addrLo16}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].key < items[j].key })
+
+	if len(items) > 0 && e.reencChain == nil {
+		return nil, nil, fmt.Errorf("refresh needs seeded reencChain; call BuildReencBlock first")
+	}
+
+	var refreshChain []davinci.SmtEntry
+	var refreshedBallots []wideBallot
+	for _, it := range items {
+		oldWide := e.VotedBallots[it.idx]
+		oldBallot := wideBallotToElgamalBallot(oldWide)
+		newBallot, err := oldBallot.ReencryptChained(e.EncKey, e.reencChain, e.NumFields)
+		if err != nil {
+			return nil, nil, fmt.Errorf("refresh reencrypt[%d]: %w", it.idx, err)
+		}
+		newWide := make(wideBallot, NumFields)
+		for i := 0; i < NumFields; i++ {
+			if i < e.NumFields {
+				newWide[i] = newBallot.Ciphertexts[i]
+			} else {
+				newWide[i] = identityCiphertext()
+			}
+		}
+		newLeafVal := ballotLeafHash(newWide)
+		entry, err := buildArboUpdateEntry(
+			e.ProcTree,
+			new(big.Int).SetUint64(it.key),
+			newLeafVal,
+			procLevels,
+		)
+		if err != nil {
+			return nil, nil, fmt.Errorf("refresh update[%d] (voter %d): %w", it.idx, it.idx, err)
+		}
+		refreshChain = append(refreshChain, entry)
+		refreshedBallots = append(refreshedBallots, oldWide)
+
+		// Homomorphic re-encryption doesn't move the plaintext, but the leaf
+		// value changes, so the net accumulator gets add(new) − sub(old).
+		newResults = frAccumAdd(newResults, frAccumFromBallot(newWide))
+		newResults = frAccumSub(newResults, frAccumFromBallot(oldWide))
+
+		// Advance the stored ballot to its refreshed value.
+		e.VotedBallots[it.idx] = newWide
+	}
+
 	newResultsLeaf := frAccumLeafHash(newResults)
 
 	resultsEntry, err := buildArboUpdateEntry(
@@ -530,20 +638,55 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 	for i, ob := range overwrittenBallots {
 		overwrittenBallotStrs[i] = ballotToFrStrings(ob)
 	}
+	refreshedBallotStrs := make([][]string, len(refreshedBallots))
+	for i, rb := range refreshedBallots {
+		refreshedBallotStrs[i] = ballotToFrStrings(rb)
+	}
 	ballotProofs := &davinci.BallotProofData{
 		OldResults:         frAccumToStrings(oldResults),
 		VoterBallots:       voterBallotStrs,
 		OverwrittenBallots: overwrittenBallotStrs,
+		RefreshedBallots:   refreshedBallotStrs,
 	}
+
+	// Stash the DA blob input the guest will rebuild from state so
+	// BuildKZGBlock can produce commitments and openings byte-identical to
+	// what the guest hashes. Batch ballot updates come first, then silent
+	// refreshes; the cell builder stable-sorts everything by key anyway.
+	da := &daBatchState{
+		VoteIDs:     make([]uint64, n),
+		Updates:     make([]davinci.SlotUpdate, 0, n+len(items)),
+		Accumulator: frAccumToStrings(newResults),
+	}
+	for i, res := range ballotResults {
+		da.VoteIDs[i] = res.VoteID
+	}
+	for i, v := range batchVoters {
+		res := ballotResults[i]
+		key := ballotMin + uint64(v.CensusIdx)<<16 + res.AddressLo16
+		da.Updates = append(da.Updates, davinci.SlotUpdate{
+			Key:    key,
+			Ballot: voterBallotStrs[i],
+		})
+	}
+	for _, it := range items {
+		da.Updates = append(da.Updates, davinci.SlotUpdate{
+			Key:    it.key,
+			Ballot: ballotToFrStrings(e.VotedBallots[it.idx]), // refreshed value
+		})
+	}
+	e.lastDA = da
 
 	return &davinci.StateTransitionData{
 		VotersCount:      uint64(n),
 		OverwrittenCount: uint64(len(overwrittenBallots)),
+		OccupiedBefore:   uint64(occupiedBefore),
 		ProcessID:        e.processIDArboHex(),
 		OldStateRoot:     oldRoot,
 		NewStateRoot:     newRoot,
 		VoteIDSmt:        voteIDChain,
 		BallotSmt:        ballotChain,
+		RefreshSmt:       refreshChain,
 		ResultsSmt:       &resultsEntry,
 		ProcessSmt:       processSmtProofs,
 		BallotProofs:     ballotProofs,
@@ -567,9 +710,12 @@ func (e *Election) BuildCensusProofs(batchVoters []*Voter) ([]davinci.CensusProo
 			sibs[j] = bigIntToFr32(s)
 		}
 		proofs[i] = davinci.CensusProof{
-			Root:     bigIntToFr32(root),
-			Leaf:     bigIntToFr32(proof.Leaf),
-			Index:    proof.LeafIndex,
+			Root: bigIntToFr32(root),
+			Leaf: bigIntToFr32(proof.Leaf),
+			// PathBits, not LeafIndex: the guest reads one path bit per
+			// sibling and lean-IMT omits siblings on levels with a lone node,
+			// so the two differ whenever the census size is not a power of two.
+			Index:    proof.PathBits,
 			Siblings: sibs,
 		}
 	}
@@ -611,6 +757,9 @@ func (e *Election) BuildReencBlock(oldRoot string, ballotResults []*BallotResult
 		return nil, nil, fmt.Errorf("parse oldRoot: %w", err)
 	}
 	reencChain := elgamal.NewReencChain(seed, oldRootInt)
+	// Stash the chain so BuildStateBlock can continue it for silent-refresh
+	// scalars (guest expects one shared chain: batch entries then refreshes).
+	e.reencChain = reencChain
 
 	for idx, res := range ballotResults {
 		// Reconstruct the elgamal.Ballot: active fields from the cast ballot,
@@ -687,47 +836,51 @@ func identityCiphertext() *elgamal.Ciphertext {
 	return &elgamal.Ciphertext{C1: c1, C2: c2}
 }
 
-// BuildKZGBlock builds a KZG blob barycentric evaluation block.
-// oldRoot is the state root BEFORE the current batch (rootHashBefore).
-// The blob is deterministically derived from batchIdx.
-// The evaluation point Z is derived via SHA-256(processID ‖ rootHashBefore ‖ commitment)
-// as per circuit/src/kzg.rs.
-func (e *Election) BuildKZGBlock(batchIdx int, oldRoot string) (*davinci.KZGRequest, error) {
-	// Construct a deterministic blob for this batch.
-	var blob types.Blob
-	for i := 0; i < 16; i++ {
-		big.NewInt(int64(batchIdx*16 + i + 1)).FillBytes(blob[i*32 : (i+1)*32])
+// BuildKZGBlock builds the DA blob binding for the batch that BuildStateBlock
+// just applied. It rebuilds the exact cell stream the guest constructs from
+// verified state (vote ids, batch ballot updates, silent-refresh updates, and
+// the NEW net accumulator), splits it into EIP-4844 blobs, commits and opens
+// each at z_b = SHA-256(processID || rootBefore || commitment_b) mod r_bls.
+// Returns the commitments-only KZGRequest plus the full TransitionBlobs so
+// settlement tests can feed the on-chain point-evaluation precompile.
+// oldRoot is the state root BEFORE the batch (rootHashBefore for z).
+func (e *Election) BuildKZGBlock(oldRoot string) (*davinci.KZGRequest, *davinci.TransitionBlobs, error) {
+	if e.lastDA == nil {
+		return nil, nil, fmt.Errorf("BuildKZGBlock: no batch stashed — call BuildStateBlock first")
 	}
-
-	kzgCommitment, err := blob.ComputeCommitment()
-	if err != nil {
-		return nil, fmt.Errorf("ComputeCommitment: %w", err)
-	}
-	var comm48 [48]byte
-	copy(comm48[:], kzgCommitment[:])
-
-	// Derive Z using SHA-256(processID_be32 ‖ rootHashBefore_be32 ‖ commitment_48).
-	// processID is the election's fixed identifier; rootHashBefore is the state
-	// root before this batch. Both must be in big-endian hex format to match
-	// the circuit's compute_z which converts FrRaw limbs to 32-byte BE.
 	pidHex := e.ProcessIDHex()
 	rootBEHex := arboHexToBEHex(oldRoot)
-	kzgZ := deriveKZGZ(pidHex, rootBEHex, comm48)
-
-	kzgY, err := blobs.EvaluateBarycentricNative(&blob, kzgZ, false)
+	pidBytes, err := hex.DecodeString(trimHexKZG(pidHex))
 	if err != nil {
-		return nil, fmt.Errorf("EvaluateBarycentricNative: %w", err)
+		return nil, nil, fmt.Errorf("processID hex: %w", err)
 	}
-	var yClaimed [32]byte
-	kzgY.FillBytes(yClaimed[:])
+	rootBytes, err := hex.DecodeString(trimHexKZG(rootBEHex))
+	if err != nil {
+		return nil, nil, fmt.Errorf("rootBefore hex: %w", err)
+	}
+	var pid32, rhb32 [32]byte
+	copy(pid32[32-len(pidBytes):], pidBytes)
+	copy(rhb32[32-len(rootBytes):], rootBytes)
 
-	return &davinci.KZGRequest{
-		ProcessID:      pidHex,
-		RootHashBefore: rootBEHex,
-		Commitment:     "0x" + hex.EncodeToString(comm48[:]),
-		YClaimed:       "0x" + hex.EncodeToString(yClaimed[:]),
-		Blob:           "0x" + hex.EncodeToString(blob[:]),
-	}, nil
+	tb, err := davinci.BuildTransitionBlobs(
+		e.NumFields,
+		pid32, rhb32,
+		e.lastDA.VoteIDs,
+		e.lastDA.Updates,
+		e.lastDA.Accumulator,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("BuildTransitionBlobs: %w", err)
+	}
+	return tb.Request(pidHex, rootBEHex), tb, nil
+}
+
+// trimHexKZG strips an optional 0x/0X prefix.
+func trimHexKZG(s string) string {
+	if len(s) >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X') {
+		return s[2:]
+	}
+	return s
 }
 
 // TallyAccumulator sums ElGamal ciphertexts across all batches so the final
@@ -937,4 +1090,44 @@ func ballotToFrStrings(b wideBallot) []string {
 		out[i*4+3] = c2y
 	}
 	return out
+}
+
+// wideBallotToElgamalBallot lifts a wideBallot into an *elgamal.Ballot. Empty
+// slots become the TE identity so ReencryptChained can copy them unchanged.
+func wideBallotToElgamalBallot(wb wideBallot) *elgamal.Ballot {
+	b := elgamal.NewBallot(bjjgnark.New())
+	for i := 0; i < NumFields; i++ {
+		if wb[i] != nil {
+			b.Ciphertexts[i] = wb[i]
+		} else {
+			b.Ciphertexts[i] = identityCiphertext()
+		}
+	}
+	return b
+}
+
+// sampleN picks k distinct entries from cand uniformly at random using
+// crypto/rand. Returns all of cand when k >= len(cand). The returned slice is
+// a permutation prefix and is safe to sort by the caller.
+func sampleN(cand []int, k int) ([]int, error) {
+	if k <= 0 {
+		return nil, nil
+	}
+	if k >= len(cand) {
+		out := make([]int, len(cand))
+		copy(out, cand)
+		return out, nil
+	}
+	pool := make([]int, len(cand))
+	copy(pool, cand)
+	for i := 0; i < k; i++ {
+		max := big.NewInt(int64(len(pool) - i))
+		j, err := rand.Int(rand.Reader, max)
+		if err != nil {
+			return nil, fmt.Errorf("rand.Int: %w", err)
+		}
+		ji := int(j.Int64()) + i
+		pool[i], pool[ji] = pool[ji], pool[i]
+	}
+	return pool[:k], nil
 }

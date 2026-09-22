@@ -50,8 +50,9 @@ func TestParseOutputs(t *testing.T) {
 	// CensusRoot = 0xABCD at lowest 32 bits
 	outputs[OutputCensusRoot] = 0xABCD
 
-	// BlobCommitment limb[0] = 42
-	outputs[OutputBlobCommitment] = 42
+	// BlobsDigest: 32 bytes = 8 × u32 LE. Word 0 = 42 gives digest[0..4] = 42 00 00 00.
+	outputs[OutputBlobsDigest] = 42
+	outputs[OutputNBlobs] = 2
 
 	// Diagnostics
 	outputs[OutputBatchOk] = 1
@@ -86,8 +87,17 @@ func TestParseOutputs(t *testing.T) {
 	if po.CensusRoot.Cmp(big.NewInt(0xABCD)) != 0 {
 		t.Errorf("CensusRoot = %s, want 0xABCD", po.CensusRoot)
 	}
-	if po.BlobCommitmentLimbs[0].Cmp(big.NewInt(42)) != 0 {
-		t.Errorf("BlobCommitmentLimbs[0] = %s, want 42", po.BlobCommitmentLimbs[0])
+	// Word 0 was 42 (LE), so bytes 0..3 = {42, 0, 0, 0} and the rest are zero.
+	if po.BlobsDigest[0] != 42 {
+		t.Errorf("BlobsDigest[0] = %d, want 42", po.BlobsDigest[0])
+	}
+	for i := 1; i < 32; i++ {
+		if po.BlobsDigest[i] != 0 {
+			t.Errorf("BlobsDigest[%d] = %d, want 0", i, po.BlobsDigest[i])
+		}
+	}
+	if po.NBlobs != 2 {
+		t.Errorf("NBlobs = %d, want 2", po.NBlobs)
 	}
 	if po.NProofs != 128 {
 		t.Errorf("NProofs = %d, want 128", po.NProofs)
@@ -402,12 +412,13 @@ func TestABIEncode(t *testing.T) {
 		VotersCount:           3,
 		OverwrittenVotesCount: 1,
 		CensusRoot:            big.NewInt(100),
-		BlobCommitmentLimbs:   [3]*big.Int{big.NewInt(10), big.NewInt(20), big.NewInt(30)},
+		BlobsDigest:           [32]byte{0xde, 0xad, 0xbe, 0xef},
+		NBlobs:                2,
 	}
 
 	buf := o.ABIEncode()
-	if len(buf) != 256 {
-		t.Fatalf("ABIEncode length = %d, want 256", len(buf))
+	if len(buf) != 224 {
+		t.Fatalf("ABIEncode length = %d, want 224", len(buf))
 	}
 
 	// Check that RootHashBefore is at offset 0..31 (left-padded big-endian)
@@ -452,7 +463,6 @@ func TestPublicOutputsString(t *testing.T) {
 		VotersCount:           5,
 		OverwrittenVotesCount: 1,
 		CensusRoot:            big.NewInt(0),
-		BlobCommitmentLimbs:   [3]*big.Int{big.NewInt(0), big.NewInt(0), big.NewInt(0)},
 	}
 	s := o.String()
 	if s == "" {

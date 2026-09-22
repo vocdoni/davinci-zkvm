@@ -142,12 +142,6 @@ func TestChainedStateTransitions(t *testing.T) {
 		// Save old root before building state block (KZG needs it).
 		oldRoot := election.OldRoot
 
-		// Build KZG block first (uses oldRoot before it's advanced).
-		kzgBlock, err := election.BuildKZGBlock(txIdx, oldRoot)
-		if err != nil {
-			t.Fatalf("transition %d: BuildKZGBlock: %v", txIdx, err)
-		}
-
 		// Build re-encryption block before building the state block so the
 		// re-encrypted ballots can be accumulated into the net Results leaf.
 		reencBlock, reencBallots, err := election.BuildReencBlock(oldRoot, batch.Results)
@@ -160,6 +154,13 @@ func TestChainedStateTransitions(t *testing.T) {
 		stateBlock, overwrittenBallots, err := election.BuildStateBlock(batchVoters, batch.Results, reencBallots)
 		if err != nil {
 			t.Fatalf("transition %d: BuildStateBlock: %v", txIdx, err)
+		}
+
+		// Build DA blob binding — needs the DA cells stashed by the state block
+		// and the old (pre-batch) root for z derivation.
+		kzgBlock, _, err := election.BuildKZGBlock(oldRoot)
+		if err != nil {
+			t.Fatalf("transition %d: BuildKZGBlock: %v", txIdx, err)
 		}
 
 		// Build census membership proofs.

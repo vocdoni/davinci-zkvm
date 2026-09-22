@@ -418,6 +418,22 @@ fn main() {
             "batch {}: census_root mismatch",
             b
         );
+        // OccupiedBefore continuity: batch j must have seen exactly the
+        // number of live ballot leaves this fold has accumulated so far,
+        // `total_voters - total_overwrites`. Enforces silent-refresh
+        // consistency across the whole fold (§4.5.2), and detects a batch
+        // that was proven against a stale or forged tree size.
+        let expected_occ = total_voters.checked_sub(total_overwrites).unwrap_or_else(|| {
+            panic!(
+                "batch {}: fold accumulator went negative ({} - {})",
+                b, total_voters, total_overwrites
+            )
+        });
+        assert_eq!(
+            pubs[42], expected_occ,
+            "batch {}: occupied_before {} != expected {}",
+            b, pubs[42], expected_occ
+        );
         total_voters = total_voters.checked_add(pubs[18]).unwrap();
         total_overwrites = total_overwrites.checked_add(pubs[19]).unwrap();
         state_root = pubs[10..18].try_into().unwrap();

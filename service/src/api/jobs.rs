@@ -262,10 +262,19 @@ pub async fn get_job_publics(
 }
 
 /// `GET /jobs/:id/inputs` — download the raw input that produced the SNARK.
+/// The input is the private witness, so it is only kept and served when the
+/// service runs with `DAVINCI_KEEP_INPUTS=1`.
 pub async fn get_job_inputs(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if !state.config.keep_inputs {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "inputs are not retained; start the service with DAVINCI_KEEP_INPUTS=1"})),
+        )
+            .into_response();
+    }
     match job_artifact_path(&state, id, "input.bin", "inputs").await {
         Ok(path) => stream_file(path, format!("inputs_{}.bin", id)).await,
         Err(resp) => resp,

@@ -12,7 +12,7 @@ mod kzg;
 
 // Shared primitives re-exported at the crate root so `crate::types::…`
 // paths keep working in the modules above.
-pub use circuit_primitives::{babyjubjub, bn254, bn254_fr, bls_fr, hash, poseidon, results, smt, types};
+pub use circuit_primitives::{babyjubjub, bn254, bn254_fr, bls_fr, da_blob, hash, poseidon, results, smt, types};
 
 use crate::types::{FrRaw, ZERO_FR};
 use ziskos::io::{commit_slice, read_slice};
@@ -43,10 +43,11 @@ use crate::hash::hash_enc_key;
 // [18]     VotersCount       => number of real (non-dummy) votes in the batch
 // [19]     OverwrittenVotesCount => number of ballots that replaced an existing vote
 // [20..27] CensusRoot        => 256-bit census root (Merkle root or CSP address, 8 × u32, LE)
-// Indices 28-39: BlobCommitmentLimbs (3 × 128-bit, 12 × u32)
-//   [28..31] BlobCommitment limb 0 (128 bits)
-//   [32..35] BlobCommitment limb 1 (128 bits)
-//   [36..39] BlobCommitment limb 2 (128 bits)
+// Indices 28-39: DA blob binding
+//   [28..35] BlobsDigest       => SHA-256 over the ordered (commitment, y) pairs
+//                                 (8 × u32, LE). Zero when no KZG block is present.
+//   [36]     NBlobs            => number of blobs (0..=8)
+//   [37..39] reserved (zero)
 // Indices 40-45: diagnostic / auxiliary outputs
 // [40] batch_ok    => Groth16 batch verification result
 // [41] ecdsa_ok    => ECDSA signature batch result
@@ -153,7 +154,7 @@ fn main() {
 
     // SMT chain verification: the full state-transition integrity check.
     //     Returns the old/new state roots and vote counts.
-    let (state_ok, old_root, new_root, voters, overwritten) =
+    let (state_ok, old_root, new_root, voters, overwritten, occupied_before) =
         smt::verify_state(parsed.state.as_ref(), &mut fail_mask);
 
     // Re-encryption: verify that each stored ballot is the original
@@ -177,31 +178,60 @@ fn main() {
         crate::types::NUM_FIELDS
     };
 
-    let reenc_ok = babyjubjub::verify_batch_from_parsed(
+    // Batch re-encryption + refresh chain. Same offset-scalar chain covers
+    // both: first every REENC voter entry in order, then every refresh entry
+    // in `refreshed_ballots` order. Returns the refreshed new-ballots and the
+    // per-field refresh delta, which `verify_results` folds into the Results
+    // accumulator (§4.4.5', §4.5).
+    let refreshed_old_slice: &[types::BallotData] = parsed
+        .state
+        .as_ref()
+        .map(|s| s.refreshed_ballots.as_slice())
+        .unwrap_or(&[]);
+    let (reenc_ok, refreshed_new, refresh_delta) = babyjubjub::verify_batch_from_parsed(
         &parsed.reenc_pub_key,
         &parsed.reenc_seed,
         &old_root,
         &parsed.reenc_entries,
+        refreshed_old_slice,
         num_fields,
         &mut fail_mask,
     );
 
     // Result accumulation and ballot leaf hashes:
     //     - Each ballot SMT leaf hash = SHA-256(serialized_ballot_data)
-    //     - NewResults = OldResults + Σ(all voter ballots) − Σ(overwritten ballots)
+    //     - NewResults = OldResults + Σ voter_ballots − Σ overwritten + refresh_delta
+    //     - Refresh chain leaves are checked against refreshed_old / refreshed_new
     //     This ensures the election tally is correctly maintained across batches.
-    let results_ok = match &parsed.state {
-        Some(state) => results::verify_results(state, num_fields, &mut fail_mask),
-        None => false, // already caught by FAIL_MISSING_BLOCK above
+    let (results_ok, net_results) = match &parsed.state {
+        Some(state) => results::verify_results(
+            state,
+            num_fields,
+            &refreshed_new,
+            &refresh_delta,
+            &mut fail_mask,
+        ),
+        None => (false, [types::ZERO_FR; types::BALLOT_FIELDS]), // caught by FAIL_MISSING_BLOCK
     };
 
     // Data availability
-    // Verify the EIP-4844 KZG blob commitment. The blob contains the complete
-    // vote data (ballots, voteIDs, addresses, results) for on-chain data
-    // availability. The circuit verifies the barycentric evaluation Y = P(Z)
-    // where Z is derived from the process context (processID, rootHashBefore,
-    // commitment) to bind the blob to this specific state transition.
-    let (kzg_ok, kzg_commitment) = kzg::verify_kzg(&parsed.kzg, &mut fail_mask);
+    // The guest rebuilds the DA blob cells from verified state (vote-id list,
+    // sorted slot updates covering new votes, overwrites and silent refreshes,
+    // and the NEW net accumulator) and evaluates each blob polynomial at the
+    // point derived from that blob's commitment. The emitted digest binds the
+    // sequencer's commitments to what the circuit has just proved; the
+    // settlement contract checks each `(commitment, y)` against the blob's
+    // versioned hash via the EIP-4844 point-evaluation precompile. Runs AFTER
+    // results verification (needs the net accumulator) and AFTER verify_state
+    // (needs the SMT chains).
+    let (kzg_ok, blobs_digest, n_blobs) = kzg::verify_kzg(
+        &parsed.kzg,
+        parsed.state.as_ref(),
+        num_fields,
+        &refreshed_new,
+        &net_results,
+        &mut fail_mask,
+    );
 
     // Cross-block binding
     // The input contains independently-parsed binary blocks (STATETX, KZGBLK,
@@ -406,6 +436,13 @@ fn main() {
         }
     }
 
+    // OccupiedBefore overflow. The output register is 32-bit but the header
+    // value is u64; flag overflow before the final verdict so it feeds
+    // both overall_ok and the fail_mask surfaced in out[1].
+    if occupied_before > u32::MAX as u64 {
+        fail_mask |= crate::types::FAIL_REFRESH;
+    }
+
     // FINAL VERDICT
     // Every phase must pass. The fail_mask provides granular diagnostics
     // for debugging when overall_ok is false.
@@ -437,17 +474,23 @@ fn main() {
     out[19] = overwritten as u32;                // OverwrittenVotesCount
     write_fr_output(&mut out, 20, &census_root); // CensusRoot
 
-    // BlobCommitmentLimbs: each 128-bit limb stored as 4 × u32 LE.
-    let limb_u32s = kzg::commitment_to_limb_u32s(&kzg_commitment);
-    for (l, limb) in limb_u32s.iter().enumerate() {
-        for (w, &word) in limb.iter().enumerate() {
-            out[28 + l * 4 + w] = word;
-        }
+    // DA blob binding: SHA-256 digest of (commitment, y) pairs as 8 × u32 LE,
+    // n_blobs at [36], [37..39] reserved (zero).
+    for i in 0..8 {
+        out[28 + i] = u32::from_le_bytes(
+            blobs_digest[i * 4..i * 4 + 4].try_into().unwrap(),
+        );
     }
+    out[36] = n_blobs;
+    // out[37..39] already zero-initialized.
 
     // Diagnostics
     out[40] = batch_ok as u32;
     out[41] = auth_ok as u32;
+    // OccupiedBefore (§4.5.2): number of ballot leaves in the tree before this
+    // batch. The fold guest checks it against its running
+    // TotalVoters - TotalOverwrites. Overflow is flagged above.
+    out[42] = occupied_before as u32;
     out[43] = parsed.nproofs as u32;
     out[44] = parsed.n_public as u32;
     out[45] = parsed.log_n as u32;

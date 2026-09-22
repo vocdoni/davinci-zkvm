@@ -41,6 +41,11 @@ pub struct Config {
     /// is only needed to skip the doomed first attempt for workloads known to
     /// exceed GPU memory (e.g. batch 256 at high `num_fields`).
     pub zisk_minimal_memory: bool,
+    /// Keep each job's `input.bin` after proving and serve it on
+    /// `GET /jobs/:id/inputs` (default false). The input is the private
+    /// witness: the re-encryption seed, which slots were overwritten and which
+    /// were silently refreshed. Only enable on a development host.
+    pub keep_inputs: bool,
 }
 
 impl Config {
@@ -78,6 +83,9 @@ impl Config {
                 .unwrap_or(0),
             zisk_mpi_bind_to: env::var("ZISK_MPI_BIND_TO").unwrap_or_else(|_| "none".to_string()),
             zisk_minimal_memory: env::var("ZISK_MINIMAL_MEMORY")
+                .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            keep_inputs: env::var("DAVINCI_KEEP_INPUTS")
                 .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
         }

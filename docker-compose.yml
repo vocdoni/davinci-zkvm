@@ -56,6 +56,7 @@ services:
       - ZISK_MPI_THREADS=${ZISK_MPI_THREADS:-0}
       - ZISK_MPI_BIND_TO=${ZISK_MPI_BIND_TO:-none}
       - ZISK_MINIMAL_MEMORY=${ZISK_MINIMAL_MEMORY:-0}
+      - DAVINCI_KEEP_INPUTS=${DAVINCI_KEEP_INPUTS:-0}
     restart: unless-stopped
     ulimits:
       memlock:

@@ -124,6 +124,17 @@ async fn worker_loop(
         let result = run_prove_with_retry(&config, &task).await;
         let elapsed_ms = start.elapsed().as_millis() as u64;
 
+        // The input is the private witness (seed, overwrite and refresh sets);
+        // once the proof exists it must not linger on disk.
+        if !config.keep_inputs {
+            let input_path = config.proof_output_dir.join(job_id.to_string()).join("input.bin");
+            if let Err(e) = tokio::fs::remove_file(&input_path).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    error!("Job {}: could not delete input.bin: {}", job_id, e);
+                }
+            }
+        }
+
         if let Some(mut job) = jobs.get_mut(&job_id) {
             job.finished_at = Some(Utc::now());
             job.elapsed_ms = Some(elapsed_ms);

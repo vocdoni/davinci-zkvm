@@ -33,8 +33,14 @@ package integration
 //   - VOTES_PER_BATCH (default: 4, max: 256)
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
+
+	davinciSolidity "github.com/vocdoni/davinci-zkvm/go-sdk/solidity"
 )
 
 func TestFullE2E(t *testing.T) {
@@ -103,6 +109,12 @@ func TestFullE2E(t *testing.T) {
 	tally := NewTallyAccumulator()
 	voterOffset := 0
 	prevRoot := election.OldRoot
+	// On-chain settlement, the paper's per-batch flow: one DavinciSettlement
+	// process per election, one blob transaction per transition.
+	genesisRoot := election.OldRoot
+	var settlement *davinciSolidity.Settlement
+	var pid [32]byte
+	var settledGas []uint64
 	totalWall := time.Now()
 
 	for txIdx, spec := range batches {
@@ -141,11 +153,8 @@ func TestFullE2E(t *testing.T) {
 			t.Fatalf("tx %d: root discontinuity: expected %s, got %s", txIdx+1, prevRoot, oldRoot)
 		}
 
-		// (c) Build protocol blocks.
-		kzgBlock, err := election.BuildKZGBlock(txIdx, oldRoot)
-		if err != nil {
-			t.Fatalf("tx %d: BuildKZGBlock: %v", txIdx+1, err)
-		}
+		// (c) Build protocol blocks. State block first: KZG binding reads the
+		// DA cells that BuildStateBlock stashes on the election.
 		reencBlock, reencBallots, err := election.BuildReencBlock(oldRoot, batch.Results)
 		if err != nil {
 			t.Fatalf("tx %d: BuildReencBlock: %v", txIdx+1, err)
@@ -153,6 +162,10 @@ func TestFullE2E(t *testing.T) {
 		stateBlock, overwrittenBallots, err := election.BuildStateBlock(batchVoters, batch.Results, reencBallots)
 		if err != nil {
 			t.Fatalf("tx %d: BuildStateBlock: %v", txIdx+1, err)
+		}
+		kzgBlock, blobs, err := election.BuildKZGBlock(oldRoot)
+		if err != nil {
+			t.Fatalf("tx %d: BuildKZGBlock: %v", txIdx+1, err)
 		}
 		censusProofs, err := election.BuildCensusProofs(batchVoters)
 		if err != nil {
@@ -198,9 +211,70 @@ func TestFullE2E(t *testing.T) {
 			t.Fatalf("tx %d: job %s status=%q: %s", txIdx+1, jobID, job.Status, errMsg)
 		}
 
+		// (f) Settle on the simulated chain: PLONK verification, root
+		// continuity, census root, occupied_before and one point-evaluation
+		// check per blob against the blob transaction's versioned hashes.
+		snark, err := client.FetchSnark(jobID)
+		if err != nil {
+			t.Fatalf("tx %d: FetchSnark: %v", txIdx+1, err)
+		}
+		if settlement == nil {
+			settlement, err = davinciSolidity.DeploySettlement(solidityDir(), snark.ProgramVK, snark.RootCVadcopFinal)
+			if err != nil {
+				t.Fatalf("DeploySettlement: %v", err)
+			}
+			pid, err = hex32(election.ProcessIDHex())
+			if err != nil {
+				t.Fatalf("process id: %v", err)
+			}
+			genesis, err := hex32(genesisRoot)
+			if err != nil {
+				t.Fatalf("genesis root: %v", err)
+			}
+			censusRoot, ok := election.Census.Root()
+			if !ok {
+				t.Fatal("census tree has no root")
+			}
+			// The guest publishes the census root as little-endian limbs.
+			var censusBE [32]byte
+			censusRoot.FillBytes(censusBE[:])
+			if err := settlement.CreateProcess(pid, genesis, reverse32(censusBE)); err != nil {
+				t.Fatalf("CreateProcess: %v", err)
+			}
+		}
+		// The guest must have laid out exactly the cells the host committed to.
+		pairs := make([]byte, 0, 80*len(blobs.Blobs))
+		for i := range blobs.Blobs {
+			pairs = append(pairs, blobs.Commitments[i][:]...)
+			pairs = append(pairs, blobs.Ys[i][:]...)
+		}
+		want := sha256.Sum256(pairs)
+		if got := pubReg32(snark.PublicValues, 28); got != want || want != blobs.Digest {
+			t.Fatalf("tx %d: blobs digest guest=%x host=%x field=%x (n_blobs guest=%d host=%d, occupied_before=%d)",
+				txIdx+1, got, want, blobs.Digest, pubWord(snark.PublicValues, 36), len(blobs.Blobs), pubWord(snark.PublicValues, 42))
+		}
+		gas, err := settlement.SubmitTransition(pid, snark, blobs)
+		if err != nil {
+			t.Fatalf("tx %d: settlement rejected the transition: %v", txIdx+1, err)
+		}
+		settledGas = append(settledGas, gas)
+		t.Logf("  Settled on-chain: %d blob(s), gas=%d", len(blobs.Blobs), gas)
 		prevRoot = election.OldRoot
 		t.Logf("  New root: %s", prevRoot)
 	}
+	// The contract must have followed the election exactly.
+	stateRoot, _, voteCount, overwrittenCount, err := settlement.Process(pid)
+	if err != nil {
+		t.Fatalf("settlement.Process: %v", err)
+	}
+	if finalRoot, _ := hex32(election.OldRoot); stateRoot != finalRoot {
+		t.Fatalf("settlement state root %x != election root %s", stateRoot, election.OldRoot)
+	}
+	if int(voteCount) != nFresh+nOverwrites || int(overwrittenCount) != nOverwrites {
+		t.Fatalf("settlement counters votes=%d overwrites=%d, want %d/%d",
+			voteCount, overwrittenCount, nFresh+nOverwrites, nOverwrites)
+	}
+	t.Logf("Settlement gas per transition: %v", settledGas)
 
 	t.Logf("=== All %d transitions done in %.1fs; decrypting tally (%d net ballots) ===",
 		nTransitions, time.Since(totalWall).Seconds(), tally.count)
@@ -242,4 +316,45 @@ func TestFullE2E(t *testing.T) {
 
 	t.Logf("Final state root: %s", election.OldRoot)
 	t.Logf("=== TestFullE2E PASSED ===")
+}
+
+// hex32 decodes an optionally 0x-prefixed 32-byte hex string.
+func hex32(s string) ([32]byte, error) {
+	var out [32]byte
+	b, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
+	if err != nil {
+		return out, err
+	}
+	if len(b) != 32 {
+		return out, fmt.Errorf("want 32 bytes, got %d", len(b))
+	}
+	copy(out[:], b)
+	return out, nil
+}
+
+func reverse32(b [32]byte) [32]byte {
+	var out [32]byte
+	for i := range b {
+		out[31-i] = b[i]
+	}
+	return out
+}
+
+// pubWord reads register k of the 512-byte publicValues (8-byte LE words).
+func pubWord(pv []byte, k int) uint64 {
+	var w uint64
+	for i := 0; i < 8; i++ {
+		w |= uint64(pv[8*k+i]) << (8 * i)
+	}
+	return w
+}
+
+// pubReg32 reassembles a 256-bit public from registers k..k+7 the way the
+// settlement contract does: the low 4 bytes of each word, in order.
+func pubReg32(pv []byte, k int) [32]byte {
+	var out [32]byte
+	for j := 0; j < 8; j++ {
+		copy(out[4*j:4*j+4], pv[8*(k+j):8*(k+j)+4])
+	}
+	return out
 }

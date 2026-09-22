@@ -4,7 +4,7 @@ use crate::api::AppState;
 use crate::types::{JobKind, ProveRequest, SmtEntryJson};
 use anyhow::{bail, Context};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use davinci_zkvm_input_gen::{census_proof_from_hex, generate_input, write_census_block, write_csp_block, write_kzg_block, write_reenc_block, write_state_block, be_hex32_to_fr_le, address_hex_to_fr_le, BjjCiphertextData, CspBlockData, CspEntryData, KzgData, ReencEntryData, SmtEntry, StateData, NUM_FIELDS};
+use davinci_zkvm_input_gen::{census_proof_from_hex, generate_input, write_census_block, write_csp_block, write_kzg_block, write_reenc_block, write_state_block, be_hex32_to_fr_le, address_hex_to_fr_le, BjjCiphertextData, CspBlockData, CspEntryData, KzgData, ReencEntryData, SmtEntry, StateData, NUM_FIELDS, MAX_BLOBS};
 use tracing::{debug, error, info, warn};
 
 pub async fn submit_prove(
@@ -71,10 +71,8 @@ pub async fn submit_prove(
         debug!(
             process_id       = %k.process_id,
             root_hash_before = %k.root_hash_before,
-            commitment       = %k.commitment,
-            y_claimed        = %k.y_claimed,
-            blob_bytes       = k.blob.len() / 2,   // hex len / 2
-            "KZG barycentric-evaluation block"
+            n_commitments    = k.commitments.len(),
+            "KZG commitment block"
         );
     }
 
@@ -83,6 +81,24 @@ pub async fn submit_prove(
         queue_len     = state.prover.queue_len(),
         "Request accepted; generating ZisK input"
     );
+
+    // Validate refresh_smt size and count consistency before spawning the blocking task.
+    if let Some(st) = &req.state {
+        if st.refresh_smt.len() > davinci_zkvm_input_gen::MAX_REFRESH {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("refresh_smt has {} entries, max {}", st.refresh_smt.len(), davinci_zkvm_input_gen::MAX_REFRESH)})),
+            ).into_response();
+        }
+        if let Some(bp) = &st.ballot_proofs {
+            if bp.refreshed_ballots.len() != st.refresh_smt.len() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("refreshed_ballots has {} entries, refresh_smt has {}", bp.refreshed_ballots.len(), st.refresh_smt.len())})),
+                ).into_response();
+            }
+        }
+    }
 
     // Generate ZisK binary input (CPU-bound => runs in blocking thread pool)
     let vk = req.vk.clone();
@@ -102,11 +118,13 @@ pub async fn submit_prove(
             let sd = StateData {
                 n_voters: st.voters_count,
                 n_overwritten: st.overwritten_count,
+                occupied_before: st.occupied_before,
                 process_id: davinci_zkvm_input_gen::hex32_to_smt_fr(&st.process_id)?,
                 old_state_root: davinci_zkvm_input_gen::hex32_to_smt_fr(&st.old_state_root)?,
                 new_state_root: davinci_zkvm_input_gen::hex32_to_smt_fr(&st.new_state_root)?,
                 vote_id_chain: smt_entries_from_json(&st.vote_id_smt)?,
                 ballot_chain: smt_entries_from_json(&st.ballot_smt)?,
+                refresh_chain: smt_entries_from_json(&st.refresh_smt)?,
                 results: st.results_smt.as_ref().map(smt_entry_from_json).transpose()?,
                 process_proofs: smt_entries_from_json(&st.process_smt)?,
                 ballot_proof_data: st.ballot_proofs.as_ref().map(ballot_proof_data_from_json).transpose()?,
@@ -171,35 +189,28 @@ pub async fn submit_prove(
             bytes.extend(write_reenc_block(pub_key_x, pub_key_y, seed, &entries)?);
         }
 
-        // Append KZG blob barycentric evaluation block.
+        // Append KZG commitment block.
         if let Some(k) = kzg_json {
-            let commitment_hex = k.commitment.trim_start_matches("0x");
-            let commitment_bytes = hex::decode(commitment_hex)
-                .with_context(|| "invalid commitment hex")?;
-            if commitment_bytes.len() != 48 {
-                bail!("commitment must be 48 bytes, got {}", commitment_bytes.len());
+            let n = k.commitments.len();
+            if n == 0 || n > MAX_BLOBS {
+                bail!("commitments count {} is outside 1..={}", n, MAX_BLOBS);
             }
-            let y_claimed_hex = k.y_claimed.trim_start_matches("0x");
-            let y_claimed_bytes = hex::decode(y_claimed_hex)
-                .with_context(|| "invalid y_claimed hex")?;
-            if y_claimed_bytes.len() != 32 {
-                bail!("y_claimed must be 32 bytes, got {}", y_claimed_bytes.len());
+            let mut commitments = Vec::with_capacity(n);
+            for (i, s) in k.commitments.iter().enumerate() {
+                let hex = s.trim_start_matches("0x");
+                let decoded = hex::decode(hex)
+                    .with_context(|| format!("invalid commitment hex at index {}", i))?;
+                if decoded.len() != 48 {
+                    bail!("commitment[{}] must be 48 bytes, got {}", i, decoded.len());
+                }
+                let mut arr = [0u8; 48];
+                arr.copy_from_slice(&decoded);
+                commitments.push(arr);
             }
-            let blob_hex = k.blob.trim_start_matches("0x");
-            let blob_bytes = hex::decode(blob_hex)
-                .with_context(|| "invalid blob hex")?;
-
-            let mut commitment = [0u8; 48];
-            commitment.copy_from_slice(&commitment_bytes);
-            let mut y_claimed = [0u8; 32];
-            y_claimed.copy_from_slice(&y_claimed_bytes);
-
             bytes.extend(write_kzg_block(&KzgData {
                 process_id:       be_hex32_to_fr_le(&k.process_id)?,
                 root_hash_before: be_hex32_to_fr_le(&k.root_hash_before)?,
-                commitment,
-                y_claimed,
-                blob: blob_bytes,
+                commitments,
             })?);
         }
 
@@ -256,6 +267,7 @@ fn ballot_proof_data_from_json(
         old_results: frs(&bp.old_results)?,
         voter_ballots: bp.voter_ballots.iter().map(|b| frs(b)).collect::<anyhow::Result<_>>()?,
         overwritten_ballots: bp.overwritten_ballots.iter().map(|b| frs(b)).collect::<anyhow::Result<_>>()?,
+        refreshed_ballots: bp.refreshed_ballots.iter().map(|b| frs(b)).collect::<anyhow::Result<_>>()?,
     })
 }
 

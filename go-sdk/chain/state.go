@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"sort"
 
 	arbo "github.com/vocdoni/arbo"
 	"github.com/vocdoni/arbo/memdb"
@@ -179,6 +180,10 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 	if n > davinci.MaxBatchSize {
 		return nil, nil, fmt.Errorf("batch size %d exceeds MaxBatchSize (%d)", n, davinci.MaxBatchSize)
 	}
+	// occupiedBefore counts distinct ballot slots present before this batch
+	// touches the map. Equivalent to s.voters - s.overwrites, but the map
+	// size is the ground truth (both counters are derived from it).
+	occupiedBefore := len(s.votedBallots)
 	for i, v := range votes {
 		// Ballot key layout: bits [0..15] address, [16..62] census index,
 		// bit 63 is the voteID namespace. Out-of-range parts silently
@@ -246,7 +251,7 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 		entry, err := buildArboInsertEntry(
 			s.tree,
 			new(big.Int).SetUint64(v.VoteID),
-			new(big.Int).SetUint64(uint64(1000+i)),
+			big.NewInt(davinci.VoteIDLeafValue),
 			procLevels,
 		)
 		if err != nil {
@@ -258,6 +263,7 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 	// Ballot insert (first vote) or update (overwrite).
 	ballotChain := make([]davinci.SmtEntry, 0, n)
 	var overwritten []*elgamal.Ballot
+	batchKeys := make(map[uint64]struct{}, n)
 	for i, v := range votes {
 		key := ballotMin + uint64(v.CensusIdx)<<16 + v.AddressLo16
 		leaf := ballotLeafHash(reencBallots[i])
@@ -275,11 +281,15 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 			}
 			ballotChain = append(ballotChain, entry)
 		}
+		batchKeys[key] = struct{}{}
 		s.votedBallots[key] = reencBallots[i]
 	}
 
 	// Net results accumulator (BabyJubJub point add/sub per ciphertext):
-	// NewResults = OldResults + Σ(all ballots) − Σ(overwritten ballots).
+	// NewResults = OldResults + Σ(all ballots) − Σ(overwritten ballots) +
+	// Σ(refresh deltas). The refresh loop below extends the seed chain and
+	// folds each delta (new_i - old_i) into newResults so the guest and host
+	// agree on the accumulator that the Results transition will commit.
 	oldResults := s.results
 
 	newResults := s.results
@@ -289,6 +299,81 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 	for _, ob := range overwritten {
 		newResults = accumSub(newResults, accumFromBallot(ob))
 	}
+
+	// Silent refresh pass: re-randomize a target number of occupied ballot
+	// slots the batch itself did not write. Selection is uniform without
+	// replacement over the candidate slots, drawn from crypto/rand — never
+	// derived, never persisted. Refresh entries continue the same seed chain
+	// as the batch's own re-encryptions, so no scalar is reused.
+	w := len(overwritten)
+	target := davinci.RefreshTarget(n, w, occupiedBefore)
+	var (
+		refreshChain     []davinci.SmtEntry
+		refreshedOldStrs [][]string
+	)
+	if target > 0 {
+		// Candidates: occupied keys before the batch, minus the keys this
+		// batch wrote. Sorted ascending so the sampling and iteration order
+		// are deterministic once the crypto/rand draws are fixed.
+		cand := make([]uint64, 0, occupiedBefore-w)
+		for key := range s.votedBallots {
+			if _, hit := batchKeys[key]; hit {
+				continue
+			}
+			cand = append(cand, key)
+		}
+		sort.Slice(cand, func(i, j int) bool { return cand[i] < cand[j] })
+
+		var chosen []uint64
+		if len(cand) <= target {
+			// Full churn: refresh every candidate the tree exposes.
+			chosen = cand
+		} else {
+			// Fisher-Yates partial shuffle: at step i pick a uniform index
+			// in [i, len(cand)) via crypto/rand and swap it to position i.
+			// After target steps the first target entries are a uniform
+			// sample without replacement.
+			for i := 0; i < target; i++ {
+				remain := int64(len(cand) - i)
+				jBI, err := rand.Int(rand.Reader, big.NewInt(remain))
+				if err != nil {
+					return nil, nil, fmt.Errorf("refresh sample: %w", err)
+				}
+				j := i + int(jBI.Int64())
+				cand[i], cand[j] = cand[j], cand[i]
+			}
+			chosen = cand[:target]
+		}
+		sort.Slice(chosen, func(i, j int) bool { return chosen[i] < chosen[j] })
+
+		refreshChain = make([]davinci.SmtEntry, 0, len(chosen))
+		refreshedOldStrs = make([][]string, 0, len(chosen))
+		for _, key := range chosen {
+			old, ok := s.votedBallots[key]
+			if !ok {
+				return nil, nil, fmt.Errorf("refresh: missing ballot at key %#x", key)
+			}
+			refreshed, err := old.ReencryptChained(s.cfg.EncKey, chain, nf)
+			if err != nil {
+				return nil, nil, fmt.Errorf("refresh reenc[%#x]: %w", key, err)
+			}
+			entry, err := buildArboUpdateEntry(
+				s.tree, new(big.Int).SetUint64(key), ballotLeafHash(refreshed), procLevels)
+			if err != nil {
+				return nil, nil, fmt.Errorf("refresh update[%#x]: %w", key, err)
+			}
+			refreshChain = append(refreshChain, entry)
+			refreshedOldStrs = append(refreshedOldStrs, ballotToFrStrings(old))
+			// Fold the delta (new - old) into the accumulator so the Results
+			// transition below commits the homomorphic sum of the current
+			// leaves — the guest applies the same delta from its derived
+			// scalar, so the two agree without shipping the deltas.
+			newResults = accumAdd(newResults, accumFromBallot(refreshed))
+			newResults = accumSub(newResults, accumFromBallot(old))
+			s.votedBallots[key] = refreshed
+		}
+	}
+
 	resultsEntry, err := buildArboUpdateEntry(
 		s.tree, new(big.Int).SetUint64(keyResults), accumLeafHash(newResults), procLevels)
 	if err != nil {
@@ -318,6 +403,7 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 	state := &davinci.StateTransitionData{
 		VotersCount:      uint64(n),
 		OverwrittenCount: uint64(len(overwritten)),
+		OccupiedBefore:   uint64(occupiedBefore),
 		// STATETX carries the processID as arbo-LE hex (the leaf value
 		// encoding for config key 0x00).
 		ProcessID:    "0x" + hex.EncodeToString(arbo.BigIntToBytes(bLen, s.cfg.ProcessID)),
@@ -325,12 +411,14 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 		NewStateRoot: newRoot,
 		VoteIDSmt:    voteIDChain,
 		BallotSmt:    ballotChain,
+		RefreshSmt:   refreshChain,
 		ResultsSmt:   &resultsEntry,
 		ProcessSmt:   processSmtProofs,
 		BallotProofs: &davinci.BallotProofData{
 			OldResults:         accumToStrings(oldResults),
 			VoterBallots:       voterBallotStrs,
 			OverwrittenBallots: overwrittenStrs,
+			RefreshedBallots:   refreshedOldStrs,
 		},
 	}
 	reencData := &davinci.ReencryptionData{

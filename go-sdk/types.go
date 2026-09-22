@@ -19,6 +19,50 @@ import "encoding/json"
 // headroom on a 32 GB GPU.
 const MaxBatchSize = 128
 
+// Silent revoting: every batch must re-randomize occupied ballot slots it did
+// not write, so an observer cannot tell an overwrite from a routine refresh.
+// Mirrors MAX_REFRESH / REFRESH_* in circuit_primitives::types.
+const (
+	// MaxRefresh caps the refresh entries per batch (input size, proving time).
+	MaxRefresh = 256
+	// RefreshMin is the floor, so small batches still churn the tree.
+	RefreshMin = 16
+	// RefreshTau refreshes per overwrite: a changed occupied slot is an
+	// overwrite with probability at most 1/(1+RefreshTau).
+	RefreshTau = 2
+	// RefreshKappa refreshes per vote: ties refresh volume to vote volume so
+	// every slot keeps being refreshed as the election grows.
+	RefreshKappa = 1
+)
+
+// RefreshTarget is the number of silent refreshes the guest requires for a
+// batch of n votes (w of them overwrites) on a tree with occupiedBefore
+// occupied ballot slots: min(MaxRefresh, max(RefreshMin, RefreshTau*w,
+// RefreshKappa*n)), capped at the occupied slots the batch does not write.
+func RefreshTarget(n, w, occupiedBefore int) int {
+	t := RefreshMin
+	if v := RefreshTau * w; v > t {
+		t = v
+	}
+	if v := RefreshKappa * n; v > t {
+		t = v
+	}
+	if t > MaxRefresh {
+		t = MaxRefresh
+	}
+	if avail := occupiedBefore - w; avail < t {
+		t = avail
+	}
+	if t < 0 {
+		t = 0
+	}
+	return t
+}
+
+// VoteIDLeafValue is the value every vote-identifier leaf carries (davinci-node's
+// params.VoteIDLeafValue). The guest pins it so the DA blob only needs the keys.
+const VoteIDLeafValue = 0
+
 // NumFields is the number of ElGamal ciphertexts per ballot. Must match the
 // guest's circuit_primitives::types::NUM_FIELDS. BallotFields is the flat
 // width in BN254 Fr coordinates (NumFields ciphertexts × 4 coords each).
@@ -54,16 +98,24 @@ const (
 	// CensusRoot: 256-bit lean-IMT Poseidon BN254 census root (8 × u32, LE)
 	OutputCensusRoot = 20 // base index; occupies slots [20..27]
 
-	// BlobCommitmentLimbs: 3 × 128-bit KZG blob commitment limbs (12 × u32)
-	// Populated from the KZG commitment when a KZGBLK block is present, zero otherwise.
-	OutputBlobCommitment = 28 // base index; occupies slots [28..39]
+	// BlobsDigest: SHA-256 over the ordered (commitment, y) pairs of every
+	// blob the guest bound, published as 8 × u32 LE. Zero if no KZG block.
+	OutputBlobsDigest = 28 // base index; occupies slots [28..35]
+	// NBlobs: number of blobs the guest bound in this batch (0..=MaxBlobs).
+	OutputNBlobs = 36
+	// Slots [37..39] are reserved zero.
 
 	// Diagnostic outputs (not used as public inputs)
 	OutputBatchOk = 40 // Groth16 batch verification result (1=ok)
 	OutputECDSAOk = 41 // ECDSA signature batch result (1=ok)
-	OutputNProofs = 43 // number of Groth16 proofs verified
-	OutputNPublic = 44 // number of public inputs per Groth16 proof
-	OutputLogN    = 45 // log₂ of the aggregation tree depth
+	// OutputOccupiedBefore echoes the batch's claimed occupied ballot slot
+	// count before the batch; the consumer (fold guest, contract) checks it
+	// against its running voters − overwrites, which bounds the silent
+	// refresh minimum the guest enforced.
+	OutputOccupiedBefore = 42
+	OutputNProofs        = 43 // number of Groth16 proofs verified
+	OutputNPublic        = 44 // number of public inputs per Groth16 proof
+	OutputLogN           = 45 // log₂ of the aggregation tree depth
 )
 
 // SmtEntry represents one Arbo-compatible SMT state-transition proof.
@@ -103,6 +155,12 @@ type StateTransitionData struct {
 	VotersCount uint64 `json:"voters_count"`
 	// OverwrittenCount is the number of votes that replaced an existing ballot.
 	OverwrittenCount uint64 `json:"overwritten_count"`
+	// OccupiedBefore is the number of occupied ballot slots before this batch
+	// (cumulative votes − overwrites). The guest requires at least
+	// RefreshTarget(VotersCount, OverwrittenCount, OccupiedBefore) entries in
+	// RefreshSmt and echoes the value as a public output for the consumer to
+	// check.
+	OccupiedBefore uint64 `json:"occupied_before"`
 
 	// ProcessID is the 32-byte process identifier (arbo SHA-256 state tree key 0x0).
 	ProcessID string `json:"process_id"`
@@ -118,6 +176,14 @@ type StateTransitionData struct {
 	// BallotSmt is the chain of ballot insertion/update proofs (one per real vote).
 	// Keys are in [BallotMin, BallotMax] = [0x10, 0x7FFFFFFFFFFFFFFF].
 	BallotSmt []SmtEntry `json:"ballot_smt"`
+
+	// RefreshSmt is the chain of silent-refresh UPDATE proofs, applied after
+	// BallotSmt and before ResultsSmt. Each entry re-randomizes an occupied
+	// ballot slot not written by this batch: keys strictly increasing, in the
+	// ballot namespace, disjoint from BallotSmt; the new value is the leaf
+	// hash of the old ballot plus Enc(0; r) with r drawn from the batch's
+	// re-encryption chain after the batch's own entries.
+	RefreshSmt []SmtEntry `json:"refresh_smt,omitempty"`
 
 	// ResultsSmt is the net Results transition (key 0x04):
 	// NewResults = OldResults + Σ(VoterBallots) − Σ(OverwrittenBallots).
@@ -148,6 +214,10 @@ type BallotProofData struct {
 	// OverwrittenBallots contains the old ballot data for each UPDATE entry.
 	// Each inner slice has exactly BallotFields big-endian hex strings.
 	OverwrittenBallots [][]string `json:"overwritten_ballots"`
+	// RefreshedBallots contains the old ballot data for each RefreshSmt entry
+	// (same order). The guest computes the refreshed ballot itself and adds
+	// the refresh delta to the results accumulator.
+	RefreshedBallots [][]string `json:"refreshed_ballots,omitempty"`
 }
 
 // CensusProof is a lean-IMT Poseidon membership proof for a census voter.
@@ -348,19 +418,19 @@ type StarkInfo struct {
 	ZiskVK    string `json:"zisk_vk"`
 }
 
-// KZGRequest holds the KZG blob barycentric evaluation inputs for the API.
-// All byte fields are hex-encoded with optional "0x" prefix.
+// KZGRequest is the KZG DA-blob binding sent to the /prove endpoint. The
+// guest builds and commits the blobs itself from verified state, so the
+// service only ever needs the ordered per-blob commitments plus the pair
+// (processID, rootHashBefore) that bind each blob's evaluation point.
+// Every hex field is 0x-prefixed big-endian.
 type KZGRequest struct {
 	// ProcessID is the 32-byte big-endian hex BN254 Fr process identifier.
 	ProcessID string `json:"process_id"`
 	// RootHashBefore is the 32-byte big-endian hex Arbo state root before the batch.
 	RootHashBefore string `json:"root_hash_before"`
-	// Commitment is the 48-byte big-endian hex compressed BLS12-381 G1 KZG commitment.
-	Commitment string `json:"commitment"`
-	// YClaimed is the 32-byte big-endian hex BLS12-381 Fr claimed evaluation Y = P(Z).
-	YClaimed string `json:"y_claimed"`
-	// Blob is the 131072-byte big-endian hex full EIP-4844 blob (4096 × 32-byte cells).
-	Blob string `json:"blob"`
+	// Commitments is the ordered list of 1..=MaxBlobs KZG commitments, each
+	// 96-hex-char (48 bytes) big-endian compressed BLS12-381 G1 element.
+	Commitments []string `json:"commitments"`
 }
 
 // Job status values returned by the service (JobResponse.Status).

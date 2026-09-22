@@ -5,6 +5,15 @@ use davinci_zkvm_input_gen::{EcdsaSig, SnarkJsProof, SnarkJsVk, NUM_FIELDS};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Accept JSON `null` for an optional list (Go encodes a nil slice as null).
+fn null_as_empty<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(d)?.unwrap_or_default())
+}
+
 /// One SMT state-transition entry in JSON format.
 ///
 /// All 32-byte field values are hex-encoded strings (with or without "0x" prefix).
@@ -39,6 +48,8 @@ pub struct SmtEntryJson {
 pub struct StateTransitionJson {
     pub voters_count: u64,
     pub overwritten_count: u64,
+    #[serde(default)]
+    pub occupied_before: u64,
     pub process_id: String,
     pub old_state_root: String,
     pub new_state_root: String,
@@ -46,6 +57,8 @@ pub struct StateTransitionJson {
     pub vote_id_smt: Vec<SmtEntryJson>,
     #[serde(default)]
     pub ballot_smt: Vec<SmtEntryJson>,
+    #[serde(default, deserialize_with = "null_as_empty")]
+    pub refresh_smt: Vec<SmtEntryJson>,
     #[serde(default)]
     pub results_smt: Option<SmtEntryJson>,
     #[serde(default)]
@@ -62,6 +75,8 @@ pub struct BallotProofsJson {
     pub voter_ballots: Vec<Vec<String>>,
     #[serde(default)]
     pub overwritten_ballots: Vec<Vec<String>>,
+    #[serde(default, deserialize_with = "null_as_empty")]
+    pub refreshed_ballots: Vec<Vec<String>>,
 }
 
 /// One lean-IMT Poseidon census membership proof in JSON format.
@@ -114,7 +129,7 @@ pub struct ReencryptionDataJson {
     pub entries: Vec<ReencryptionEntryJson>,
 }
 
-/// KZG EIP-4844 blob barycentric evaluation data in JSON format.
+/// KZG commitment data in JSON format.
 ///
 /// All hex strings use the "0x"-prefixed big-endian convention.
 #[derive(Debug, Deserialize, Clone)]
@@ -123,12 +138,8 @@ pub struct KzgEvalJson {
     pub process_id: String,
     /// 32-byte big-endian hex: Arbo state root before the batch.
     pub root_hash_before: String,
-    /// 48-byte big-endian hex: compressed BLS12-381 G1 KZG commitment.
-    pub commitment: String,
-    /// 32-byte big-endian hex: claimed evaluation Y = P(Z).
-    pub y_claimed: String,
-    /// 131072-byte big-endian hex: full EIP-4844 blob (4096 × 32-byte cells).
-    pub blob: String,
+    /// 1..=MAX_BLOBS compressed BLS12-381 G1 KZG commitments (0x-prefixed 96-hex-char each).
+    pub commitments: Vec<String>,
 }
 
 /// One CSP ECDSA attestation for a voter in JSON format.

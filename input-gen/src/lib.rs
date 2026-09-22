@@ -35,6 +35,13 @@ const STATE_MAGIC: u64 = u64::from_le_bytes(*b"STATETX!");
 /// headroom on a 32 GB GPU. Keep in sync with circuit-primitives + go-sdk.
 pub const MAX_BATCH_SIZE: usize = 128;
 
+/// Maximum number of silent-refresh SMT entries per batch.
+/// Mirrors MAX_REFRESH in circuit-primitives and go-sdk/types.go.
+pub const MAX_REFRESH: usize = 256;
+
+/// Maximum number of KZG blob commitments per KZGBLK!! block.
+pub const MAX_BLOBS: usize = 8;
+
 /// One Arbo-compatible SMT state-transition entry for binary encoding.
 /// All `[u64; 4]` fields use little-endian word order (word[0] = least-significant 64 bits),
 /// matching the circuit's `FrRaw` convention.  The values are big-endian 32-byte numbers
@@ -77,17 +84,36 @@ pub fn hex32_to_smt_fr(s: &str) -> Result<[u64; 4]> {
 /// Full DAVINCI state-transition data for binary serialization.
 /// Matches the `StateTransitionData` JSON type in go-sdk/types.go.
 /// All `[u64;4]` fields use little-endian word order (arbo convention).
+///
+/// Wire layout (all integers u64 LE, Fr = 4×u64 LE):
+/// ```text
+/// magic "STATETX!"
+/// n_voters u64
+/// n_overwritten u64
+/// occupied_before u64
+/// process_id Fr, old_state_root Fr, new_state_root Fr
+/// VoteID chain:   count u64, n_levels u64, count × entry
+/// Ballot chain:   count u64, n_levels u64, count × entry
+/// Refresh chain:  count u64, n_levels u64, count × entry  (empty = count 0, n_levels 0)
+/// Results:        has u64, n_levels u64, [entry if has]
+/// Process proofs: n u64 (0|5), [n_levels u64, n × entry]
+/// Ballot data:    has u64, [old_results 64×Fr, n_vb u64, n_vb×64×Fr, n_ob u64, n_ob×64×Fr, n_rb u64, n_rb×64×Fr]
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct StateData {
     pub n_voters: u64,
     pub n_overwritten: u64,
+    /// Occupied ballot slots before this batch (cumulative votes − overwrites).
+    pub occupied_before: u64,
     pub process_id: [u64; 4],
     pub old_state_root: [u64; 4],
     pub new_state_root: [u64; 4],
     pub vote_id_chain: Vec<SmtEntry>,
     pub ballot_chain: Vec<SmtEntry>,
+    /// Silent-refresh UPDATE proofs applied after ballot_chain. May be empty.
+    pub refresh_chain: Vec<SmtEntry>,
     pub results: Option<SmtEntry>,
-    /// Exactly 4 read-proofs: processID(0x0), ballotMode(0x2), encKey(0x3), censusOrigin(0x6).
+    /// Exactly 5 read-proofs: processID(0x0), ballotMode(0x2), encKey(0x3), censusOrigin(0x6), ballotVKHash(0x7).
     pub process_proofs: Vec<SmtEntry>,
     /// Optional ballot proof data for result accumulator verification.
     /// When `None`, the encoder writes `has_ballot_data = 0`.
@@ -95,27 +121,53 @@ pub struct StateData {
 }
 
 /// Result accumulator ballot data for binary serialization.
-/// Contains the old results, per-voter ballots, and overwritten ballots needed
-/// to verify the net homomorphic tally:
-/// NewResults = OldResults + Σ(voter_ballots) − Σ(overwritten_ballots).
+/// Contains the old results, per-voter ballots, overwritten ballots, and
+/// refreshed ballots needed to verify the homomorphic tally.
 #[derive(Debug, Clone)]
 pub struct BallotProofData {
-    /// Previous net Results leaf value (32 BN254 Fr elements).
+    /// Previous net Results leaf value (BALLOT_FIELDS BN254 Fr elements).
     pub old_results: Vec<[u64; 4]>,
-    /// Per-voter re-encrypted ballots (32 Fr elements each).
+    /// Per-voter re-encrypted ballots (BALLOT_FIELDS Fr elements each).
     pub voter_ballots: Vec<Vec<[u64; 4]>>,
-    /// Per-overwrite old ballot data (32 Fr elements each).
+    /// Per-overwrite old ballot data (BALLOT_FIELDS Fr elements each).
     pub overwritten_ballots: Vec<Vec<[u64; 4]>>,
+    /// Old ballot data for each refresh_chain entry (same order).
+    pub refreshed_ballots: Vec<Vec<[u64; 4]>>,
 }
 
 /// Serialize a `StateData` into the STATETX binary block.
-/// Returns an empty `Vec` if not needed (n_voters==0 and no transitions).
 /// All SMT chains are serialized with their own n_levels (inferred from the first entry's siblings).
 pub fn write_state_block(sd: &StateData) -> Result<Vec<u8>> {
+    if sd.refresh_chain.len() > MAX_REFRESH {
+        bail!(
+            "refresh_chain has {} entries, max {}",
+            sd.refresh_chain.len(),
+            MAX_REFRESH
+        );
+    }
+    if let Some(bp) = &sd.ballot_proof_data {
+        if bp.refreshed_ballots.len() != sd.refresh_chain.len() {
+            bail!(
+                "refreshed_ballots has {} entries, refresh_chain has {}",
+                bp.refreshed_ballots.len(),
+                sd.refresh_chain.len()
+            );
+        }
+        for (i, rb) in bp.refreshed_ballots.iter().enumerate() {
+            if rb.len() != BALLOT_FIELDS {
+                bail!(
+                    "refreshed_ballots[{}] must have {} elements, got {}",
+                    i, BALLOT_FIELDS, rb.len()
+                );
+            }
+        }
+    }
+
     let mut buf = Vec::new();
     buf.extend_from_slice(&STATE_MAGIC.to_le_bytes());
     buf.extend_from_slice(&sd.n_voters.to_le_bytes());
     buf.extend_from_slice(&sd.n_overwritten.to_le_bytes());
+    buf.extend_from_slice(&sd.occupied_before.to_le_bytes());
     write_u64_slice(&mut buf, &sd.process_id);
     write_u64_slice(&mut buf, &sd.old_state_root);
     write_u64_slice(&mut buf, &sd.new_state_root);
@@ -125,6 +177,9 @@ pub fn write_state_block(sd: &StateData) -> Result<Vec<u8>> {
 
     // Ballot chain
     write_smt_chain(&mut buf, &sd.ballot_chain)?;
+
+    // Silent-refresh chain (empty = count 0, n_levels 0)
+    write_smt_chain(&mut buf, &sd.refresh_chain)?;
 
     // Net Results transition (0 or 1)
     write_optional_smt(&mut buf, sd.results.as_ref())?;
@@ -149,8 +204,7 @@ pub fn write_state_block(sd: &StateData) -> Result<Vec<u8>> {
     }
 
     // Ballot proof data (result accumulator): has_ballot_data flag + optional data.
-    // This must always be present so the circuit parser can distinguish the end
-    // of the STATETX block from the next block's magic.
+    // Always present so the circuit parser can find the end of the STATETX block.
     if let Some(bp) = &sd.ballot_proof_data {
         buf.extend_from_slice(&1u64.to_le_bytes()); // has_ballot_data = true
 
@@ -191,6 +245,13 @@ pub fn write_state_block(sd: &StateData) -> Result<Vec<u8>> {
                 );
             }
             for fr in ob {
+                write_u64_slice(&mut buf, fr);
+            }
+        }
+
+        buf.extend_from_slice(&(bp.refreshed_ballots.len() as u64).to_le_bytes());
+        for rb in &bp.refreshed_ballots {
+            for fr in rb {
                 write_u64_slice(&mut buf, fr);
             }
         }
@@ -860,34 +921,34 @@ pub fn write_reenc_block(
     Ok(buf)
 }
 
-/// KZG blob barycentric evaluation data for binary encoding.
+/// KZG commitment data for binary encoding.
 pub struct KzgData {
     /// Process identifier as 4×u64 LE FrRaw (converted from big-endian).
     pub process_id: [u64; 4],
     /// State root before the batch as 4×u64 LE FrRaw.
     pub root_hash_before: [u64; 4],
-    /// 48-byte compressed BLS12-381 G1 commitment (big-endian).
-    pub commitment: [u8; 48],
-    /// 32-byte big-endian BLS12-381 Fr claimed evaluation Y = P(Z).
-    pub y_claimed: [u8; 32],
-    /// Full EIP-4844 blob: 4096 × 32-byte big-endian cells (131072 bytes total).
-    pub blob: Vec<u8>,
+    /// One to MAX_BLOBS compressed BLS12-381 G1 commitments (48 raw bytes each, big-endian).
+    pub commitments: Vec<[u8; 48]>,
 }
 
-/// Encode the KZG blob barycentric evaluation block.
-/// Block format (binary, appended after the last optional block):
-///   "KZGBLK!!" (8 bytes LE magic)
-///   process_id      (32 bytes: 4×u64 LE words)
-///   root_hash_before (32 bytes: 4×u64 LE words)
-///   commitment      (48 raw bytes, big-endian compressed G1)
-///   y_claimed       (32 raw bytes, big-endian BLS12-381 Fr)
-///   blob            (131072 bytes = 4096 × 32-byte big-endian cells)
+/// Encode the KZGBLK!! binary block.
+///
+/// Wire layout (all integers u64 LE, Fr = 4×u64 LE):
+/// ```text
+/// "KZGBLK!!" (u64 LE magic)
+/// process_id       (32 bytes: 4×u64 LE)
+/// root_hash_before (32 bytes: 4×u64 LE)
+/// n_blobs          (u64 LE; must be 1..=MAX_BLOBS)
+/// n_blobs × commitment (48 raw bytes each, big-endian compressed G1)
+/// ```
+/// Total size: 8 + 32 + 32 + 8 + 48·n bytes.
 pub fn write_kzg_block(d: &KzgData) -> Result<Vec<u8>> {
-    if d.blob.len() != 4096 * 32 {
-        bail!("blob must be exactly 131072 bytes, got {}", d.blob.len());
+    let n = d.commitments.len();
+    if n == 0 || n > MAX_BLOBS {
+        bail!("commitments count {} is outside 1..={}", n, MAX_BLOBS);
     }
     let magic: u64 = u64::from_le_bytes(*b"KZGBLK!!");
-    let mut buf = Vec::with_capacity(8 + 32 + 32 + 48 + 32 + 4096 * 32);
+    let mut buf = Vec::with_capacity(8 + 32 + 32 + 8 + 48 * n);
     buf.extend_from_slice(&magic.to_le_bytes());
     for w in &d.process_id {
         buf.extend_from_slice(&w.to_le_bytes());
@@ -895,9 +956,10 @@ pub fn write_kzg_block(d: &KzgData) -> Result<Vec<u8>> {
     for w in &d.root_hash_before {
         buf.extend_from_slice(&w.to_le_bytes());
     }
-    buf.extend_from_slice(&d.commitment);
-    buf.extend_from_slice(&d.y_claimed);
-    buf.extend_from_slice(&d.blob);
+    buf.extend_from_slice(&(n as u64).to_le_bytes());
+    for c in &d.commitments {
+        buf.extend_from_slice(c);
+    }
     Ok(buf)
 }
 
@@ -995,4 +1057,159 @@ pub fn address_hex_to_fr_le(s: &str) -> Result<[u64; 4]> {
         u64::from_be_bytes(padded[8..16].try_into().unwrap()),
         u64::from_be_bytes(padded[0..8].try_into().unwrap()),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn zero_smt_entry(n_siblings: usize) -> SmtEntry {
+        SmtEntry {
+            old_root: [0; 4],
+            new_root: [0; 4],
+            old_key: [0; 4],
+            old_value: [0; 4],
+            is_old0: false,
+            new_key: [0; 4],
+            new_value: [0; 4],
+            fnc0: false,
+            fnc1: false,
+            siblings: vec![[0; 4]; n_siblings],
+        }
+    }
+
+    // Byte-offset constants for the minimal StateData used in
+    // test_state_block_refresh_offsets (empty vote_id + ballot chains,
+    // 1 refresh entry with 0 siblings, no results, no process proofs,
+    // ballot_proof_data present with 0 voter/overwritten ballots):
+    //
+    //   8  magic
+    //   8  n_voters          (offset 8)
+    //   8  n_overwritten     (offset 16)
+    //   8  occupied_before   (offset 24)  ← OFF_OCCUPIED_BEFORE
+    //   32 process_id        (offset 32)
+    //   32 old_state_root    (offset 64)
+    //   32 new_state_root    (offset 96)
+    //   16 vote_id chain (count=0 + n_levels=0)       (offset 128)
+    //   16 ballot chain  (count=0 + n_levels=0)       (offset 144)
+    //   ↑ refresh chain count at offset 160           ← OFF_REFRESH_COUNT
+    //    8 count=1 + 8 n_levels=0 + 216 entry body    → ends at 392
+    //   16 results (has=0 + n_levels=0)               (offset 392)
+    //    8 process n=0                                 (offset 408)
+    //    8 has_ballot_data=1                           (offset 416)
+    // 2048 old_results (64 × 32 B)                    (offset 424)
+    //    8 n_vb=0                                      (offset 2472)
+    //    8 n_ob=0                                      (offset 2480)
+    //    ↑ n_rb at offset 2488                        ← OFF_N_RB
+    const OFF_OCCUPIED_BEFORE: usize = 24;
+    const OFF_REFRESH_COUNT: usize = 160;
+    const OFF_N_RB: usize = 2488;
+
+    #[test]
+    fn test_state_block_refresh_offsets() {
+        let old_results = vec![[0u64; 4]; BALLOT_FIELDS];
+        let refreshed_ballot = vec![[1u64; 4]; BALLOT_FIELDS];
+        let sd = StateData {
+            n_voters: 1,
+            n_overwritten: 0,
+            occupied_before: 5,
+            process_id: [0; 4],
+            old_state_root: [0; 4],
+            new_state_root: [0; 4],
+            vote_id_chain: vec![],
+            ballot_chain: vec![],
+            refresh_chain: vec![zero_smt_entry(0)],
+            results: None,
+            process_proofs: vec![],
+            ballot_proof_data: Some(BallotProofData {
+                old_results,
+                voter_ballots: vec![],
+                overwritten_ballots: vec![],
+                refreshed_ballots: vec![refreshed_ballot],
+            }),
+        };
+
+        let bytes = write_state_block(&sd).expect("write_state_block failed");
+
+        let ob = u64::from_le_bytes(bytes[OFF_OCCUPIED_BEFORE..OFF_OCCUPIED_BEFORE + 8].try_into().unwrap());
+        assert_eq!(ob, 5, "occupied_before mismatch");
+
+        let rc = u64::from_le_bytes(bytes[OFF_REFRESH_COUNT..OFF_REFRESH_COUNT + 8].try_into().unwrap());
+        assert_eq!(rc, 1, "refresh_chain count mismatch");
+
+        let n_rb = u64::from_le_bytes(bytes[OFF_N_RB..OFF_N_RB + 8].try_into().unwrap());
+        assert_eq!(n_rb, 1, "n_rb mismatch");
+    }
+
+    #[test]
+    fn test_state_block_max_refresh_rejected() {
+        let sd = StateData {
+            refresh_chain: vec![zero_smt_entry(0); MAX_REFRESH + 1],
+            ..Default::default()
+        };
+        assert!(write_state_block(&sd).is_err());
+    }
+
+    #[test]
+    fn test_state_block_refreshed_count_mismatch_rejected() {
+        let old_results = vec![[0u64; 4]; BALLOT_FIELDS];
+        let sd = StateData {
+            refresh_chain: vec![zero_smt_entry(0)],
+            ballot_proof_data: Some(BallotProofData {
+                old_results,
+                voter_ballots: vec![],
+                overwritten_ballots: vec![],
+                refreshed_ballots: vec![], // 0 ≠ 1 refresh entry
+            }),
+            ..Default::default()
+        };
+        assert!(write_state_block(&sd).is_err());
+    }
+
+    // Byte layout for KZGBLK!!:
+    //   0..8   magic
+    //   8..40  process_id (4×u64 LE)
+    //  40..72  root_hash_before (4×u64 LE)
+    //  72..80  n_blobs (u64 LE)         ← OFF_N_BLOBS
+    //  80..    n_blobs × 48 bytes
+    const OFF_N_BLOBS: usize = 72;
+
+    #[test]
+    fn test_kzg_block_layout() {
+        for n in [1usize, 3, MAX_BLOBS] {
+            let d = KzgData {
+                process_id: [1, 2, 3, 4],
+                root_hash_before: [5, 6, 7, 8],
+                commitments: vec![[0xabu8; 48]; n],
+            };
+            let buf = write_kzg_block(&d).expect("write_kzg_block failed");
+
+            // Total length: 8 + 32 + 32 + 8 + 48·n
+            assert_eq!(buf.len(), 8 + 32 + 32 + 8 + 48 * n, "byte length for n={}", n);
+
+            // n_blobs field at OFF_N_BLOBS
+            let n_blobs = u64::from_le_bytes(buf[OFF_N_BLOBS..OFF_N_BLOBS + 8].try_into().unwrap());
+            assert_eq!(n_blobs, n as u64, "n_blobs for n={}", n);
+        }
+    }
+
+    #[test]
+    fn test_kzg_block_zero_commitments_rejected() {
+        let d = KzgData {
+            process_id: [0; 4],
+            root_hash_before: [0; 4],
+            commitments: vec![],
+        };
+        assert!(write_kzg_block(&d).is_err());
+    }
+
+    #[test]
+    fn test_kzg_block_too_many_commitments_rejected() {
+        let d = KzgData {
+            process_id: [0; 4],
+            root_hash_before: [0; 4],
+            commitments: vec![[0u8; 48]; MAX_BLOBS + 1],
+        };
+        assert!(write_kzg_block(&d).is_err());
+    }
 }

@@ -43,7 +43,15 @@ pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
             *fail_mask |= FAIL_CONSISTENCY;
             return false;
         }
-        let vid_key = state.vote_id_chain[i].new_key[0];
+        let vid_entry = &state.vote_id_chain[i];
+        let vid_key = vid_entry.new_key[0];
+
+        // The key is a u64: upper limbs must be zero, or the leaf lands at a
+        // key the DA blob (which carries limb 0 only) cannot describe.
+        if vid_entry.new_key[1] != 0 || vid_entry.new_key[2] != 0 || vid_entry.new_key[3] != 0 {
+            *fail_mask |= FAIL_CONSISTENCY;
+            ok = false;
+        }
 
         // Namespace check: key must be in [VoteIDMin, u64::MAX].
         // The entire high-bit range [0x8000_0000_0000_0000, 0xFFFF_FFFF_FFFF_FFFF]
@@ -78,7 +86,14 @@ pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
                 *fail_mask |= FAIL_BALLOT_NS;
                 return false;
             }
-            let ballot_key = state.ballot_chain[i].new_key[0];
+            let ballot_entry = &state.ballot_chain[i];
+            let ballot_key = ballot_entry.new_key[0];
+
+            // Same reason as the vote-id keys: the slot key is a u64.
+            if ballot_entry.new_key[1] != 0 || ballot_entry.new_key[2] != 0 || ballot_entry.new_key[3] != 0 {
+                *fail_mask |= FAIL_BALLOT_NS;
+                ok = false;
+            }
 
             // Namespace check: key must be in [BallotMin, BallotMax].
             if ballot_key < BALLOT_MIN || ballot_key > BALLOT_MAX {

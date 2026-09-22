@@ -25,10 +25,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	arbo "github.com/vocdoni/arbo"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/circuits/ballotproof"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/blobs"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/types"
 )
 
 // Fail-mask bit constants => must match circuit/src/types.rs.
@@ -49,6 +48,7 @@ const (
 	failResultAccum = uint32(1 << 20) // net Results accumulator leaf mismatch
 	failLeafHash    = uint32(1 << 21) // ballot SMT leaf hash mismatch
 	failBinding     = uint32(1 << 22) // cross-block binding mismatch
+	failRefresh     = uint32(1 << 24) // silent-refresh chain: count, keys, chain or re-randomization
 	failParse       = uint32(1 << 31) // input malformed / truncated / trailing bytes
 
 	// failSMTAny covers any SMT-related failure (bits 10–13).
@@ -72,6 +72,15 @@ type cheatElectionInput struct {
 	kzgBlock []byte
 	// oldRoot is the state root BEFORE the state transition (for KZG Z derivation).
 	oldRoot string
+	// preBatchResults is the accumulator BEFORE this batch's Results transition
+	// (only populated by buildCheatInputTwoBatches; nil in the single-batch helper).
+	// Together with batchReencBallots / batchOverwrittenBallots it lets a test
+	// recompute the "no-refresh-delta" Results leaf without touching the tree.
+	preBatchResults frAccumBallot
+	// batchReencBallots is this batch's re-encrypted ballots.
+	batchReencBallots []wideBallot
+	// batchOverwrittenBallots is this batch's overwritten (old) ballots.
+	batchOverwrittenBallots []wideBallot
 }
 
 // fullInput concatenates all blocks into a single binary.
@@ -152,12 +161,6 @@ func buildCheatInput(t *testing.T) (*cheatElectionInput, *Election, []*BallotRes
 	// Save oldRoot before BuildStateBlock advances it.
 	oldRoot := election.OldRoot
 
-	// Build KZG block (needs oldRoot before state update).
-	kzgBlock, err := election.BuildKZGBlock(0, oldRoot)
-	if err != nil {
-		t.Fatalf("BuildKZGBlock: %v", err)
-	}
-
 	// Build re-encryption block before the state block so that re-encrypted
 	// ballots are available for net Results accumulation.
 	reencData, reencBallots, err := election.BuildReencBlock(oldRoot, batch.Results)
@@ -165,10 +168,18 @@ func buildCheatInput(t *testing.T) (*cheatElectionInput, *Election, []*BallotRes
 		t.Fatalf("BuildReencBlock: %v", err)
 	}
 
-	// Build state block (advances election.OldRoot, accumulates net Results).
+	// Build state block (advances election.OldRoot, accumulates net Results,
+	// stashes DA cells for BuildKZGBlock).
 	stateData, _, err := election.BuildStateBlock(election.Voters, batch.Results, reencBallots)
 	if err != nil {
 		t.Fatalf("BuildStateBlock: %v", err)
+	}
+
+	// Build KZG block AFTER the state block so it can rebuild the same DA
+	// cells the guest constructs from verified state.
+	kzgBlock, _, err := election.BuildKZGBlock(oldRoot)
+	if err != nil {
+		t.Fatalf("BuildKZGBlock: %v", err)
 	}
 	stateBlockBytes, err := davinci.EncodeStateBlock(stateData)
 	if err != nil {
@@ -207,7 +218,9 @@ func buildCheatInput(t *testing.T) (*cheatElectionInput, *Election, []*BallotRes
 	}, election, batch.Results
 }
 
-// encodeKZGRequest converts a *davinci.KZGRequest (service format) to circuit binary.
+// encodeKZGRequest converts a *davinci.KZGRequest (service format) to the
+// KZGBLK binary block the guest parses (magic + pid + rhb + n_blobs +
+// n × 48-byte commitments).
 func encodeKZGRequest(req *davinci.KZGRequest) ([]byte, error) {
 	if req == nil {
 		return nil, nil
@@ -220,33 +233,21 @@ func encodeKZGRequest(req *davinci.KZGRequest) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rootHashBefore: %w", err)
 	}
-	commBytes, err := hex.DecodeString(trimHex(req.Commitment))
-	if err != nil {
-		return nil, fmt.Errorf("commitment: %w", err)
+	commitments := make([][48]byte, len(req.Commitments))
+	for i, c := range req.Commitments {
+		cb, err := hex.DecodeString(trimHex(c))
+		if err != nil {
+			return nil, fmt.Errorf("commitment[%d]: %w", i, err)
+		}
+		if len(cb) != 48 {
+			return nil, fmt.Errorf("commitment[%d]: expected 48 bytes, got %d", i, len(cb))
+		}
+		copy(commitments[i][:], cb)
 	}
-	blobBytes, err := hex.DecodeString(trimHex(req.Blob))
-	if err != nil {
-		return nil, fmt.Errorf("blob: %w", err)
-	}
-	yBytes, err := hex.DecodeString(trimHex(req.YClaimed))
-	if err != nil {
-		return nil, fmt.Errorf("yClaimed: %w", err)
-	}
-
-	var comm48 [48]byte
-	copy(comm48[:], commBytes)
-	var yClaimed [32]byte
-	copy(yClaimed[:], yBytes)
-
-	blob := new(types.Blob)
-	copy(blob[:], blobBytes)
-
 	return davinci.EncodeKZGBlock(&davinci.KZGEvalData{
 		ProcessID:      processIDBytes,
 		RootHashBefore: rootBytes,
-		Commitment:     comm48,
-		YClaimed:       yClaimed,
-		Blob:           blob[:],
+		Commitments:    commitments,
 	})
 }
 
@@ -329,44 +330,73 @@ func TestCheatSanity(t *testing.T) {
 	assertCircuitValid(t, base.fullInput(), "sanity")
 }
 
-// TestCheatWrongKZG verifies that a tampered KZG Y value causes FAIL_KZG.
-func TestCheatWrongKZG(t *testing.T) {
+// TestCheatWrongKZGCommitment observes that flipping a byte in a host
+// commitment changes the guest-emitted blobs digest. The guest cannot detect
+// a mismatched commitment (the on-chain point-evaluation precompile does that
+// via z = H(pid || root || commitment); a different commitment shifts z, and
+// y = P_cells(z) shifts with it), so overall_ok stays 1 — but the digest that
+// binds (commitment, y) pairs must diverge from the honest baseline. If it
+// does not, the digest is not covering the commitment and the on-chain check
+// is spoofable.
+func TestCheatWrongKZGCommitment(t *testing.T) {
 	base, election, _ := buildCheatInput(t)
-
-	// Build a KZG block with a wrong Y value (all-0xff).
-	var wrongY [32]byte
-	for i := range wrongY {
-		wrongY[i] = 0xff
-	}
-
-	// Recreate a valid blob for the same commitment.
-	var blob types.Blob
-	big.NewInt(99).FillBytes(blob[0:32])
-	commitment, err := blob.ComputeCommitment()
+	honest, err := runZiskEmu(base.fullInput())
 	if err != nil {
-		t.Fatalf("ComputeCommitment: %v", err)
+		t.Fatalf("honest ziskemu: %v", err)
 	}
-	comm48 := [48]byte(commitment)
+	if honest[davinci.OutputOverallOk] != 1 {
+		t.Fatalf("honest input rejected: fail_mask=0x%08x", honest[davinci.OutputFailMask])
+	}
 
-	// Use the election's correct processID (BE hex) and the OLD root (before
-	// state transition) so only FAIL_KZG is triggered (not FAIL_BINDING).
-	pidBE, _ := hex.DecodeString(trimHex(election.ProcessIDHex()))
-	rootBE, _ := hex.DecodeString(trimHex(arboHexToBEHex(base.oldRoot)))
+	// Rebuild the KZG block with the first commitment tampered.
+	pidHex := election.ProcessIDHex()
+	rootBEHex := arboHexToBEHex(base.oldRoot)
+	pidBE, _ := hex.DecodeString(trimHex(pidHex))
+	rootBE, _ := hex.DecodeString(trimHex(rootBEHex))
 
-	wrongKZG, err := davinci.EncodeKZGBlock(&davinci.KZGEvalData{
+	_, tb, err := election.BuildKZGBlock(base.oldRoot)
+	if err != nil {
+		t.Fatalf("BuildKZGBlock: %v", err)
+	}
+	if len(tb.Commitments) == 0 {
+		t.Fatal("expected at least one commitment")
+	}
+	tampered := make([][48]byte, len(tb.Commitments))
+	for i, c := range tb.Commitments {
+		tampered[i] = [48]byte(c)
+	}
+	tampered[0][0] ^= 0x01
+
+	badKZG, err := davinci.EncodeKZGBlock(&davinci.KZGEvalData{
 		ProcessID:      pidBE,
 		RootHashBefore: rootBE,
-		Commitment:     comm48,
-		YClaimed:       wrongY,
-		Blob:           blob[:],
+		Commitments:    tampered,
 	})
 	if err != nil {
 		t.Fatalf("EncodeKZGBlock: %v", err)
 	}
 
-	tampered := append(append(append(base.baseBin, base.stateBlock...), base.censusBlock...), base.reencBlock...)
-	tampered = append(tampered, wrongKZG...)
-	assertCircuitFails(t, tampered, failKZG, "wrong_kzg_y")
+	var full []byte
+	full = append(full, base.baseBin...)
+	full = append(full, base.stateBlock...)
+	full = append(full, base.censusBlock...)
+	full = append(full, base.reencBlock...)
+	full = append(full, badKZG...)
+
+	got, err := runZiskEmu(full)
+	if err != nil {
+		t.Fatalf("tampered ziskemu: %v", err)
+	}
+	same := true
+	for i := 0; i < 8; i++ {
+		if got[davinci.OutputBlobsDigest+i] != honest[davinci.OutputBlobsDigest+i] {
+			same = false
+			break
+		}
+	}
+	if same {
+		t.Errorf("blobs digest unchanged after flipping a commitment byte — digest does not bind the commitment")
+	}
 }
 
 // TestCheatWrongCensusRoot verifies that a wrong census root causes FAIL_CENSUS.
@@ -548,82 +578,6 @@ func TestCheatMismatchedVoteID(t *testing.T) {
 	tampered = append(tampered, base.reencBlock...)
 	tampered = append(tampered, base.kzgBlock...)
 	assertCircuitFails(t, tampered, failConsistency|failSMTAny, "mismatched_vote_id")
-}
-
-// TestCheatValidKZGRoundTrip verifies the KZG evaluation against multiple blob types
-// to ensure the KZG encoding is correct. The processID and rootHashBefore must match
-// the STATETX block values so the cross-block binding check passes.
-func TestCheatValidKZGRoundTrip(t *testing.T) {
-	tests := []struct {
-		name string
-		blob func() *types.Blob
-	}{
-		{
-			name: "sparse_blob",
-			blob: func() *types.Blob {
-				var b types.Blob
-				big.NewInt(42).FillBytes(b[0:32])
-				big.NewInt(100).FillBytes(b[32:64])
-				return &b
-			},
-		},
-		{
-			name: "full_blob",
-			blob: func() *types.Blob {
-				b, _ := blobs.GetBlobData1()
-				return b
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			blob := tc.blob()
-			if blob == nil {
-				t.Skip("blob data not available")
-			}
-			base, election, _ := buildCheatInput(t)
-
-			commitment, err := blob.ComputeCommitment()
-			if err != nil {
-				t.Fatalf("ComputeCommitment: %v", err)
-			}
-			comm48 := [48]byte(commitment)
-
-			// Use the election's actual processID (BE) and the OLD root
-			// (before state transition) so the circuit's cross-block binding
-			// check passes. election.OldRoot was advanced by BuildStateBlock,
-			// so we use base.oldRoot which was saved before the transition.
-			pidHex := election.ProcessIDHex()
-			rootBEHex := arboHexToBEHex(base.oldRoot)
-
-			z := deriveKZGZ(pidHex, rootBEHex, comm48)
-
-			y, err := blobs.EvaluateBarycentricNative(blob, z, false)
-			if err != nil {
-				t.Fatalf("EvaluateBarycentricNative: %v", err)
-			}
-			var yClaimed [32]byte
-			y.FillBytes(yClaimed[:])
-
-			processIDBytes, _ := hex.DecodeString(trimHex(pidHex))
-			rootBytes, _ := hex.DecodeString(trimHex(rootBEHex))
-
-			kzgBlock, err := davinci.EncodeKZGBlock(&davinci.KZGEvalData{
-				ProcessID:      processIDBytes,
-				RootHashBefore: rootBytes,
-				Commitment:     comm48,
-				YClaimed:       yClaimed,
-				Blob:           blob[:],
-			})
-			if err != nil {
-				t.Fatalf("EncodeKZGBlock: %v", err)
-			}
-
-			input := append(append(append(append(base.baseBin, base.stateBlock...), base.censusBlock...), base.reencBlock...), kzgBlock...)
-			assertCircuitValid(t, input, tc.name)
-		})
-	}
 }
 
 // TestCheatDoubleVote simulates a replay/double-vote: the second voter's
@@ -808,10 +762,10 @@ func TestCheatMissingStateBlock(t *testing.T) {
 	assertCircuitFails(t, full, failMissing, "missing-state-block")
 }
 
-// TestCheatMissingKZGBlock omits the KZG block. This is accepted by design
-// (chained mode has no DA blob), but the blob-commitment limbs in the publics
-// must then be all-zero so an Ethereum-mode consumer comparing them against
-// the blob's versioned hash can never be satisfied by an omitted blob.
+// TestCheatMissingKZGBlock omits the KZG block. Chained mode has no DA blob,
+// so the guest accepts it, but the blobs-digest publics (8 × u32) must be all
+// zero and NBlobs must be 0 so an Ethereum-mode consumer can never satisfy the
+// on-chain digest check against an omitted blob.
 func TestCheatMissingKZGBlock(t *testing.T) {
 	base, _, _ := buildCheatInput(t)
 	var full []byte
@@ -827,11 +781,14 @@ func TestCheatMissingKZGBlock(t *testing.T) {
 		t.Fatalf("expected overall_ok=1 without KZG block, got %d; fail_mask=0x%08x",
 			outputs[davinci.OutputOverallOk], outputs[davinci.OutputFailMask])
 	}
-	for i := 0; i < 12; i++ {
-		if outputs[davinci.OutputBlobCommitment+i] != 0 {
-			t.Errorf("blob commitment limb %d nonzero (0x%08x) with KZG block absent",
-				i, outputs[davinci.OutputBlobCommitment+i])
+	for i := 0; i < 8; i++ {
+		if outputs[davinci.OutputBlobsDigest+i] != 0 {
+			t.Errorf("blobs_digest word %d nonzero (0x%08x) with KZG block absent",
+				i, outputs[davinci.OutputBlobsDigest+i])
 		}
+	}
+	if outputs[davinci.OutputNBlobs] != 0 {
+		t.Errorf("n_blobs = %d, want 0 with KZG block absent", outputs[davinci.OutputNBlobs])
 	}
 }
 
@@ -843,4 +800,365 @@ func TestCheatOversizedNproofs(t *testing.T) {
 	full := base.fullInput()
 	binary.LittleEndian.PutUint64(full[16:], 129)
 	assertCircuitFails(t, full, failParse, "oversized-nproofs")
+}
+
+// buildCheatInputTwoBatches builds a self-contained circuit input for BATCH 2
+// of a 4-voter election. Batch 1 (voters 0, 1) is simulated to advance the
+// state tree; batch 2 (voters 2, 3) is what ziskemu proves. With
+// occupied_before = 2, w = 0 and RefreshTarget(2,0,2) capped at
+// occupied_before-w=2, batch 2 carries exactly two silent-refresh entries for
+// voters 0 and 1. The returned struct populates preBatchResults /
+// batchReencBallots / batchOverwrittenBallots so tests can recompute Results
+// leaves that skip the refresh deltas.
+func buildCheatInputTwoBatches(t *testing.T) (*cheatElectionInput, *Election, []*BallotResult) {
+	t.Helper()
+
+	election, err := NewElection(4)
+	if err != nil {
+		t.Fatalf("NewElection: %v", err)
+	}
+
+	// Batch 1: voters 0, 1 (occupied_before=0 → target=0, no refresh).
+	batch1Voters := election.Voters[:2]
+	batch1, err := GenerateBallotBatch(election.ProcessID, election.EncKey, batch1Voters, 41)
+	if err != nil {
+		t.Fatalf("GenerateBallotBatch (batch 1): %v", err)
+	}
+	oldRoot1 := election.OldRoot
+	_, reenc1, err := election.BuildReencBlock(oldRoot1, batch1.Results)
+	if err != nil {
+		t.Fatalf("BuildReencBlock (batch 1): %v", err)
+	}
+	if _, _, err := election.BuildStateBlock(batch1Voters, batch1.Results, reenc1); err != nil {
+		t.Fatalf("BuildStateBlock (batch 1): %v", err)
+	}
+
+	// Batch 2: voters 2, 3.
+	batch2Voters := election.Voters[2:4]
+	batch2, err := GenerateBallotBatch(election.ProcessID, election.EncKey, batch2Voters, 42)
+	if err != nil {
+		t.Fatalf("GenerateBallotBatch (batch 2): %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "verification_key.json"), ballotproof.CircomVerificationKey, 0600); err != nil {
+		t.Fatalf("write vk: %v", err)
+	}
+	for i, res := range batch2.Results {
+		idx := i + 1
+		if err := os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("proof_%d.json", idx)), res.ProofJSON, 0600); err != nil {
+			t.Fatalf("write proof_%d: %v", idx, err)
+		}
+		pubBytes, err := json.Marshal(res.PublicInputs)
+		if err != nil {
+			t.Fatalf("marshal public_%d: %v", idx, err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("public_%d.json", idx)), pubBytes, 0600); err != nil {
+			t.Fatalf("write public_%d: %v", idx, err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("sig_%d.json", idx)), res.SigJSON, 0600); err != nil {
+			t.Fatalf("write sig_%d: %v", idx, err)
+		}
+	}
+	genInputBin := findGenInputBin(t)
+	outBin := filepath.Join(tmpDir, "input.bin")
+	cmd := exec.Command(genInputBin, "--proofs-dir", tmpDir, "--output", outBin, "--nproofs", "2")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("gen-input: %v\n%s", err, out)
+	}
+	baseBin, err := os.ReadFile(outBin)
+	if err != nil {
+		t.Fatalf("read base bin: %v", err)
+	}
+
+	oldRoot2 := election.OldRoot
+	reencData, reencBallots, err := election.BuildReencBlock(oldRoot2, batch2.Results)
+	if err != nil {
+		t.Fatalf("BuildReencBlock (batch 2): %v", err)
+	}
+
+	// Snapshot pre-batch-2 accumulator BEFORE BuildStateBlock mutates it.
+	preBatchResults := election.Results
+
+	stateData, overwrittenBallots, err := election.BuildStateBlock(batch2Voters, batch2.Results, reencBallots)
+	if err != nil {
+		t.Fatalf("BuildStateBlock (batch 2): %v", err)
+	}
+
+	// KZG block last: reads DA cells stashed by BuildStateBlock.
+	kzgBlock, _, err := election.BuildKZGBlock(oldRoot2)
+	if err != nil {
+		t.Fatalf("BuildKZGBlock (batch 2): %v", err)
+	}
+	if len(stateData.RefreshSmt) != 2 {
+		t.Fatalf("expected 2 refresh entries for batch 2, got %d", len(stateData.RefreshSmt))
+	}
+	stateBlockBytes, err := davinci.EncodeStateBlock(stateData)
+	if err != nil {
+		t.Fatalf("EncodeStateBlock: %v", err)
+	}
+
+	censusProofs, err := election.BuildCensusProofs(batch2Voters)
+	if err != nil {
+		t.Fatalf("BuildCensusProofs: %v", err)
+	}
+	censusBlockBytes, err := davinci.EncodeCensusBlock(censusProofs)
+	if err != nil {
+		t.Fatalf("EncodeCensusBlock: %v", err)
+	}
+	reencBlockBytes, err := davinci.EncodeReencBlock(reencData)
+	if err != nil {
+		t.Fatalf("EncodeReencBlock: %v", err)
+	}
+	kzgBlockBytes, err := encodeKZGRequest(kzgBlock)
+	if err != nil {
+		t.Fatalf("EncodeKZGBlock: %v", err)
+	}
+
+	return &cheatElectionInput{
+		baseBin:                 baseBin,
+		stateData:               stateData,
+		stateBlock:              stateBlockBytes,
+		censusBlock:             censusBlockBytes,
+		reencBlock:              reencBlockBytes,
+		kzgBlock:                kzgBlockBytes,
+		oldRoot:                 oldRoot2,
+		preBatchResults:         preBatchResults,
+		batchReencBallots:       reencBallots,
+		batchOverwrittenBallots: overwrittenBallots,
+	}, election, batch2.Results
+}
+
+// reencodeState re-encodes base.stateData and reassembles the full circuit
+// input. Small convenience so refresh tests don't repeat the concat dance.
+func (c *cheatElectionInput) reencodeState(t *testing.T) []byte {
+	t.Helper()
+	sb, err := davinci.EncodeStateBlock(c.stateData)
+	if err != nil {
+		t.Fatalf("EncodeStateBlock: %v", err)
+	}
+	var out []byte
+	out = append(out, c.baseBin...)
+	out = append(out, sb...)
+	out = append(out, c.censusBlock...)
+	out = append(out, c.reencBlock...)
+	out = append(out, c.kzgBlock...)
+	return out
+}
+
+// TestCheatRefreshSanity: the two-batch fixture must be accepted, with
+// OccupiedBefore echoed in register 42 as the true pre-batch count (2).
+func TestCheatRefreshSanity(t *testing.T) {
+	base, _, _ := buildCheatInputTwoBatches(t)
+	outputs, err := runZiskEmu(base.fullInput())
+	if err != nil {
+		t.Fatalf("ziskemu failed: %v", err)
+	}
+	if outputs[davinci.OutputOverallOk] != 1 {
+		t.Fatalf("expected overall_ok=1, got %d; fail_mask=0x%08x",
+			outputs[davinci.OutputOverallOk], outputs[davinci.OutputFailMask])
+	}
+	if got := outputs[davinci.OutputOccupiedBefore]; got != 2 {
+		t.Errorf("expected occupied_before register (%d) = 2, got %d",
+			davinci.OutputOccupiedBefore, got)
+	}
+}
+
+// TestCheatRefreshTooFew drops one refresh entry and its OLD ballot so
+// n_refreshed < RefreshTarget(2,0,2)=2. The guest must reject with FAIL_REFRESH.
+func TestCheatRefreshTooFew(t *testing.T) {
+	base, _, _ := buildCheatInputTwoBatches(t)
+	base.stateData.RefreshSmt = base.stateData.RefreshSmt[:1]
+	base.stateData.BallotProofs.RefreshedBallots = base.stateData.BallotProofs.RefreshedBallots[:1]
+	assertCircuitFails(t, base.reencodeState(t), failRefresh, "refresh_too_few")
+}
+
+// TestCheatRefreshOccupiedLie exercises the sequencer lying about
+// OccupiedBefore. The guest computes target = RefreshTarget(n,w,claimed) and
+// only enforces n_refreshed >= target, so claiming a lower value is a valid
+// (but suspicious) transition — the consumer (fold guest / contract) is what
+// must pin this value against its own view of running votes − overwrites.
+func TestCheatRefreshOccupiedLie(t *testing.T) {
+	t.Run("occupied_zero", func(t *testing.T) {
+		base, _, _ := buildCheatInputTwoBatches(t)
+		base.stateData.OccupiedBefore = 0 // target=0, we ship 2 refreshes: accepted
+		outputs, err := runZiskEmu(base.reencodeState(t))
+		if err != nil {
+			t.Fatalf("ziskemu failed: %v", err)
+		}
+		if outputs[davinci.OutputOverallOk] != 1 {
+			t.Fatalf("expected overall_ok=1 (extra refreshes are ok), got %d; fail_mask=0x%08x",
+				outputs[davinci.OutputOverallOk], outputs[davinci.OutputFailMask])
+		}
+		if got := outputs[davinci.OutputOccupiedBefore]; got != 0 {
+			t.Errorf("expected occupied_before register = 0 (echoes the lie), got %d", got)
+		}
+	})
+	t.Run("occupied_one", func(t *testing.T) {
+		base, _, _ := buildCheatInputTwoBatches(t)
+		base.stateData.OccupiedBefore = 1 // target=1, we ship 2 refreshes: accepted
+		outputs, err := runZiskEmu(base.reencodeState(t))
+		if err != nil {
+			t.Fatalf("ziskemu failed: %v", err)
+		}
+		if outputs[davinci.OutputOverallOk] != 1 {
+			t.Fatalf("expected overall_ok=1, got %d; fail_mask=0x%08x",
+				outputs[davinci.OutputOverallOk], outputs[davinci.OutputFailMask])
+		}
+		if got := outputs[davinci.OutputOccupiedBefore]; got != 1 {
+			t.Errorf("expected occupied_before register = 1 (echoes the lie), got %d", got)
+		}
+	})
+}
+
+// TestCheatRefreshDuplicateKey collides two refresh entries onto the same
+// ballot key. Duplicate (or non-strictly-increasing) keys must be rejected.
+func TestCheatRefreshDuplicateKey(t *testing.T) {
+	base, _, _ := buildCheatInputTwoBatches(t)
+	// Force entry 1 to reuse entry 0's key on both sides.
+	base.stateData.RefreshSmt[1].OldKey = base.stateData.RefreshSmt[0].OldKey
+	base.stateData.RefreshSmt[1].NewKey = base.stateData.RefreshSmt[0].NewKey
+	assertCircuitFails(t, base.reencodeState(t), failRefresh, "refresh_dup_key")
+}
+
+// TestCheatRefreshOverlapsBatch reuses a ballot key that the batch itself
+// already touched, so the refresh set is not disjoint from the ballot set.
+func TestCheatRefreshOverlapsBatch(t *testing.T) {
+	base, _, _ := buildCheatInputTwoBatches(t)
+	if len(base.stateData.BallotSmt) == 0 {
+		t.Skip("no ballot entries to collide with")
+	}
+	base.stateData.RefreshSmt[0].OldKey = base.stateData.BallotSmt[0].NewKey
+	base.stateData.RefreshSmt[0].NewKey = base.stateData.BallotSmt[0].NewKey
+	assertCircuitFails(t, base.reencodeState(t), failRefresh, "refresh_overlaps_batch")
+}
+
+// TestCheatRefreshBadNamespace puts a refresh entry at key 0x04 (the Results
+// namespace, not the ballot namespace >= 0x10). The guest must reject it.
+func TestCheatRefreshBadNamespace(t *testing.T) {
+	base, _, _ := buildCheatInputTwoBatches(t)
+	key04 := bigIntToFr32(new(big.Int).SetUint64(keyResults))
+	base.stateData.RefreshSmt[0].OldKey = key04
+	base.stateData.RefreshSmt[0].NewKey = key04
+	assertCircuitFails(t, base.reencodeState(t), failRefresh, "refresh_bad_namespace")
+}
+
+// TestCheatRefreshWrongScalar simulates a refresh built with a scalar chain
+// that doesn't match the batch's seeded chain — the guest re-derives its own
+// scalars, recomputes new_value = SHA-256(old + Enc(0; r_i)), and rejects a
+// mismatch. We approximate this by hashing to something the guest won't
+// derive; either way, the mismatch triggers FAIL_REFRESH.
+func TestCheatRefreshWrongScalar(t *testing.T) {
+	base, _, _ := buildCheatInputTwoBatches(t)
+	bogus := make([]byte, 32)
+	for i := range bogus {
+		bogus[i] = 0x5A
+	}
+	base.stateData.RefreshSmt[0].NewValue = "0x" + hex.EncodeToString(bogus)
+	assertCircuitFails(t, base.reencodeState(t), failRefresh, "refresh_wrong_scalar")
+}
+
+// TestCheatRefreshStaleOld swaps the first refreshed OLD ballot for a
+// different (but well-formed) one, so SHA-256(refreshed_ballots[0]) no longer
+// matches refresh_smt[0].old_value.
+func TestCheatRefreshStaleOld(t *testing.T) {
+	base, _, _ := buildCheatInputTwoBatches(t)
+	// All-identity padded ballot: a well-formed wideBallot value that won't
+	// match the real (voted) old ballot's leaf hash.
+	identity := make([]string, BallotFields)
+	zeroHex := bigIntToFr32(big.NewInt(0))
+	oneHex := bigIntToFr32(big.NewInt(1))
+	for i := 0; i < NumFields; i++ {
+		identity[i*4] = zeroHex
+		identity[i*4+1] = oneHex
+		identity[i*4+2] = zeroHex
+		identity[i*4+3] = oneHex
+	}
+	base.stateData.BallotProofs.RefreshedBallots[0] = identity
+	assertCircuitFails(t, base.reencodeState(t), failRefresh, "refresh_stale_old")
+}
+
+// TestCheatRefreshSkipsAccumulator forges the net Results leaf to the value
+// it would have if the refresh deltas were NOT folded in. The batch ballots
+// and overwrites still contribute (so the leaf isn't wildly off), but the
+// refresh (add(new) - sub(old)) is skipped. Guest must catch it via the
+// accumulator recomputation.
+func TestCheatRefreshSkipsAccumulator(t *testing.T) {
+	base, election, _ := buildCheatInputTwoBatches(t)
+	if base.stateData.ResultsSmt == nil {
+		t.Fatal("expected a Results transition")
+	}
+
+	// Compute the "skipped" newResults: pre-batch + Σ reenc − Σ overwritten.
+	wrongResults := base.preBatchResults
+	for _, rb := range base.batchReencBallots {
+		wrongResults = frAccumAdd(wrongResults, frAccumFromBallot(rb))
+	}
+	for _, ob := range base.batchOverwrittenBallots {
+		wrongResults = frAccumSub(wrongResults, frAccumFromBallot(ob))
+	}
+	wrongLeaf := frAccumLeafHash(wrongResults)
+
+	// The tree currently holds the CORRECT leaf at key 0x04. Downgrading it
+	// gives us a hypothetical "post-batch tree with WRONG_LEAF" whose root
+	// matches what a valid Results transition from the pre-Results state
+	// would produce with WRONG_LEAF (key-layout unchanged ⇒ path unchanged).
+	bLen := arbo.HashFunctionSha256.Len()
+	keyBytes := arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(keyResults))
+	if err := election.ProcTree.Update(keyBytes, arbo.BigIntToBytes(bLen, wrongLeaf)); err != nil {
+		t.Fatalf("tree.Update(wrong leaf): %v", err)
+	}
+	newRootBytes, err := election.ProcTree.Root()
+	if err != nil {
+		t.Fatalf("tree.Root: %v", err)
+	}
+	newRootHex := "0x" + hex.EncodeToString(pad32(newRootBytes))
+
+	re := *base.stateData.ResultsSmt
+	re.NewValue = "0x" + hex.EncodeToString(arbo.BigIntToBytes(bLen, wrongLeaf))
+	re.NewRoot = newRootHex
+	base.stateData.ResultsSmt = &re
+	base.stateData.NewStateRoot = newRootHex
+
+	assertCircuitFails(t, base.reencodeState(t), failResultAccum, "refresh_skips_accum")
+}
+
+// TestCheatRefreshNoop turns a refresh entry into a NOOP (fnc0=fnc1=0,
+// new_root == old_root). The guest pins every refresh entry to be an UPDATE
+// of an existing ballot slot; a NOOP must be rejected.
+func TestCheatRefreshNoop(t *testing.T) {
+	base, _, _ := buildCheatInputTwoBatches(t)
+	// Also break the chained root so this can't accidentally slip past.
+	base.stateData.RefreshSmt[0].Fnc0 = 0
+	base.stateData.RefreshSmt[0].Fnc1 = 0
+	base.stateData.RefreshSmt[0].NewRoot = base.stateData.RefreshSmt[0].OldRoot
+	base.stateData.RefreshSmt[0].NewValue = base.stateData.RefreshSmt[0].OldValue
+	assertCircuitFails(t, base.reencodeState(t), failRefresh, "refresh_noop")
+}
+
+// TestCheatResultsNoop replaces the net Results transition with a NOOP
+// (fnc0=fnc1=0) that still carries the expected old/new leaf hashes, and
+// leaves NewStateRoot at the root after the ballot chain. The votes land in
+// the tree but the tally leaf never moves. The guest must pin the Results
+// transition to an UPDATE of key 0x04 and reject this.
+func TestCheatResultsNoop(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+	sd := base.stateData
+	if sd.ResultsSmt == nil {
+		t.Fatal("expected a Results transition in the base input")
+	}
+	r := *sd.ResultsSmt
+	r.NewRoot = r.OldRoot
+	r.Fnc0, r.Fnc1 = 0, 0
+	sd.ResultsSmt = &r
+	sd.NewStateRoot = r.OldRoot
+
+	stateBlock, err := davinci.EncodeStateBlock(sd)
+	if err != nil {
+		t.Fatalf("EncodeStateBlock: %v", err)
+	}
+	tampered := append(append(base.baseBin, stateBlock...), base.censusBlock...)
+	tampered = append(tampered, base.reencBlock...)
+	tampered = append(tampered, base.kzgBlock...)
+	assertCircuitFails(t, tampered, failSMTResults, "results_noop")
 }

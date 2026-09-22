@@ -38,8 +38,13 @@
 
 use crate::bn254_fr::{self, BnFr};
 use crate::hash::sha256_once;
-use crate::types::{FrRaw, BjjCiphertext, ReencEntry, FAIL_REENC};
+use crate::types::{
+    BallotData, BjjCiphertext, FrRaw, ReencEntry, BALLOT_FIELDS, FAIL_REENC, FAIL_REFRESH,
+    NUM_FIELDS,
+};
 use ziskos::syscalls::{syscall_babyjubjub_add, SyscallBabyJubJubAddParams, SyscallPoint256};
+extern crate alloc;
+use alloc::vec::Vec;
 
 /// `H(bytes) = sha256(bytes)` read as a big-endian 256-bit integer, reduced
 /// into BN254 Fr. Shared by the chain start (arbitrary-length preimage) and
@@ -109,6 +114,17 @@ const B8Y_LE: FrRaw = [
     0xfce0051fb9e13377,
     0x25572e1cd16bf9ed,
     0x25797203f7a0b249,
+];
+
+/// BabyJubJub prime-order subgroup order l =
+/// 2736030358979909402780800718157159386076813972158567259200215660948447373041
+/// (r_bjj = 8 * l is the full curve order). Any point on the curve that also
+/// satisfies `l * P = O` sits in the prime-order subgroup B8 generates.
+const BJJ_SUBGROUP_L: FrRaw = [
+    0x677297dc392126f1,
+    0xab3eedb83920ee0a,
+    0x370a08b6d0302b0b,
+    0x060c89ce5c263405,
 ];
 
 // Affine twisted Edwards point ops, backed by the BabyJubJub precompile.
@@ -307,42 +323,136 @@ fn verify_reencryption(
     true
 }
 
-/// Verify all re-encryption entries from the ParsedInput REENCBLK.
-/// Returns true if all are valid; an absent block sets `FAIL_MISSING_BLOCK`.
+/// Identity ballot: every field is `((0,1),(0,1))`. Used as the initial value
+/// of `refresh_delta` and as the "new" ciphertexts for padded slots.
+fn identity_ballot() -> BallotData {
+    let mut b: BallotData = [bn254_fr::ZERO; BALLOT_FIELDS];
+    let mut f = 0;
+    while f < NUM_FIELDS {
+        // c1 = (0, 1), c2 = (0, 1)
+        b[f * 4] = bn254_fr::ZERO;
+        b[f * 4 + 1] = bn254_fr::ONE;
+        b[f * 4 + 2] = bn254_fr::ZERO;
+        b[f * 4 + 3] = bn254_fr::ONE;
+        f += 1;
+    }
+    b
+}
+
+/// Re-encrypt one refresh entry in-guest. For each active field: draw the next
+/// chain element, add `chain*B8` and `chain*pubKey` to the old ciphertexts, and
+/// fold the same two deltas into `refresh_delta[i]`. For padded slots the old
+/// ciphertext must be the TE identity `((0,1),(0,1))` (else FAIL_REFRESH) and
+/// the new ciphertext is identity too; the chain is not advanced (mirrors
+/// `verify_reencryption`).
+fn refresh_one(
+    chain: &mut FrRaw,
+    pk_table: &BjjFixedBase,
+    num_fields: usize,
+    old: &BallotData,
+    new: &mut BallotData,
+    refresh_delta: &mut BallotData,
+) -> bool {
+    for i in 0..NUM_FIELDS {
+        let base = i * 4;
+        if i >= num_fields {
+            // Padded slot must be the TE identity on the old side; the guest
+            // fills identity on the new side and does no EC work.
+            if old[base] != bn254_fr::ZERO || old[base + 1] != bn254_fr::ONE
+                || old[base + 2] != bn254_fr::ZERO || old[base + 3] != bn254_fr::ONE
+            {
+                return false;
+            }
+            new[base] = bn254_fr::ZERO;
+            new[base + 1] = bn254_fr::ONE;
+            new[base + 2] = bn254_fr::ZERO;
+            new[base + 3] = bn254_fr::ONE;
+            continue;
+        }
+        let delta1 = b8_mul(chain);
+        let delta2 = pk_table.mul(chain);
+        let old_c1 = canon(&(old[base], old[base + 1]));
+        let old_c2 = canon(&(old[base + 2], old[base + 3]));
+        let new_c1 = affine_add(&old_c1, &delta1);
+        let new_c2 = affine_add(&old_c2, &delta2);
+        new[base] = new_c1.0;
+        new[base + 1] = new_c1.1;
+        new[base + 2] = new_c2.0;
+        new[base + 3] = new_c2.1;
+        // Fold the deltas into the accumulator. The initial value is identity,
+        // so the first add is `identity + delta = delta`.
+        let d1 = (refresh_delta[base], refresh_delta[base + 1]);
+        let d2 = (refresh_delta[base + 2], refresh_delta[base + 3]);
+        let acc1 = affine_add(&d1, &delta1);
+        let acc2 = affine_add(&d2, &delta2);
+        refresh_delta[base] = acc1.0;
+        refresh_delta[base + 1] = acc1.1;
+        refresh_delta[base + 2] = acc2.0;
+        refresh_delta[base + 3] = acc2.1;
+        *chain = sha256_to_scalar(chain);
+    }
+    true
+}
+
+/// Verify all re-encryption entries from the ParsedInput REENCBLK and the
+/// silent-refresh chain from STATETX. Returns `(ok, refreshed_new,
+/// refresh_delta)`.
+///
+/// - `ok`: true iff both the batch re-encryptions and the refresh work are
+///   valid. An absent REENCBLK sets `FAIL_MISSING_BLOCK`; batch re-encryption
+///   failures set `FAIL_REENC`; refresh failures set `FAIL_REFRESH`.
+/// - `refreshed_new`: newly re-encrypted ballots computed for each refresh
+///   entry, same order as `refreshed_old`. Padded slots are identity.
+/// - `refresh_delta`: per-field sum of the deltas added across all refresh
+///   entries, in the flat 64-Fr `BallotData` layout. Fed into
+///   `results::verify_results` so the accumulator picks up the refresh work
+///   (without this the accumulator identifies the overwrite set — §5.1).
 ///
 /// The chain is started ONCE per batch from `(reenc_seed, old_root)` and
-/// threaded through every entry in block order: entry N+1 continues where
-/// entry N left off. This guarantees every chain element is consumed by
-/// exactly one ciphertext, so no scalar can be reused within (or across —
-/// `old_root` differs) a transition. The public key is curve-checked once
-/// and its fixed-base window table built once, shared by all entries; B8
-/// uses the compile-time table.
+/// threaded through every REENCBLK entry, then continues through every refresh
+/// entry in order. Every chain element is consumed by exactly one active
+/// ciphertext, refresh included. The public key is curve-checked once and its
+/// fixed-base window table sized to cover the batch's REENC entries plus the
+/// refresh entries; B8 uses the compile-time table.
 pub fn verify_batch_from_parsed(
     reenc_pub_key: &Option<(FrRaw, FrRaw)>,
     reenc_seed: &FrRaw,
     old_root: &FrRaw,
     reenc_entries: &[ReencEntry],
+    refreshed_old: &[BallotData],
     num_fields: usize,
     fail_mask: &mut u32,
-) -> bool {
+) -> (bool, Vec<BallotData>, BallotData) {
+    let mut refresh_delta = identity_ballot();
     let (pub_key_x, pub_key_y) = match reenc_pub_key {
         None => {
             *fail_mask |= crate::types::FAIL_MISSING_BLOCK;
-            return false;
+            return (false, Vec::new(), refresh_delta);
         }
         Some(pk) => pk,
     };
-    // No entries: nothing to re-encrypt, so skip the fixed-base table build.
-    if reenc_entries.is_empty() {
-        return true;
+    // No REENC entries and no refreshes: nothing to do, skip the table build.
+    if reenc_entries.is_empty() && refreshed_old.is_empty() {
+        return (true, Vec::new(), refresh_delta);
     }
     if !is_on_bjj_curve(pub_key_x, pub_key_y) {
         *fail_mask |= FAIL_REENC;
-        return false;
+        return (false, Vec::new(), refresh_delta);
     }
-    let expected_muls = reenc_entries.len() * num_fields;
+    // Prime-order subgroup check on the encryption key. BabyJubJub has
+    // cofactor 8; a small-order pk would let a hostile sequencer collapse
+    // `r_t * pk` onto a bounded set of deltas, leaking scalars across ballots.
+    // Reject identity and require l * pk = O (~400 precompile adds, once per
+    // batch).
+    let pk = canon(&(*pub_key_x, *pub_key_y));
+    if pk == bjj_identity() || scalar_mult(&pk, &BJJ_SUBGROUP_L) != bjj_identity() {
+        *fail_mask |= FAIL_REENC;
+        return (false, Vec::new(), refresh_delta);
+    }
+    let expected_muls = (reenc_entries.len() + refreshed_old.len()) * num_fields;
     let pk_table = BjjFixedBase::new(pub_key_x, pub_key_y, expected_muls);
     let mut chain = reenc_chain_start(reenc_seed, old_root);
+
     for entry in reenc_entries {
         if !verify_reencryption(
             &mut chain,
@@ -352,10 +462,21 @@ pub fn verify_batch_from_parsed(
             &entry.reencrypted,
         ) {
             *fail_mask |= FAIL_REENC;
-            return false;
+            return (false, Vec::new(), refresh_delta);
         }
     }
-    true
+
+    // Silent refreshes continue the SAME chain so no scalar repeats.
+    let mut refreshed_new: Vec<BallotData> = Vec::with_capacity(refreshed_old.len());
+    for old in refreshed_old {
+        let mut new: BallotData = [bn254_fr::ZERO; BALLOT_FIELDS];
+        if !refresh_one(&mut chain, &pk_table, num_fields, old, &mut new, &mut refresh_delta) {
+            *fail_mask |= FAIL_REFRESH;
+            return (false, Vec::new(), refresh_delta);
+        }
+        refreshed_new.push(new);
+    }
+    (true, refreshed_new, refresh_delta)
 }
 
 // Affine point API (TE coordinates) for the Chaum-Pedersen verifier.
@@ -565,41 +686,222 @@ mod tests {
 
         // Sanity: valid batch verifies.
         let mut mask = 0u32;
-        let ok = verify_batch_from_parsed(
-            &Some((pk.0, pk.1)), &seed, &old_root, &entries, num_fields, &mut mask,
+        let (ok, _rn, _rd) = verify_batch_from_parsed(
+            &Some((pk.0, pk.1)), &seed, &old_root, &entries, &[], num_fields, &mut mask,
         );
         assert!(ok && mask == 0, "valid batch should pass, mask={mask:#x}");
 
         // Swap entries -> fails.
         let mut mask = 0u32;
         let swapped = vec![entries[1].clone(), entries[0].clone()];
-        let ok = verify_batch_from_parsed(
-            &Some((pk.0, pk.1)), &seed, &old_root, &swapped, num_fields, &mut mask,
+        let (ok, _, _) = verify_batch_from_parsed(
+            &Some((pk.0, pk.1)), &seed, &old_root, &swapped, &[], num_fields, &mut mask,
         );
         assert!(!ok && (mask & FAIL_REENC) != 0, "swapped entries must fail");
 
         // Different old_root -> fails.
         let mut mask = 0u32;
         let bad_root: FrRaw = [0xdead_beef ^ 1, 0, 0, 0];
-        let ok = verify_batch_from_parsed(
-            &Some((pk.0, pk.1)), &seed, &bad_root, &entries, num_fields, &mut mask,
+        let (ok, _, _) = verify_batch_from_parsed(
+            &Some((pk.0, pk.1)), &seed, &bad_root, &entries, &[], num_fields, &mut mask,
         );
         assert!(!ok && (mask & FAIL_REENC) != 0, "different old_root must fail");
 
         // Different seed -> fails.
         let mut mask = 0u32;
         let bad_seed: FrRaw = [42 ^ 1, 0, 0, 0];
-        let ok = verify_batch_from_parsed(
-            &Some((pk.0, pk.1)), &bad_seed, &old_root, &entries, num_fields, &mut mask,
+        let (ok, _, _) = verify_batch_from_parsed(
+            &Some((pk.0, pk.1)), &bad_seed, &old_root, &entries, &[], num_fields, &mut mask,
         );
         assert!(!ok && (mask & FAIL_REENC) != 0, "different seed must fail");
 
         // Missing block -> FAIL_MISSING_BLOCK.
         let mut mask = 0u32;
-        let ok = verify_batch_from_parsed(
-            &None, &seed, &old_root, &entries, num_fields, &mut mask,
+        let (ok, _, _) = verify_batch_from_parsed(
+            &None, &seed, &old_root, &entries, &[], num_fields, &mut mask,
         );
         assert!(!ok && (mask & crate::types::FAIL_MISSING_BLOCK) != 0, "missing block must set FAIL_MISSING_BLOCK");
+    }
+
+    /// Roundtrip a refresh: build old ballots as small multiples of B8, run
+    /// `verify_batch_from_parsed` with no REENC entries and the refreshes only,
+    /// then re-derive the deltas by hand and check both `refreshed_new` and
+    /// `refresh_delta` match. `refresh_delta` must equal Σ (new_i - old_i)
+    /// across all refreshes per active field (which is Σ delta_i).
+    #[test]
+    fn refresh_roundtrip_delta_matches_sum() {
+        use crate::types::{BALLOT_FIELDS, BjjCiphertext, NUM_FIELDS};
+
+        let seed: FrRaw = [0x1234, 0, 0, 0];
+        let old_root: FrRaw = [0xabcd, 0, 0, 0];
+        let pk_scalar: FrRaw = [11, 0, 0, 0];
+        let pk = b8_mul(&pk_scalar);
+        assert!(bjj_on_curve(&pk));
+
+        let num_fields = 3usize;
+        let identity_ct = BjjCiphertext {
+            c1x: bn254_fr::ZERO, c1y: bn254_fr::ONE,
+            c2x: bn254_fr::ZERO, c2y: bn254_fr::ONE,
+        };
+        let _ = identity_ct;
+
+        // Two refresh entries. Active-field ciphertexts are distinct small
+        // multiples of B8, padded slots are identity.
+        let mut refreshed_old: Vec<BallotData> = Vec::with_capacity(2);
+        for e in 0..2u64 {
+            let mut b: BallotData = [bn254_fr::ZERO; BALLOT_FIELDS];
+            for i in 0..NUM_FIELDS {
+                if i < num_fields {
+                    let s1: FrRaw = [500 + e * 50 + i as u64, 0, 0, 0];
+                    let s2: FrRaw = [600 + e * 50 + i as u64, 0, 0, 0];
+                    let c1 = b8_mul(&s1);
+                    let c2 = b8_mul(&s2);
+                    b[i * 4] = c1.0; b[i * 4 + 1] = c1.1;
+                    b[i * 4 + 2] = c2.0; b[i * 4 + 3] = c2.1;
+                } else {
+                    b[i * 4] = bn254_fr::ZERO; b[i * 4 + 1] = bn254_fr::ONE;
+                    b[i * 4 + 2] = bn254_fr::ZERO; b[i * 4 + 3] = bn254_fr::ONE;
+                }
+            }
+            refreshed_old.push(b);
+        }
+
+        // Precompute expected deltas + accumulator by hand from the chain.
+        let pk_table = BjjFixedBase::new(&pk.0, &pk.1, refreshed_old.len() * num_fields);
+        let mut expected_new: Vec<BallotData> = Vec::with_capacity(refreshed_old.len());
+        let mut expected_delta = identity_ballot();
+        {
+            let mut chain = reenc_chain_start(&seed, &old_root);
+            for old in &refreshed_old {
+                let mut new: BallotData = [bn254_fr::ZERO; BALLOT_FIELDS];
+                for i in 0..NUM_FIELDS {
+                    let base = i * 4;
+                    if i >= num_fields {
+                        new[base] = bn254_fr::ZERO; new[base + 1] = bn254_fr::ONE;
+                        new[base + 2] = bn254_fr::ZERO; new[base + 3] = bn254_fr::ONE;
+                        continue;
+                    }
+                    let d1 = b8_mul(&chain);
+                    let d2 = pk_table.mul(&chain);
+                    let nc1 = affine_add(&canon(&(old[base], old[base + 1])), &d1);
+                    let nc2 = affine_add(&canon(&(old[base + 2], old[base + 3])), &d2);
+                    new[base] = nc1.0; new[base + 1] = nc1.1;
+                    new[base + 2] = nc2.0; new[base + 3] = nc2.1;
+                    let e1 = affine_add(&(expected_delta[base], expected_delta[base + 1]), &d1);
+                    let e2 = affine_add(&(expected_delta[base + 2], expected_delta[base + 3]), &d2);
+                    expected_delta[base] = e1.0; expected_delta[base + 1] = e1.1;
+                    expected_delta[base + 2] = e2.0; expected_delta[base + 3] = e2.1;
+                    chain = sha256_to_scalar(&chain);
+                }
+                expected_new.push(new);
+            }
+        }
+
+        let mut mask = 0u32;
+        let (ok, refreshed_new, refresh_delta) = verify_batch_from_parsed(
+            &Some((pk.0, pk.1)),
+            &seed,
+            &old_root,
+            &[],
+            &refreshed_old,
+            num_fields,
+            &mut mask,
+        );
+        assert!(ok && mask == 0, "refresh should verify, mask={mask:#x}");
+        assert_eq!(refreshed_new.len(), expected_new.len());
+        for i in 0..expected_new.len() {
+            assert_eq!(refreshed_new[i], expected_new[i], "refreshed_new[{i}] mismatch");
+        }
+        assert_eq!(refresh_delta, expected_delta, "refresh_delta mismatch");
+    }
+
+    /// The order-2 point (0, -1) is on the curve but sits in the cofactor
+    /// subgroup, so the prime-order check must reject it as an encryption key.
+    #[test]
+    fn reenc_rejects_small_order_pk() {
+        use crate::types::FAIL_REENC;
+        // y = -1 mod p, x = 0. On the curve: a*0 + (-1)^2 = 1 = 1 + d*0*1. Yes.
+        let neg_one = bn254_fr::neg(&bn254_fr::ONE);
+        let pk_x: FrRaw = bn254_fr::ZERO;
+        let pk_y: FrRaw = neg_one;
+        assert!(bjj_on_curve(&(pk_x, pk_y)));
+        // 2 * (0, -1) = (0, 1) = identity, so order divides 2; fails l * P = O check
+        // (l is odd).
+        let seed: FrRaw = [1, 0, 0, 0];
+        let old_root: FrRaw = [2, 0, 0, 0];
+        let mut mask = 0u32;
+        // A dummy REENC entry so we get past the empty-batch shortcut.
+        let identity_ct = crate::types::BjjCiphertext {
+            c1x: bn254_fr::ZERO, c1y: bn254_fr::ONE,
+            c2x: bn254_fr::ZERO, c2y: bn254_fr::ONE,
+        };
+        let mut original: [crate::types::BjjCiphertext; crate::types::NUM_FIELDS] = Default::default();
+        let mut reencrypted: [crate::types::BjjCiphertext; crate::types::NUM_FIELDS] = Default::default();
+        for i in 0..crate::types::NUM_FIELDS {
+            original[i] = identity_ct.clone();
+            reencrypted[i] = identity_ct.clone();
+        }
+        let entries = alloc::vec![crate::types::ReencEntry { original, reencrypted }];
+        let (ok, _, _) = verify_batch_from_parsed(
+            &Some((pk_x, pk_y)), &seed, &old_root, &entries, &[], 0, &mut mask,
+        );
+        assert!(!ok, "small-order pk must be rejected");
+        assert!(mask & FAIL_REENC != 0, "FAIL_REENC not set, mask={mask:#x}");
+    }
+
+    /// Any multiple of B8 sits in the prime-order subgroup, so a batch keyed on
+    /// pk = k*B8 must pass the new prime-order check (feed it one all-identity
+    /// entry so the shortcut doesn't skip the check).
+    #[test]
+    fn reenc_accepts_b8_multiple_pk() {
+        use crate::types::{BjjCiphertext, NUM_FIELDS, ReencEntry};
+        let seed: FrRaw = [7, 0, 0, 0];
+        let old_root: FrRaw = [11, 0, 0, 0];
+        let pk = b8_mul(&[13, 0, 0, 0]);
+        let identity_ct = BjjCiphertext {
+            c1x: bn254_fr::ZERO, c1y: bn254_fr::ONE,
+            c2x: bn254_fr::ZERO, c2y: bn254_fr::ONE,
+        };
+        let mut original: [BjjCiphertext; NUM_FIELDS] = Default::default();
+        let mut reencrypted: [BjjCiphertext; NUM_FIELDS] = Default::default();
+        for i in 0..NUM_FIELDS {
+            original[i] = identity_ct.clone();
+            reencrypted[i] = identity_ct.clone();
+        }
+        // num_fields = 0 so every slot is padded (identity) and no chain elements
+        // are consumed — the check runs but no re-encryption arithmetic does.
+        let entries = alloc::vec![ReencEntry { original, reencrypted }];
+        let mut mask = 0u32;
+        let (ok, _, _) = verify_batch_from_parsed(
+            &Some((pk.0, pk.1)), &seed, &old_root, &entries, &[], 0, &mut mask,
+        );
+        assert!(ok, "B8 multiple must be accepted, mask={mask:#x}");
+    }
+
+    #[test]
+    fn refresh_rejects_non_identity_padded_slot() {
+        use crate::types::{BALLOT_FIELDS, NUM_FIELDS};
+        let seed: FrRaw = [1, 0, 0, 0];
+        let old_root: FrRaw = [2, 0, 0, 0];
+        let pk = b8_mul(&[3, 0, 0, 0]);
+        let num_fields = 2usize;
+
+        // Padded slot 2 carries a non-identity ciphertext.
+        let mut b: BallotData = [bn254_fr::ZERO; BALLOT_FIELDS];
+        for i in 0..NUM_FIELDS {
+            b[i * 4] = bn254_fr::ZERO; b[i * 4 + 1] = bn254_fr::ONE;
+            b[i * 4 + 2] = bn254_fr::ZERO; b[i * 4 + 3] = bn254_fr::ONE;
+        }
+        // Poison field 2 (which is padded because num_fields=2).
+        let p = b8_mul(&[5, 0, 0, 0]);
+        b[2 * 4] = p.0; b[2 * 4 + 1] = p.1;
+
+        let mut mask = 0u32;
+        let (ok, _rn, _rd) = verify_batch_from_parsed(
+            &Some((pk.0, pk.1)), &seed, &old_root, &[], &[b], num_fields, &mut mask,
+        );
+        assert!(!ok, "non-identity padded slot must fail");
+        assert!(mask & FAIL_REFRESH != 0, "FAIL_REFRESH must be set, got mask={mask:#x}");
     }
 
     /// Regenerates `src/b8_table.rs`. Run manually after changing the layout:

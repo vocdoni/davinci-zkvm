@@ -75,12 +75,6 @@ func TestCSPChainedStateTransitions(t *testing.T) {
 
 		oldRoot := election.OldRoot
 
-		// Build KZG block.
-		kzgBlock, err := election.BuildKZGBlock(txIdx, oldRoot)
-		if err != nil {
-			t.Fatalf("transition %d: BuildKZGBlock: %v", txIdx, err)
-		}
-
 		// Build re-encryption block.
 		reencBlock, reencBallots, err := election.BuildReencBlock(oldRoot, batch.Results)
 		if err != nil {
@@ -91,6 +85,12 @@ func TestCSPChainedStateTransitions(t *testing.T) {
 		stateBlock, overwrittenBallots, err := election.BuildStateBlock(batchVoters, batch.Results, reencBallots)
 		if err != nil {
 			t.Fatalf("transition %d: BuildStateBlock: %v", txIdx, err)
+		}
+
+		// Build KZG binding — consumes the DA cells the state block stashed.
+		kzgBlock, _, err := election.BuildKZGBlock(oldRoot)
+		if err != nil {
+			t.Fatalf("transition %d: BuildKZGBlock: %v", txIdx, err)
 		}
 
 		// Build CSP proofs (instead of census membership proofs).

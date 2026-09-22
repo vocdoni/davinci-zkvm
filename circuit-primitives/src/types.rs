@@ -21,6 +21,7 @@
 //! |  21 | `FAIL_LEAF_HASH`        | results.rs     | Ballot SMT leaf hash mismatch              |
 //! |  22 | `FAIL_BINDING`          | main.rs        | Cross-block binding mismatch               |
 //! |  23 | `FAIL_CSP`              | csp.rs         | CSP ECDSA signature or address check failed|
+//! |  24 | `FAIL_REFRESH`          | smt.rs/results | Silent-refresh chain or accumulator invalid|
 //! |  31 | `FAIL_PARSE`            | io.rs          | Binary format / parse error                |
 
 /// BN254 G1 affine point: (x[4], y[4]) in 256-bit little-endian limbs.
@@ -69,6 +70,19 @@ pub const BALLOT_FIELDS: usize = NUM_FIELDS * 4;
 /// memory at the new worst case (and bump input-gen + go-sdk to match).
 pub const MAX_BATCH_SIZE: usize = 128;
 
+// Silent-refresh policy constants (§4.5). The sequencer must include at least
+// `min(target, occupied_before - n_overwritten)` refresh entries per batch,
+// where `target = min(MAX_REFRESH, max(REFRESH_MIN, REFRESH_TAU*n_overwritten,
+// REFRESH_KAPPA*n_voters))`. `MAX_REFRESH = REFRESH_TAU * MAX_BATCH_SIZE` keeps
+// `target` satisfiable once the tree is large enough. Guard rails: parse caps
+// refresh count at `MAX_REFRESH`; the count rule is enforced in
+// `smt::verify_state`; per-entry validity in the same module; the accumulator
+// pick-up in `results::verify_results`.
+pub const MAX_REFRESH: usize = 256;
+pub const REFRESH_MIN: u64 = 16;
+pub const REFRESH_TAU: u64 = 2;
+pub const REFRESH_KAPPA: u64 = 1;
+
 // Fail-mask bit constants
 // See the module-level table for a complete description of each bit.
 pub const FAIL_PARSE:       u32 = 1 << 31;
@@ -94,6 +108,10 @@ pub const FAIL_LEAF_HASH: u32 = 1 << 21;
 /// Bit 22 => Cross-block binding: processID, rootHashBefore, or encryption key mismatch
 /// between independently-parsed blocks (KZG ↔ state, re-encryption ↔ process config).
 pub const FAIL_BINDING: u32 = 1 << 22;
+/// Bit 24 => Silent-refresh chain violated the count rule, per-entry format,
+/// disjointness with the ballot chain, root chaining, or the refresh delta was
+/// not folded into the results accumulator.
+pub const FAIL_REFRESH: u32 = 1 << 24;
 
 /// One Groth16 proof and its associated public inputs.
 #[derive(Clone)]
@@ -158,20 +176,24 @@ pub const CENSUS_ORIGIN_CSP: u64 = 4;
 /// Bit 23 => CSP ECDSA signature or address verification failed.
 pub const FAIL_CSP: u32 = 1 << 23;
 
-/// KZG EIP-4844 blob barycentric evaluation block.
-/// Contains all data needed to verify Y = P(Z) where P is the polynomial interpolating
-/// the blob, and Z is derived from the process context via SHA-256.
+/// Maximum number of KZG blobs per batch (§8). Caps the parsed
+/// `commitments` vector and bounds the T -> n_blobs arithmetic.
+pub const MAX_BLOBS: usize = 8;
+
+/// KZG EIP-4844 DA blob binding block. Carries the process context and the
+/// per-blob commitments; the blob bytes and Y are NOT shipped — the guest
+/// rebuilds the cells from verified state and evaluates each polynomial
+/// itself, then emits `(commitment, y)` pairs so the settlement contract can
+/// check them against the blobs' versioned hashes via the EIP-4844
+/// point-evaluation precompile.
 pub struct KZGBlock {
-    /// Process identifier (BN254 Fr, 4×u64 LE). Used to derive the evaluation point Z.
+    /// Process identifier (BN254 Fr, 4×u64 LE). Cross-bound to STATETX.
     pub process_id: FrRaw,
-    /// Arbo SHA-256 state root before the batch (BN254 Fr, 4×u64 LE). Also used for Z.
+    /// Arbo SHA-256 state root before the batch (BN254 Fr, 4×u64 LE).
     pub root_hash_before: FrRaw,
-    /// Compressed BLS12-381 G1 KZG commitment (48 bytes, big-endian).
-    pub commitment: [u8; 48],
-    /// Claimed evaluation Y at point Z (32 bytes, big-endian BLS12-381 Fr).
-    pub y_claimed: [u8; 32],
-    /// Blob data: 4096 cells of 32 big-endian bytes each (131072 bytes total).
-    pub blob: Vec<u8>,
+    /// Compressed BLS12-381 G1 KZG commitments (48 bytes each, big-endian).
+    /// Length is capped at `MAX_BLOBS` by the parser.
+    pub commitments: Vec<[u8; 48]>,
 }
 
 /// One ElGamal ciphertext: (C1.x, C1.y, C2.x, C2.y) in BN254 Fr.
@@ -247,6 +269,11 @@ pub struct StateBlock {
     pub n_voters: usize,
     /// Number of votes that replaced an existing ballot.
     pub n_overwritten: usize,
+    /// Number of ballot slots occupied before the batch is applied. Header input
+    /// echoed to output register 42; the consumer (fold guest / contract) checks
+    /// it against its running `TotalVoters - TotalOverwrites`. Used in §4.5.2 to
+    /// bound the refresh count when the tree is smaller than the target.
+    pub occupied_before: u64,
     /// Process identifier (arbo state tree key 0x0).
     pub process_id: FrRaw,
     /// Arbo SHA-256 state root before all transitions.
@@ -257,20 +284,29 @@ pub struct StateBlock {
     pub vote_id_chain: Vec<SmtTransition>,
     /// Ballot SMT insertion/update chain (one transition per real vote).
     pub ballot_chain: Vec<SmtTransition>,
+    /// Silent-refresh chain: UPDATEs on occupied ballot slots the batch itself
+    /// did not write. Runs after the ballot chain, before the Results transition.
+    /// May be empty (no refreshes) when the count rule is already satisfied.
+    pub refresh_chain: Vec<SmtTransition>,
     /// Net Results SMT transition (one update per batch; None if all dummy).
     pub results: Option<SmtTransition>,
-    /// Process config read-proofs (exactly 4: processID, ballotMode, encKey, censusOrigin).
+    /// Process config read-proofs (exactly 5: processID, ballotMode, encKey,
+    /// censusOrigin, ballotVKHash).
     pub process_proofs: Vec<SmtTransition>,
     /// Shared n_levels for vote_id_chain and ballot_chain.
     pub n_levels: usize,
 
     // Result accumulator ballot data
-    /// Previous net Results leaf value (32 Fr elements). ZERO_FR ballot when absent.
+    /// Previous net Results leaf value (64 Fr elements). Identity ballot when absent.
     pub old_results: BallotData,
-    /// Per-voter re-encrypted ballots (32 Fr elements each), in same order as ballot_chain.
-    /// Added to the net accumulator: NewResults = OldResults + Σ(all ballots) − Σ(overwritten).
+    /// Per-voter re-encrypted ballots (64 Fr elements each), in same order as ballot_chain.
+    /// Added to the net accumulator: NewResults = OldResults + Σ(all ballots) − Σ(overwritten) + refresh_delta.
     pub voter_ballots: Vec<BallotData>,
-    /// Per-overwrite old ballot data (32 Fr elements each). Only present for UPDATE entries.
+    /// Per-overwrite old ballot data (64 Fr elements each). Only present for UPDATE entries.
     /// Subtracted from the net accumulator.
     pub overwritten_ballots: Vec<BallotData>,
+    /// Per-refresh OLD ballot data (64 Fr elements each), same order as `refresh_chain`.
+    /// The guest recomputes the new (refreshed) ballot in-circuit from the offset
+    /// scalar chain, so only the old ciphertexts ride in the wire format.
+    pub refreshed_ballots: Vec<BallotData>,
 }

@@ -31,15 +31,16 @@ In a single ZisK execution, the circuit verifies:
 | ECDSA batch verify | secp256k1 signature recovery for each voter (and for the CSP, in CSP mode). |
 | Census membership | Lean-IMT Poseidon BN254 inclusion proofs, or ECDSA CSP authentication. |
 | State SMT transitions | Arbo SHA-256 sparse Merkle tree updates for the vote-ID, ballot, results, and process chains. |
-| ElGamal re-encryption | BabyJubJub re-encryption verification. |
-| KZG blob evaluation | EIP-4844 barycentric evaluation of the encrypted ballot blob. |
-| Result accumulation | Homomorphic tally with overwrite support. |
+| ElGamal re-encryption | BabyJubJub re-encryption of every written ballot, scalars derived in-guest from one sequencer seed. |
+| Silent refreshes | Re-randomization of occupied slots the batch did not write, so an overwrite is indistinguishable from a routine refresh; count rule, distinctness and accumulator deltas enforced. |
+| Result accumulation | Homomorphic tally with overwrite support, pinned to the Results leaf. |
+| DA blob binding | The guest lays out the EIP-4844 blob cells itself (vote identifiers, one sorted list of slot updates, the new accumulator), evaluates every blob polynomial at its bound point and publishes a digest of the (commitment, evaluation) pairs. |
 | Cross-block binding | Cryptographic glue between the protocol blocks. |
 
-The circuit's public outputs match
-[davinci-node](https://github.com/vocdoni/davinci-node)'s
-`StateTransitionCircuit` interface: the two root hashes, the census root,
-the voter counts, the KZG blob commitment, and a diagnostic fail-mask.
+The public outputs are the two state roots, the census root, the voter and
+overwrite counts, the occupied-slot count before the batch, the blob digest
+and blob count, and a diagnostic fail-mask. `solidity/DavinciSettlement.sol`
+consumes them (see "Settle a transition on-chain").
 
 ## Chained mode: one proof per election
 
@@ -64,6 +65,17 @@ The final PLONK's public digest exposes the plaintext results, the vote
 count, the config commitment, the final state root, and the two program
 verification keys (`batch_vk`, `fold_vk`). KZG blob evaluation is omitted
 in this mode (there is no per-batch on-chain data availability step).
+
+**Silent refreshes.** Every batch also re-randomizes a target number of
+occupied ballot slots it did not write, so an observer cannot tell an
+overwrite from routine re-encryption noise. The sequencer picks the
+slots from OS randomness and drives them through the same scalar chain
+as the batch's own votes; neither the seed nor the selection is ever
+persisted. The guest enforces the count via `RefreshTarget`, that keys
+are distinct and stay inside the ballot namespace, and that each entry
+is a valid re-randomization of the stored ballot. `occupied_before` is
+a public output the fold guest checks against its running voters −
+overwrites.
 
 **Verification key binding.** A guest cannot know its own verification
 key, so the chain commits both vks in every digest and the verifier
@@ -223,6 +235,28 @@ err := davinciSolidity.VerifyOnSimulated("./solidity", result.Snark)
 
 No Anvil, ganache, or RPC endpoint needed.
 
+### Settle a transition on-chain
+
+`solidity/DavinciSettlement.sol` is the reference per-batch settlement
+contract: it verifies the PLONK through `ZiskVerifier`, checks root
+continuity, the census root and the occupied-slot count against its own
+counters, recomputes the blob digest from the submitted commitments and
+evaluations, and checks every blob with the EIP-4844 point-evaluation
+precompile against the blob transaction's versioned hashes. The Go helper
+deploys it on the simulated backend and submits real blob transactions:
+
+```go
+blobs, _ := davinci.BuildTransitionBlobs(numFields, pid, rootBefore, voteIDs, updates, accumulator)
+req.KZG = blobs.Request(pidHex, rootBeforeHex)   // commitments only; the guest rebuilds the cells
+// ... prove, then:
+s, _ := davinciSolidity.DeploySettlement("./solidity", snark.ProgramVK, snark.RootCVadcopFinal)
+s.CreateProcess(pid, genesisRoot, censusRoot)
+gas, err := s.SubmitTransition(pid, snark, blobs)
+```
+
+`TestFullE2E` runs the whole flow, silent refreshes and overwrites
+included, and settles every transition this way.
+
 ## HTTP API
 
 | Method | Endpoint | Description |
@@ -264,6 +298,7 @@ These four fields map straight onto the arguments of
 | `AGGREGATOR_ELF_PATH` | `/app/aggregator.elf` | Pre-built aggregator ELF (chained mode). |
 | `CARGO_ZISK_BIN` | `cargo-zisk` | `cargo-zisk` binary to invoke. |
 | `PROOF_OUTPUT_DIR` | `/tmp/proofs` | Per-job artifact directory. |
+| `DAVINCI_KEEP_INPUTS` | `0` | Keep each job's `input.bin` and serve `GET /jobs/{id}/inputs`. The input is the private witness (re-encryption seed, overwrite and refresh sets); leave it off outside development. |
 | `MAX_QUEUE_SIZE` | `100` | Maximum queued jobs. |
 | `ZISK_MPI_PROCS` | `1` | MPI processes for proving (`>1` runs `mpirun`). |
 | `ZISK_MPI_THREADS` | `0` | Threads per MPI process (`0` = let MPI decide). |
@@ -271,19 +306,23 @@ These four fields map straight onto the arguments of
 
 ## Performance
 
-All numbers below are from an NVIDIA RTX 5090 (driver 580) running the
-[full pipeline](#what-the-circuit-checks). Ballot generation isn't
-counted; the time column is just SNARK generation.
+All numbers below are from an NVIDIA RTX 5090 running the
+[full pipeline](#what-the-circuit-checks) on ZisK v1.3.0-alpha. Ballot
+generation isn't counted; the time column is the service's job time for the
+steady state, i.e. a batch that also silently refreshes as many slots as it
+writes. `nf` is the election's declared field count.
 
-| batch | PLONK SNARK | votes/s | on-chain verify |
-|---:|---:|---:|---:|
-|  64 |    34 s |  1.9 |  315 ms |
-| 128 |    52 s |  2.4 |  349 ms |
-| 256 |    88 s |  2.9 |  349 ms |
+| batch | PLONK (nf=2) | votes/s | PLONK (nf=16) | votes/s | settlement gas |
+|---:|---:|---:|---:|---:|---:|
+|  64 | 23.9 s | 2.7 | 31.2 s | 2.1 | ~500 k |
+| 128 | 31.6 s | 4.1 | 46.5 s | 2.8 | ~500 k (1 blob) / ~612 k (3 blobs) |
 
-Scaling is sub-linear: per-vote cost drops by about a third between batch
-64 and batch 256 (256 is the maximum batch size). Proof size stays at
-2.7 KB regardless of batch.
+The fixed cost (recursion, PLONK wrap, verification) is about 16 s, so
+per-vote cost keeps dropping up to the batch cap of 128. Settlement gas is
+for `DavinciSettlement.submitTransition` on the simulated chain, one
+point-evaluation check per blob included. Proof size stays at
+768 B of proof plus 512 B of public values regardless of batch. See
+[`BENCHMARK.md`](BENCHMARK.md) for the chained mode and the full tables.
 
 ## Development
 

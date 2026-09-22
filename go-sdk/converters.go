@@ -300,18 +300,18 @@ func CensusProofFromBigInts(root, leaf *big.Int, index uint64, siblings []*big.I
 
 // KZG Converter
 
-// NewKZGRequest creates a KZGRequest from native Go types.
-// commitment is the 48-byte compressed BLS12-381 G1 point.
-// yClaimed is the 32-byte BLS12-381 Fr evaluation result.
-// blob is the 131072-byte raw blob data.
-func NewKZGRequest(processID, rootHashBefore *big.Int,
-	commitment [48]byte, yClaimed [32]byte, blob []byte) *KZGRequest {
+// NewKZGRequest creates a KZGRequest for the /prove API from the ordered
+// per-blob commitments. processID and rootHashBefore are 256-bit values
+// bound into every blob's evaluation point.
+func NewKZGRequest(processID, rootHashBefore *big.Int, commitments [][48]byte) *KZGRequest {
+	commits := make([]string, len(commitments))
+	for i, c := range commitments {
+		commits[i] = "0x" + hex.EncodeToString(c[:])
+	}
 	return &KZGRequest{
 		ProcessID:      bigIntToHex32BE(processID),
 		RootHashBefore: bigIntToHex32BE(rootHashBefore),
-		Commitment:     "0x" + hex.EncodeToString(commitment[:]),
-		YClaimed:       "0x" + hex.EncodeToString(yClaimed[:]),
-		Blob:           "0x" + hex.EncodeToString(blob),
+		Commitments:    commits,
 	}
 }
 

@@ -23,8 +23,8 @@ type Release struct {
 // after rebuilding either guest: run a fold + finalize and read the digest's
 // fold_vk (== aggregator program_vk) and batch_vk.
 var CircuitRelease = Release{
-	AggVK:   "0xc3fce781c27ef9f1e7b1091a8e2d1fde1f90b0488279d0fee065271205db3643",
-	BatchVK: "0xcb4a14ecbd01bc7a304b7c36f172ac398daf418112d406bb16a557a4fb16b19e",
+	AggVK:   "0x8e2363539f2d5f56ca92e5a1a1959b5b70053e377c797549ed66ade060df0b26",
+	BatchVK: "0x3e8764c0de5449174512ee4da969f1ff5668af8895d5069701f23000a9483fbb",
 }
 
 // IsSet reports whether the release has been pinned (both vks present).

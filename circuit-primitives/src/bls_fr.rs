@@ -157,8 +157,8 @@ pub fn neg(a: &BlsFrRaw) -> BlsFrRaw {
 /// the inverse as an unverified hint from the prover. Because fcalls are not
 /// constrained by the ZisK VM, the result is **verified** with a single checked
 /// `arith256_mod` syscall: `a * result ≡ 1 (mod p)`. If the hint is wrong (e.g.
-/// a malicious prover), the check fails and `ZERO` is returned, which propagates
-/// as a verification failure downstream — no unsoundness.
+/// a malicious prover), the check fails and the guest aborts: a zero
+/// inverse would silently zero the KZG evaluations.
 ///
 /// This replaces the legacy Fermat `a^(p-2) mod p` (~383 `arith256_mod` syscalls)
 /// with **1 fcall hint + 1 checked multiply**. The KZG barycentric evaluation
@@ -173,7 +173,10 @@ pub fn inv(a: &BlsFrRaw) -> BlsFrRaw {
     }
     match fcall_uint256_inv_mod(a, &BLS_FR_MOD) {
         ModInvResult::Inverse(result) if muladd(a, &result, &ZERO) == ONE => result,
-        _ => ZERO,
+        // The hint is free host input. Returning zero here would let a
+        // hostile host zero the barycentric factor and every blob
+        // evaluation with it, so a bad hint aborts the run instead.
+        _ => panic!("bls_fr::inv: host supplied an invalid inverse hint"),
     }
 }
 

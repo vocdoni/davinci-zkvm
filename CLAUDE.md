@@ -48,6 +48,8 @@ startup; chained mode additionally needs `AGGREGATOR_ELF_PATH`.
 | `go-sdk/` | Go client. Exposes `PlonkSnark` (the 4-tuple) and `client.Prove(ctx, batch) -> ProveResult.Snark`. Never exposes STARK/VADCOP internals (chained mode only sees job IDs + the final PLONK). |
 | `go-sdk/chain/` | Chained-mode orchestrator: `Sequencer` (fold cadence, finalize), `State` (process SMT owner, reencryption, results accumulators), `Digest` (53×u32 "DAG1" publics parser + external vk-binding checks). `snapshot.go` serializes/restores `State` for crash recovery (each batch draws a random re-encryption seed, so replay isn't reproducible). `commitment.go`+`release.go` recompute the guest's `config_commitment` host-side and pin the canonical circuit-release vks (`CircuitRelease`) for independent end-to-end verification. Self-contained — must NOT import test code. |
 | `go-sdk/solidity/solidity.go` | `VerifyOnSimulated(dir, snark)` — compiles the verifier (local `solc` or `docker run ethereum/solc:stable`) and runs it on `go-ethereum/ethclient/simulated.NewBackend`. |
+| `solidity/DavinciSettlement.sol`, `go-sdk/solidity/settlement.go` | Reference per-batch settlement contract (paper's on-chain logic: PLONK verify, root continuity, census root, `occupied_before`, one point-evaluation check per blob) and its simulated-chain helper (`DeploySettlement`, `SubmitTransition` with a real blob transaction). |
+| `go-sdk/blob.go` | `BuildTransitionBlobs`: the DA cell layout, blob split, KZG commitments, bound evaluation points, openings and the digest the guest publishes. Must stay byte-identical to `circuit/src/kzg.rs`. |
 | `go-sdk/vocdoni/` | Vendored davinci-node light crypto (ElGamal, hashing, ballot spec types) so `go-sdk` doesn't depend on the full davinci-node module. Exported so external consumers (davinci-fold) can build chain.Config/chain.Vote values; don't import davinci-node directly from go-sdk. |
 | `davinci-node/`, `recursion-experiment/` | Untracked reference checkouts (gitignored, not part of this repo). Read for context; never edit or stage. |
 
@@ -181,7 +183,9 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
 - `GET /jobs/{id}/publics` — the guest's 256-byte u32 publics (`publics.bin`).
   Not the on-chain `publicValues` string, which since ZisK 1.3 is the same 64
   publics as 8-byte LE words (512 B); `snark.rs` builds that from `publics_full`.
-- `GET /jobs/{id}/inputs` — the raw `input.bin` for audit / re-proving.
+- `GET /jobs/{id}/inputs` — the raw `input.bin` for audit / re-proving. Only
+  with `DAVINCI_KEEP_INPUTS=1`; otherwise the file is deleted after proving
+  and the route answers 404 (it is the private witness).
 - `GET /health`.
 
 ## Gotchas worth remembering
@@ -291,6 +295,55 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   consecutive ballots, so it must adopt the seed chain before feeding this
   guest. SHA-256 keeps the chain on the `sha256f` precompile. `TestCheatTamperPaddedSlot` guards the skip;
   sweep configs in tests with `BALLOT_NUM_FIELDS`.
+- **Silent revoting (refresh chain).** Every batch also re-randomizes
+  occupied ballot slots it did not write, so an observer cannot tell an
+  overwrite from a routine refresh. STATETX carries `occupied_before`, a
+  refresh chain of SMT UPDATEs between the ballot chain and Results, and the
+  refreshed OLD ballots; the guest continues the same scalar chain after the
+  batch's own entries, computes the new ciphertexts itself, pins both leaf
+  hashes, and requires `n_refreshed >= min(target, occupied_before - w)` with
+  `target = min(MAX_REFRESH, max(REFRESH_MIN, REFRESH_TAU*w, REFRESH_KAPPA*n))`
+  (256, 16, 2, 1 in `circuit-primitives/src/types.rs`, mirrored as
+  `davinci.RefreshTarget`). Keys must be strictly increasing, in the ballot
+  namespace and disjoint from the batch's keys (`FAIL_REFRESH`, bit 24; spec
+  §4.5). The refresh deltas `Enc(0; r)` are added to the results accumulator:
+  without them the published accumulator identifies the overwrites
+  algebraically. `occupied_before` is echoed in output register 42; the
+  guest cannot see the tree, so the fold guest (and the settlement contract)
+  check it against running `voters - overwrites`. Selection is
+  sequencer-private OS randomness (`go-sdk/chain/state.go`, harness
+  `BuildStateBlock`), never derived in-circuit and never persisted: a
+  selection computable from public data would let anyone subtract the
+  refresh set from the changed slots. `TestCheatRefresh*` cover every check
+  on ziskemu.
+- **The Results transition is pinned** to an UPDATE of key `0x04`
+  (`fnc0=0, fnc1=1, !is_old0`; spec §4.2.12). Before that a NOOP carrying the
+  expected hashes passed and left the tally untouched while the votes landed
+  in the tree; `TestCheatResultsNoop` reproduces it.
+- **The DA blob is built in-guest, not trusted.** The KZG block now carries
+  only `process_id`, `root_hash_before` and the blob commitments. The guest
+  lays out the cells itself (sorted vote identifiers, one sorted list of slot
+  updates for new votes, overwrites and refreshes alike with the active
+  ciphertexts compressed to one field element per point, the new
+  accumulator; spec §8), evaluates every blob polynomial at
+  `z_b = H(pid ‖ root_before ‖ com_b)` and publishes
+  `sha256(com_0 ‖ y_0 ‖ …)` in registers 28..35 and `n_blobs` in 36.
+  `davinci.BuildTransitionBlobs` produces the same cells, commitments and
+  openings host-side; `solidity/DavinciSettlement.sol` checks each opening
+  against `blobhash(i)` with the point-evaluation precompile, plus root
+  continuity, census root and `occupied_before`. Chained mode ships no blob
+  (registers stay zero).
+- **Everything the DA blob omits is pinned in-guest.** Vote-identifier leaves
+  must carry value 0 (`VoteIDLeafValue`, 4.2.4) and every vote-id and ballot
+  key must have zero upper limbs (4.1.4b), otherwise an observer could not
+  rebuild the tree from the keys the blob publishes. The BLS field inverse
+  hint fails closed (`bls_fr::inv` panics on a bad hint) because a zero
+  inverse would zero every blob evaluation and let a sequencer publish
+  empty blobs.
+- **`input.bin` is the private witness** (seed, overwrite and refresh sets).
+  The worker deletes it after proving and `GET /jobs/{id}/inputs` returns
+  404 unless the service runs with `DAVINCI_KEEP_INPUTS=1` (the local dev
+  env sets it; the integration tests that diff inputs need it).
 
 ## ZisK v1.3.0-alpha
 
@@ -361,16 +414,22 @@ build of the same version), both verified:
 Two variables move at once there (ZisK version and the precompile), so treat
 the speedup as the combination, not the precompile alone.
 
-Per-batch PLONK on the release binaries (`TestPlonkBenchmark`, service job
-time, votes/min = batch / proof; 256 and 512 measured on the pre-release build
-with a scratch guest and the cap raised, see `BENCHMARK.md`):
+Per-batch PLONK on the release binaries with silent refreshes and DA binding
+(`TestPlonkBenchmark`, service job time; "steady" = second batch of the
+election, which carries `size` refreshes; votes/min = batch / steady):
 
-| batch | num_fields=2 | votes/min | num_fields=16 | votes/min |
-|---:|---:|---:|---:|---:|
-|  64 |  22.6 s | 170 |  28.2 s | 136 |
-| 128 |  29.9 s | 257 |  40.3 s | 190 |
-| 256 |  51.1 s | 300 |  73.8 s | 208 |
-| 512 |  71.3 s | 431 | 123.5 s | 249 |
+| batch | first (nf=2) | steady (nf=2) | votes/min | first (nf=16) | steady (nf=16) | votes/min |
+|---:|---:|---:|---:|---:|---:|---:|
+|   2 | 15.8 s | 15.8 s |   8 | 15.9 s | 15.8 s |   8 |
+|  64 | 21.9 s | 23.9 s | 161 | 27.7 s | 31.2 s | 123 |
+| 128 | 29.3 s | 31.6 s | 243 | 40.5 s | 46.5 s | 165 |
+
+Worst legal transition (128 overwrites + 256 refreshes, nf=16, four blobs):
+54 s, 30.4 GiB GPU peak, no minimal-memory retry. Settlement gas on the
+simulated chain: ~498 k with one blob, ~56 k per extra blob. `TestFullE2E`'s
+tally model assumes the default field count; use `BALLOT_NUM_FIELDS=16` with
+`TestPlonkBenchmark` (or accept that the scaled e2e fails only in its final
+tally check after every transition has been proved and settled).
 
 ## Historical baseline (RTX 5090, ZisK v0.18.0)
 

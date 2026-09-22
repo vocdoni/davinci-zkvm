@@ -10,6 +10,7 @@ pub mod bls_fr;
 pub mod bn254;
 pub mod bn254_fr;
 pub mod chaum_pedersen;
+pub mod da_blob;
 pub mod hash;
 pub mod poseidon;
 mod poseidon13_constants;

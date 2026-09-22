@@ -32,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 	davinciSolidity "github.com/vocdoni/davinci-zkvm/go-sdk/solidity"
 )
 
@@ -62,10 +63,11 @@ func TestPlonkBenchmark(t *testing.T) {
 	}
 
 	type result struct {
-		size     int
-		proofMs  int64
-		wallMs   int64
-		verifyMs int64
+		size      int
+		proofMs   int64 // first batch: empty tree, no refreshes
+		refreshMs int64 // second batch: size votes + size silent refreshes
+		wallMs    int64
+		verifyMs  int64
 	}
 	results := make([]result, 0, len(sizes))
 
@@ -73,101 +75,104 @@ func TestPlonkBenchmark(t *testing.T) {
 
 	for _, size := range sizes {
 		t.Logf("--- batch size %d ---", size)
-
-		election, err := NewElection(size)
+		// Two batches on one election. The first fills an empty tree, so it
+		// carries no silent refreshes; the second is the steady state and
+		// refreshes RefreshTarget(size, 0, size) = size slots on top of its
+		// own votes. The verified proof is the second one.
+		election, err := NewElection(2 * size)
 		if err != nil {
 			t.Fatalf("size=%d: NewElection: %v", size, err)
 		}
-
-		voters := election.Voters[:size]
-		seedBase := int64(42)
-
-		wallStart := time.Now()
-		batch, err := GenerateBallotBatch(election.ProcessID, election.EncKey, voters, seedBase)
-		if err != nil {
-			t.Fatalf("size=%d: GenerateBallotBatch: %v", size, err)
-		}
-		t.Logf("  size=%d: ballot proofs generated in %.1fs", size, time.Since(wallStart).Seconds())
-
-		oldRoot := election.OldRoot
-		kzgBlock, err := election.BuildKZGBlock(0, oldRoot)
-		if err != nil {
-			t.Fatalf("size=%d: BuildKZGBlock: %v", size, err)
-		}
-		reencBlock, reencBallots, err := election.BuildReencBlock(oldRoot, batch.Results)
-		if err != nil {
-			t.Fatalf("size=%d: BuildReencBlock: %v", size, err)
-		}
-		stateBlock, _, err := election.BuildStateBlock(voters, batch.Results, reencBallots)
-		if err != nil {
-			t.Fatalf("size=%d: BuildStateBlock: %v", size, err)
-		}
-		censusProofs, err := election.BuildCensusProofs(voters)
-		if err != nil {
-			t.Fatalf("size=%d: BuildCensusProofs: %v", size, err)
-		}
-
-		req := batch.ToProveRequest()
-		req.State = stateBlock
-		req.CensusProofs = censusProofs
-		req.Reencryption = reencBlock
-		req.KZG = kzgBlock
-
-		submitTime := time.Now()
-		jobID, err := client.SubmitProve(req)
-		if err != nil {
-			t.Fatalf("size=%d: SubmitProve: %v", size, err)
-		}
-		t.Logf("  size=%d: job %s submitted", size, jobID)
-
-		job, err := client.WaitForJob(jobID, proofTimeout())
-		if err != nil {
-			t.Fatalf("size=%d: WaitForJob: %v", size, err)
-		}
-		if job.Status != "done" {
-			errMsg := "<no error>"
-			if job.Error != nil {
-				errMsg = *job.Error
-			}
-			t.Fatalf("size=%d: job %s failed: %s", size, jobID, errMsg)
-		}
-		wallMs := time.Since(submitTime).Milliseconds()
-		var proofMs int64
-		if job.ElapsedMs != nil {
-			proofMs = *job.ElapsedMs
-		}
-		t.Logf("  size=%d: proof=%dms wall=%dms", size, proofMs, wallMs)
-
-		// Fetch the SNARK payload and verify it with the Solidity verifier.
-		snark, err := client.FetchSnark(jobID)
+		first := proveBench(t, client, election, election.Voters[:size], 42)
+		second := proveBench(t, client, election, election.Voters[size:2*size], 43)
+		t.Logf("  size=%d: proof=%dms (no refresh) / %dms (%d refreshes)",
+			size, first.proofMs, second.proofMs, size)
+		snark, err := client.FetchSnark(second.jobID)
 		if err != nil {
 			t.Fatalf("size=%d: FetchSnark: %v", size, err)
 		}
-		t.Logf("  size=%d: snark fetched (proof_bytes=%dB, publicValues=%dB)",
-			size, len(snark.ProofBytes), len(snark.PublicValues))
-
 		verifyStart := time.Now()
 		if err := davinciSolidity.VerifyOnSimulated(solidityDir(), snark); err != nil {
 			t.Fatalf("size=%d: Solidity verification failed: %v", size, err)
 		}
 		verifyMs := time.Since(verifyStart).Milliseconds()
 		t.Logf("  size=%d: ✓ Solidity verification succeeded in %dms", size, verifyMs)
-
-		results = append(results, result{size: size, proofMs: proofMs, wallMs: wallMs, verifyMs: verifyMs})
+		results = append(results, result{size: size, proofMs: first.proofMs, refreshMs: second.proofMs,
+			wallMs: second.wallMs, verifyMs: verifyMs})
 	}
-
 	t.Log("")
 	t.Log("=== PLONK SNARK Performance Summary ===")
-	t.Logf("%-10s  %12s  %10s  %12s  %12s", "batch_size", "proof_ms", "proof_s", "wall_ms", "verify_ms")
-	t.Logf("%-10s  %12s  %10s  %12s  %12s", "----------", "--------", "-------", "-------", "---------")
+	t.Logf("%-10s  %12s  %12s  %12s  %12s", "batch_size", "proof_ms", "refresh_ms", "wall_ms", "verify_ms")
+	t.Logf("%-10s  %12s  %12s  %12s  %12s", "----------", "--------", "----------", "-------", "---------")
 	for _, r := range results {
-		t.Logf("%-10d  %12d  %10.1f  %12d  %12d",
-			r.size, r.proofMs, float64(r.proofMs)/1000, r.wallMs, r.verifyMs)
+		t.Logf("%-10d  %12d  %12d  %12d  %12d", r.size, r.proofMs, r.refreshMs, r.wallMs, r.verifyMs)
 	}
-
 	t.Log("")
-	t.Log("CSV: batch_size,proof_ms,wall_ms,verify_ms")
+	t.Log("CSV: batch_size,proof_ms,wall_ms,verify_ms,refresh_ms")
 	for _, r := range results {
-		t.Log(fmt.Sprintf("CSV: %d,%d,%d,%d", r.size, r.proofMs, r.wallMs, r.verifyMs))
+		t.Log(fmt.Sprintf("CSV: %d,%d,%d,%d,%d", r.size, r.proofMs, r.wallMs, r.verifyMs, r.refreshMs))
 	}
+}
+
+type benchRun struct {
+	jobID   string
+	proofMs int64
+	wallMs  int64
+}
+
+// proveBench proves one batch of voters on election through the service
+// and returns the job id and its timings.
+func proveBench(t *testing.T, client *davinci.Client, election *Election, voters []*Voter, seedBase int64) benchRun {
+	t.Helper()
+	size := len(voters)
+	wallStart := time.Now()
+	batch, err := GenerateBallotBatch(election.ProcessID, election.EncKey, voters, seedBase)
+	if err != nil {
+		t.Fatalf("size=%d: GenerateBallotBatch: %v", size, err)
+	}
+	t.Logf("  size=%d: ballot proofs generated in %.1fs", size, time.Since(wallStart).Seconds())
+	oldRoot := election.OldRoot
+	reencBlock, reencBallots, err := election.BuildReencBlock(oldRoot, batch.Results)
+	if err != nil {
+		t.Fatalf("size=%d: BuildReencBlock: %v", size, err)
+	}
+	stateBlock, _, err := election.BuildStateBlock(voters, batch.Results, reencBallots)
+	if err != nil {
+		t.Fatalf("size=%d: BuildStateBlock: %v", size, err)
+	}
+	kzgBlock, _, err := election.BuildKZGBlock(oldRoot)
+	if err != nil {
+		t.Fatalf("size=%d: BuildKZGBlock: %v", size, err)
+	}
+	censusProofs, err := election.BuildCensusProofs(voters)
+	if err != nil {
+		t.Fatalf("size=%d: BuildCensusProofs: %v", size, err)
+	}
+	req := batch.ToProveRequest()
+	req.State = stateBlock
+	req.CensusProofs = censusProofs
+	req.Reencryption = reencBlock
+	req.KZG = kzgBlock
+	submitTime := time.Now()
+	jobID, err := client.SubmitProve(req)
+	if err != nil {
+		t.Fatalf("size=%d: SubmitProve: %v", size, err)
+	}
+	t.Logf("  size=%d: job %s submitted", size, jobID)
+	job, err := client.WaitForJob(jobID, proofTimeout())
+	if err != nil {
+		t.Fatalf("size=%d: WaitForJob: %v", size, err)
+	}
+	if job.Status != "done" {
+		errMsg := "<no error>"
+		if job.Error != nil {
+			errMsg = *job.Error
+		}
+		t.Fatalf("size=%d: job %s failed: %s", size, jobID, errMsg)
+	}
+	run := benchRun{jobID: jobID, wallMs: time.Since(submitTime).Milliseconds()}
+	if job.ElapsedMs != nil {
+		run.proofMs = *job.ElapsedMs
+	}
+	return run
 }

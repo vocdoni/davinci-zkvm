@@ -17,8 +17,8 @@ use crate::babyjubjub::BjjAccumulator;
 use crate::bn254_fr::ONE;
 use crate::hash;
 use crate::types::{
-    BallotData, FrRaw, StateBlock, BALLOT_FIELDS, FAIL_LEAF_HASH, FAIL_RESULT_ACCUM, NUM_FIELDS,
-    ZERO_FR,
+    BallotData, FrRaw, StateBlock, BALLOT_FIELDS, FAIL_LEAF_HASH, FAIL_REFRESH, FAIL_RESULT_ACCUM,
+    NUM_FIELDS, ZERO_FR,
 };
 
 /// The identity ballot: every point is the TE identity (0, 1). Matches
@@ -33,13 +33,15 @@ pub fn zero_ballot() -> BallotData {
     b
 }
 
-/// Homomorphic net sum `init + Σ add_terms − Σ sub_terms` with the 16 point
-/// accumulators kept projective across the whole chain: one field inversion
-/// per coordinate pair total, instead of one per added/subtracted ballot.
+/// Homomorphic net sum `init + Σ add_terms − Σ sub_terms + extra_add`, one
+/// affine precompile add per term and coordinate pair. `extra_add` (the
+/// refresh delta) is folded on active fields only; padded slots stay
+/// identity, so passing the identity ballot disables it.
 fn ballot_net(
     init: &BallotData,
     add_terms: &[BallotData],
     sub_terms: &[BallotData],
+    extra_add: &BallotData,
     num_fields: usize,
 ) -> BallotData {
     let limit = num_fields * 2;
@@ -55,6 +57,9 @@ fn ballot_net(
         for (i, acc) in accs.iter_mut().enumerate() {
             acc.sub(&(t[i * 2], t[i * 2 + 1]));
         }
+    }
+    for (i, acc) in accs.iter_mut().enumerate() {
+        acc.add(&(extra_add[i * 2], extra_add[i * 2 + 1]));
     }
     let mut out = [ZERO_FR; BALLOT_FIELDS];
     for (i, acc) in accs.iter().enumerate() {
@@ -171,8 +176,9 @@ mod tests {
                 expected[i * 2 + 1] = p.1;
             }
         }
+        let zero = zero_ballot();
         assert_eq!(
-            ballot_net(&init, &add_terms, &sub_terms, NUM_FIELDS),
+            ballot_net(&init, &add_terms, &sub_terms, &zero, NUM_FIELDS),
             expected
         );
     }
@@ -188,6 +194,127 @@ mod tests {
             carry = s >> 64;
         }
         out
+    }
+
+    fn empty_state() -> StateBlock {
+        StateBlock {
+            n_voters: 0,
+            n_overwritten: 0,
+            occupied_before: 0,
+            process_id: ZERO_FR,
+            old_state_root: ZERO_FR,
+            new_state_root: ZERO_FR,
+            vote_id_chain: Vec::new(),
+            ballot_chain: Vec::new(),
+            refresh_chain: Vec::new(),
+            results: None,
+            process_proofs: Vec::new(),
+            n_levels: 0,
+            old_results: zero_ballot(),
+            voter_ballots: Vec::new(),
+            overwritten_ballots: Vec::new(),
+            refreshed_ballots: Vec::new(),
+        }
+    }
+
+    fn mk_refresh_update(old_hash: FrRaw, new_hash: FrRaw) -> crate::types::SmtTransition {
+        crate::types::SmtTransition {
+            old_root: ZERO_FR,
+            new_root: ZERO_FR,
+            old_key: [0x10, 0, 0, 0],
+            old_value: old_hash,
+            is_old0: false,
+            new_key: [0x10, 0, 0, 0],
+            new_value: new_hash,
+            fnc0: false,
+            fnc1: true,
+            siblings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn refresh_length_mismatch_sets_fail_refresh() {
+        // refresh_chain has one entry, refreshed_ballots has one, refreshed_new
+        // is empty. The empty-branch guard does not fire (refreshed_ballots is
+        // non-empty) so the length-agreement check runs and flags FAIL_REFRESH.
+        let mut s = empty_state();
+        s.refresh_chain.push(mk_refresh_update(ZERO_FR, ZERO_FR));
+        s.refreshed_ballots.push(zero_ballot());
+        let zero = zero_ballot();
+        let mut m = 0u32;
+        let (ok, _net) = verify_results(&s, NUM_FIELDS, &[], &zero, &mut m);
+        assert!(!ok);
+        assert!(m & FAIL_REFRESH != 0, "mask={:#x}", m);
+    }
+
+    #[test]
+    fn refresh_new_leaf_hash_mismatch_sets_fail_refresh() {
+        // One refresh entry, but new_hash on the SMT side is wrong.
+        let mut s = empty_state();
+        let old = zero_ballot();
+        let new = zero_ballot(); // identity roundtrip; hash should be identical
+        let old_hash = ballot_leaf_hash(&old);
+        // Bad new_hash: hash of a different ballot.
+        let mut different = zero_ballot();
+        different[0] = [7, 0, 0, 0];
+        different[1] = [11, 0, 0, 0];
+        let wrong_new_hash = ballot_leaf_hash(&different);
+
+        s.refresh_chain.push(mk_refresh_update(old_hash, wrong_new_hash));
+        s.refreshed_ballots.push(old);
+        // Force Results transition to be present so the empty-guard doesn't
+        // short-circuit; keep leaf hash bytes coherent so only the refresh
+        // new-hash check trips.
+        let net_new = ballot_net(&s.old_results, &[], &[], &zero_ballot(), NUM_FIELDS);
+        s.results = Some(crate::types::SmtTransition {
+            old_root: ZERO_FR,
+            new_root: ZERO_FR,
+            old_key: [0x04, 0, 0, 0],
+            old_value: ballot_leaf_hash(&s.old_results),
+            is_old0: false,
+            new_key: [0x04, 0, 0, 0],
+            new_value: ballot_leaf_hash(&net_new),
+            fnc0: false,
+            fnc1: true,
+            siblings: Vec::new(),
+        });
+
+        let zero = zero_ballot();
+        let mut m = 0u32;
+        let (ok, _net) = verify_results(&s, NUM_FIELDS, &[new], &zero, &mut m);
+        assert!(!ok);
+        assert!(m & FAIL_REFRESH != 0, "mask={:#x}", m);
+    }
+
+    #[test]
+    fn refresh_chain_without_ballot_data_sets_fail_refresh() {
+        // A refresh entry with no old ballot must not slip through the
+        // empty-batch shortcut: it would be an unbound UPDATE of a ballot leaf.
+        let mut s = empty_state();
+        s.refresh_chain.push(mk_refresh_update(ZERO_FR, ZERO_FR));
+        let zero = zero_ballot();
+        let mut m = 0u32;
+        let (ok, _net) = verify_results(&s, NUM_FIELDS, &[], &zero, &mut m);
+        assert!(!ok);
+        assert!(m & FAIL_REFRESH != 0, "mask={:#x}", m);
+    }
+
+    #[test]
+    fn empty_batch_with_refresh_requires_results_transition() {
+        // No voters, no overwrites, ONE refresh entry: results transition must
+        // be present. Absent → FAIL_RESULT_ACCUM (via the else branch of
+        // "if let Some(ref r) = state.results").
+        let mut s = empty_state();
+        let old = zero_ballot();
+        let new = zero_ballot();
+        s.refresh_chain.push(mk_refresh_update(ballot_leaf_hash(&old), ballot_leaf_hash(&new)));
+        s.refreshed_ballots.push(old);
+        s.results = None;
+        let zero = zero_ballot();
+        let mut m = 0u32;
+        let (ok, _net) = verify_results(&s, NUM_FIELDS, &[new], &zero, &mut m);
+        assert!(!ok);
+        assert!(m & FAIL_RESULT_ACCUM != 0, "mask={:#x}", m);
     }
 
     #[test]
@@ -206,8 +333,9 @@ mod tests {
         noncanon[1] = plus_modulus(&p.1);
 
         let init = zero_ballot();
-        let net_canon = ballot_net(&init, &[], &[canonical], NUM_FIELDS);
-        let net_noncanon = ballot_net(&init, &[], &[noncanon], NUM_FIELDS);
+        let zero = zero_ballot();
+        let net_canon = ballot_net(&init, &[], &[canonical], &zero, NUM_FIELDS);
+        let net_noncanon = ballot_net(&init, &[], &[noncanon], &zero, NUM_FIELDS);
         assert_eq!(net_canon, net_noncanon);
         // And the result must equal -p in the first ciphertext slot.
         let neg_p = bjj_neg(&p);
@@ -216,24 +344,41 @@ mod tests {
     }
 }
 
-pub fn verify_results(state: &StateBlock, num_fields: usize, fail_mask: &mut u32) -> bool {
-    // When no voter ballots are provided and no voters exist, nothing to check.
-    // When voters exist but ballot data is absent, that's a protocol violation.
-    if state.voter_ballots.is_empty() && state.overwritten_ballots.is_empty() {
+pub fn verify_results(
+    state: &StateBlock,
+    num_fields: usize,
+    refreshed_new: &[BallotData],
+    refresh_delta: &BallotData,
+    fail_mask: &mut u32,
+) -> (bool, BallotData) {
+    // Every refresh entry needs its old ballot and the guest-computed new
+    // one, whatever else the batch carries: a refresh chain without ballot
+    // data would be an unbound UPDATE of a ballot leaf. Checked before the
+    // empty-batch shortcut below for that reason.
+    if state.refreshed_ballots.len() != state.refresh_chain.len()
+        || refreshed_new.len() != state.refreshed_ballots.len()
+    {
+        *fail_mask |= FAIL_REFRESH;
+        return (false, state.old_results);
+    }
+
+    // 4.4.8': when there is nothing to accumulate (no votes, no overwrites,
+    // no refreshes) the Results leaf must not change — otherwise a prover
+    // could ship a valid SMT update of Results to an arbitrary value and
+    // splice it into the new state root with no accumulation check binding it.
+    if state.voter_ballots.is_empty()
+        && state.overwritten_ballots.is_empty()
+        && state.refreshed_ballots.is_empty()
+    {
         if state.n_voters > 0 {
             *fail_mask |= FAIL_RESULT_ACCUM;
-            return false;
+            return (false, state.old_results);
         }
-        // With no ballots there is nothing to accumulate, so the results
-        // transition must be absent (the leaf must not change). Otherwise a
-        // prover could supply a valid SMT update of the Results leaf to an
-        // arbitrary value and chain it to the new state root, injecting a
-        // forged tally without any accumulation check binding it.
         if state.results.is_some() {
             *fail_mask |= FAIL_RESULT_ACCUM;
-            return false;
+            return (false, state.old_results);
         }
-        return true;
+        return (true, state.old_results);
     }
 
     let mut ok = true;
@@ -254,6 +399,16 @@ pub fn verify_results(state: &StateBlock, num_fields: usize, fail_mask: &mut u32
             break;
         }
     }
+    // Padded slots of the refreshed olds must be TE identity too — the
+    // refresh chain skips per-field EC work on them, so any residual data
+    // would slip past the reencryption verify and the accumulator alike.
+    for b in &state.refreshed_ballots {
+        if !padded_is_identity(b, num_fields) {
+            *fail_mask |= FAIL_REFRESH;
+            ok = false;
+            break;
+        }
+    }
     if !padded_is_identity(&state.old_results, num_fields) {
         *fail_mask |= FAIL_RESULT_ACCUM;
         ok = false;
@@ -263,7 +418,7 @@ pub fn verify_results(state: &StateBlock, num_fields: usize, fail_mask: &mut u32
     // Each voter_ballots[i] must match ballot_chain[i].new_value via SHA-256.
     if state.voter_ballots.len() != state.ballot_chain.len() {
         *fail_mask |= FAIL_LEAF_HASH;
-        return false;
+        return (false, state.old_results);
     }
     for i in 0..state.voter_ballots.len() {
         let expected_hash = ballot_leaf_hash(&state.voter_ballots[i]);
@@ -286,7 +441,7 @@ pub fn verify_results(state: &StateBlock, num_fields: usize, fail_mask: &mut u32
 
     if state.overwritten_ballots.len() != update_indices.len() {
         *fail_mask |= FAIL_LEAF_HASH;
-        return false;
+        return (false, state.old_results);
     }
     for (ob_idx, &chain_idx) in update_indices.iter().enumerate() {
         let expected_hash = ballot_leaf_hash(&state.overwritten_ballots[ob_idx]);
@@ -297,15 +452,37 @@ pub fn verify_results(state: &StateBlock, num_fields: usize, fail_mask: &mut u32
         }
     }
 
-    // Net Results accumulation
-    // NewResults = OldResults + Σ(all voter ballots) − Σ(overwritten ballots)
+    // 4.5.5 / 4.5.6 — refresh leaf hash checks. Each refresh entry is an
+    // UPDATE with old_key == new_key; the ballot payload bytes change from
+    // refreshed_old to refreshed_new, but the plaintext plaintext-of-plaintext
+    // does not (the reencryption verify has already tied `new = old + delta`).
+    for j in 0..state.refreshed_ballots.len() {
+        let old_hash = ballot_leaf_hash(&state.refreshed_ballots[j]);
+        if old_hash != state.refresh_chain[j].old_value {
+            *fail_mask |= FAIL_REFRESH;
+            ok = false;
+            break;
+        }
+        let new_hash = ballot_leaf_hash(&refreshed_new[j]);
+        if new_hash != state.refresh_chain[j].new_value {
+            *fail_mask |= FAIL_REFRESH;
+            ok = false;
+            break;
+        }
+    }
+
+    // 4.4.5' Net Results accumulation with the refresh delta folded in.
+    // NewResults = OldResults + Σ voter_ballots − Σ overwritten + Σ (new_j − old_j)
+    // where the last sum is `refresh_delta`, already assembled active-field
+    // by active-field in `verify_batch_from_parsed`.
+    let net = ballot_net(
+        &state.old_results,
+        &state.voter_ballots,
+        &state.overwritten_ballots,
+        refresh_delta,
+        num_fields,
+    );
     if let Some(ref r) = state.results {
-        let net = ballot_net(
-            &state.old_results,
-            &state.voter_ballots,
-            &state.overwritten_ballots,
-            num_fields,
-        );
         let expected_new_hash = ballot_leaf_hash(&net);
         if expected_new_hash != r.new_value {
             *fail_mask |= FAIL_RESULT_ACCUM;
@@ -323,5 +500,5 @@ pub fn verify_results(state: &StateBlock, num_fields: usize, fail_mask: &mut u32
         ok = false;
     }
 
-    ok
+    (ok, net)
 }

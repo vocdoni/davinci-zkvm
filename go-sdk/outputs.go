@@ -1,6 +1,7 @@
 package davinci
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math/big"
 	"strings"
@@ -28,8 +29,16 @@ type PublicOutputs struct {
 	OverwrittenVotesCount int
 	// CensusRoot is the 256-bit lean-IMT Poseidon BN254 census root.
 	CensusRoot *big.Int
-	// BlobCommitmentLimbs holds the 3 × 128-bit KZG blob commitment limbs.
-	BlobCommitmentLimbs [3]*big.Int
+	// BlobsDigest is SHA-256(com_0 || y_0 || ... || com_{n-1} || y_{n-1})
+	// over the DA blobs bound by this transition (32 bytes, zero if the
+	// batch shipped no KZG block).
+	BlobsDigest [32]byte
+	// NBlobs is the number of blobs the guest bound (0..=MaxBlobs).
+	NBlobs uint32
+	// OccupiedBefore is the batch's claimed count of occupied ballot slots
+	// before it ran; it bounds the silent-refresh minimum the guest enforced,
+	// so the consumer must check it against its running votes − overwrites.
+	OccupiedBefore uint32
 
 	// Diagnostics (not public inputs for on-chain verification)
 	BatchOk bool   // Groth16 batch verification passed
@@ -57,6 +66,7 @@ const (
 	FailResultAccum  = 1 << 20 // Result accumulator mismatch
 	FailLeafHash     = 1 << 21 // Ballot SMT leaf hash mismatch
 	FailBinding      = 1 << 22 // Cross-block binding mismatch
+	FailRefresh      = 1 << 24 // Silent-refresh chain: count, keys, chain or re-randomization
 	FailCSP          = 1 << 23 // CSP ECDSA census attestation
 	FailParse        = 1 << 31 // Input parsing error
 )
@@ -78,6 +88,8 @@ func ParseOutputs(outputs []uint32) (*PublicOutputs, error) {
 		VotersCount:           int(outputs[OutputVotersCount]),
 		OverwrittenVotesCount: int(outputs[OutputOverwrittenCount]),
 		CensusRoot:            u32SliceToBigInt(outputs[OutputCensusRoot : OutputCensusRoot+8]),
+		NBlobs:                outputs[OutputNBlobs],
+		OccupiedBefore:        outputs[OutputOccupiedBefore],
 		BatchOk:               outputs[OutputBatchOk] == 1,
 		ECDSAOk:               outputs[OutputECDSAOk] == 1,
 		NProofs:               outputs[OutputNProofs],
@@ -85,10 +97,11 @@ func ParseOutputs(outputs []uint32) (*PublicOutputs, error) {
 		LogN:                  outputs[OutputLogN],
 	}
 
-	// BlobCommitment: 3 × 128-bit limbs, each stored as 4 × u32 LE.
-	for i := 0; i < 3; i++ {
-		base := OutputBlobCommitment + i*4
-		o.BlobCommitmentLimbs[i] = u32SliceToBigInt(outputs[base : base+4])
+	// BlobsDigest: 8 × u32 LE at slots [28..35]. Words are LE, so bytes are
+	// emitted little-end first — write them into the byte slice in that
+	// order so the caller gets the same 32-byte value the guest sha256'd.
+	for i := 0; i < 8; i++ {
+		binary.LittleEndian.PutUint32(o.BlobsDigest[i*4:(i+1)*4], outputs[OutputBlobsDigest+i])
 	}
 
 	return o, nil
@@ -105,35 +118,25 @@ func u32SliceToBigInt(words []uint32) *big.Int {
 	return result
 }
 
-// ABIEncode packs the public outputs into the uint256[8] ABI encoding used
-// by the on-chain state-transition verifier contract.
+// ABIEncode packs the parsed public outputs into a uint256[7] ABI encoding
+// for Go-side consumers. It is not what DavinciSettlement takes: the
+// contract consumes the raw 512-byte publicValues string of the SNARK.
 //
-// The layout matches davinci-node's StateTransitionBatchProofInputs.ABIEncode():
+// Layout:
 //
 //	[0] = RootHashBefore
 //	[1] = RootHashAfter
 //	[2] = VotersCount
 //	[3] = OverwrittenVotesCount
 //	[4] = CensusRoot
-//	[5] = BlobCommitmentLimbs[0]
-//	[6] = BlobCommitmentLimbs[1]
-//	[7] = BlobCommitmentLimbs[2]
+//	[5] = BlobsDigest    (SHA-256 over ordered (commitment, y) pairs)
+//	[6] = NBlobs
 //
-// Each value is left-padded to 32 bytes (standard ABI uint256).
-// The result is 256 bytes (8 × 32).
+// Each value is left-padded to 32 bytes (standard ABI uint256). The result
+// is 224 bytes (7 × 32).
 func (o *PublicOutputs) ABIEncode() []byte {
-	values := [8]*big.Int{
-		o.RootHashBefore,
-		o.RootHashAfter,
-		big.NewInt(int64(o.VotersCount)),
-		big.NewInt(int64(o.OverwrittenVotesCount)),
-		o.CensusRoot,
-		o.BlobCommitmentLimbs[0],
-		o.BlobCommitmentLimbs[1],
-		o.BlobCommitmentLimbs[2],
-	}
-
-	buf := make([]byte, 256) // 8 × 32 bytes
+	values := o.ABIValues()
+	buf := make([]byte, len(values)*32)
 	for i, v := range values {
 		if v != nil {
 			// FillBytes zero-extends v into the slot; panics if it overflows
@@ -144,25 +147,24 @@ func (o *PublicOutputs) ABIEncode() []byte {
 	return buf
 }
 
-// ABIValues returns the 8 public input values as a [8]*big.Int array,
+// ABIValues returns the 7 public input values as a [7]*big.Int array,
 // suitable for passing directly to go-ethereum ABI encoding.
 // Nil fields become zero.
-func (o *PublicOutputs) ABIValues() [8]*big.Int {
+func (o *PublicOutputs) ABIValues() [7]*big.Int {
 	set := func(v *big.Int) *big.Int {
 		if v == nil {
 			return new(big.Int)
 		}
 		return new(big.Int).Set(v)
 	}
-	return [8]*big.Int{
+	return [7]*big.Int{
 		set(o.RootHashBefore),
 		set(o.RootHashAfter),
 		big.NewInt(int64(o.VotersCount)),
 		big.NewInt(int64(o.OverwrittenVotesCount)),
 		set(o.CensusRoot),
-		set(o.BlobCommitmentLimbs[0]),
-		set(o.BlobCommitmentLimbs[1]),
-		set(o.BlobCommitmentLimbs[2]),
+		new(big.Int).SetBytes(o.BlobsDigest[:]),
+		new(big.Int).SetUint64(uint64(o.NBlobs)),
 	}
 }
 
@@ -194,6 +196,7 @@ func (o *PublicOutputs) FailString() string {
 		{FailLeafHash, "leaf_hash"},
 		{FailBinding, "binding"},
 		{FailCSP, "csp"},
+		{FailRefresh, "refresh"},
 		{FailParse, "parse_error"},
 	}
 	for _, f := range flags {

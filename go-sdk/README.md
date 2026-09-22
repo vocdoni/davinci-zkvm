@@ -29,7 +29,7 @@ batch := &davinci.ProveBatch{
     State:           state,    // *StateTransitionData — SMT chain transitions
     EncryptionKey:   encKey,   // *BjjPoint — ElGamal re-encryption key
     ReencryptionSeed: seed,    // *big.Int — the batch seed the re-encryptions were derived from
-    KZG:             kzgData,  // *KZGRequest — blob evaluation (optional)
+    KZG:             kzgData,  // *KZGRequest — DA blob commitments the guest binds via SHA-256(com||y||…)
 }
 
 // Block until the service returns a ready-to-verify PLONK SNARK.
@@ -52,7 +52,8 @@ _ = snark.ProofBytes       // bytes proofBytes   (768 B = uint256[24])
 ### `ProveBatch`
 
 The thing you assemble for one state-transition proof — voters, the SMT
-chain transitions, the ElGamal re-encryption key, the optional KZG blob:
+chain transitions, the ElGamal re-encryption key, and the DA blob
+commitments the guest binds host-side:
 
 ```go
 type ProveBatch struct {
@@ -61,9 +62,33 @@ type ProveBatch struct {
     State               *StateTransitionData // SMT state transitions
     EncryptionKey       *BjjPoint           // ElGamal re-encryption public key
     ReencryptionSeed    *big.Int            // Batch-wide seed; guest derives every per-field scalar from it
-    KZG                 *KZGRequest         // EIP-4844 blob evaluation data
+    KZG                 *KZGRequest         // DA blob commitments (guest recomputes cells, y, digest)
 }
 ```
+
+### `KZGRequest`
+
+The DA-blob binding the host hands to the prover. The guest rebuilds
+byte-identical blob cells from the verified vote-id / slot-update /
+accumulator state, computes each `y_b = P_b(z_b)` at
+`z_b = SHA-256(processID_be32 || rootBefore_be32 || commitment_b) mod
+r_bls`, and folds them into a public digest
+`SHA-256(com_0 || y_0 || com_1 || y_1 || …)`. Only the raw 48-byte
+commitments travel over the wire — no blobs, no `y` hints, no openings:
+
+```go
+type KZGRequest struct {
+    ProcessID      string   // 32-byte big-endian hex
+    RootHashBefore string   // 32-byte big-endian hex
+    Commitments    []string // 48-byte hex per blob (up to MaxBlobs)
+}
+```
+
+`BuildTransitionBlobs(nf, pid, rootBefore, voteIDs, updates, accumulator)`
+produces the cells, commitments, evaluation points and openings; call
+`.Request(pid, rootBefore)` to strip everything but the commitments for
+the wire, and keep the returned `*TransitionBlobs` for the on-chain
+point-evaluation submission.
 
 ### `VoterBallot`
 
@@ -123,7 +148,8 @@ type PublicOutputs struct {
     VotersCount           int
     OverwrittenVotesCount int
     CensusRoot            *big.Int
-    BlobCommitmentLimbs   [3]*big.Int
+    BlobsDigest           [32]byte // SHA-256(com_0 || y_0 || com_1 || y_1 || …)
+    NBlobs                uint32   // number of DA blobs the guest bound
 }
 ```
 
@@ -214,6 +240,17 @@ continuity, results match, and the external vk binding
 (`digest.fold_vk == snark.ProgramVK`, `digest.batch_vk` == the known
 vote-batch vk). See the repository README for the protocol design and
 the raw HTTP flow.
+
+Every batch also carries a silent-refresh pass: the sequencer
+re-randomizes a target number of occupied ballot slots it did not write,
+so an observer cannot tell an overwrite from routine re-encryption
+traffic. Slots are picked with `crypto/rand` and driven through the same
+scalar chain as the batch's own votes; the seed and the selection stay
+in memory only (they are never snapshotted or logged). The guest
+requires at least `davinci.RefreshTarget(voters, overwrites,
+occupiedBefore)` refresh entries per batch and echoes `OccupiedBefore`
+as a public output — the fold guest checks it against its running
+voters − overwrites.
 
 ### Environment variables
 

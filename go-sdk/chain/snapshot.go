@@ -1,8 +1,11 @@
 // snapshot.go serializes and restores a chained-election State so an
 // orchestrator can survive restarts. Each batch draws a fresh random
-// re-encryption seed, so replaying the vote log does not reproduce the
-// same tree; the full state (arbo contents, net accumulator, per-voter
-// ballots and counters) has to be captured verbatim.
+// re-encryption seed and picks its silent-refresh set from OS randomness,
+// so replaying the vote log does not reproduce the same tree; the full
+// state (arbo contents, net accumulator, per-voter ballots and counters)
+// has to be captured verbatim. Neither the seed nor the refresh selection
+// are ever persisted — the map size is enough to recompute the batch's
+// OccupiedBefore and the guest's refresh target on the next ApplyBatch.
 package chain
 
 import (

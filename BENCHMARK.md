@@ -164,6 +164,41 @@ per-proof cost (recursion + PLONK wrap, ~15 s) now dominates small batches,
 which is why votes/min keeps climbing with batch size: the marginal cost is
 ~0.11 s per vote at 2 fields and ~0.19 s at 16.
 
+## Per-batch mode with silent refreshes and DA binding
+
+Same GPU and release binaries, after the guest gained the silent-refresh
+chain, the in-guest DA blob construction and the results pin (all on by
+default; `TestPlonkBenchmark` now proves two batches per size on one
+election). "first" is the first batch of an election, which has nothing to
+refresh; "steady" is the second, which refreshes `RefreshTarget(size, 0,
+size) = size` slots on top of its own votes and is the number that matters
+for throughput. Both include ZisK's own verification of the result.
+
+| batch | first (nf=2) | steady (nf=2) | votes/min | first (nf=16) | steady (nf=16) | votes/min |
+|---:|---:|---:|---:|---:|---:|---:|
+|   2 | 15.8 s | 15.8 s |   8 | 15.9 s | 15.8 s |   8 |
+|  64 | 21.9 s | 23.9 s | 161 | 27.7 s | 31.2 s | 123 |
+| 128 | 29.3 s | 31.6 s | 243 | 40.5 s | 46.5 s | 165 |
+
+A refresh costs about 18 ms at 2 fields and 45 ms at 16 fields (the
+re-encryption, one SMT update, two leaf hashes and its share of the blob
+evaluation); at `KAPPA = 1` that is +8% and +15% on a 128-vote batch. The
+fixed cost is 15.8 s. The worst legal transition (128 overwrites with 256
+refreshes at 16 fields, four blobs) proved in 54 s and peaked at 30.4 GiB of
+GPU memory without the minimal-memory fallback, which is why `MAX_BATCH_SIZE`
+stays at 128.
+
+Settling a transition through `solidity/DavinciSettlement.sol` on the
+simulated chain (PLONK verification, root and census checks, the
+occupied-slot check, the blob digest and one point evaluation per blob):
+
+| blobs | gas |
+|---:|---:|
+| 1 (128 votes at nf=2, or up to ~120 updates at nf=16) | ~498 k |
+| 2 | ~554 k |
+| 3 (128 votes + 128 refreshes at nf=16) | ~612 k |
+| 4 (128 overwrites + 256 refreshes at nf=16) | ~667 k |
+
 ## Comparing the modes
 
 Per-batch mode has higher raw throughput — chained-mode batches do more
