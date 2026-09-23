@@ -15,9 +15,9 @@ import (
 	"testing"
 
 	"github.com/vocdoni/davinci-zkvm/go-sdk/chain"
+	davinciSolidity "github.com/vocdoni/davinci-zkvm/go-sdk/solidity"
 	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/bjj_gnark"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/elgamal"
-	davinciSolidity "github.com/vocdoni/davinci-zkvm/go-sdk/solidity"
 )
 
 // chainVotes converts a generated ballot batch to chain.Vote values,
@@ -25,7 +25,8 @@ import (
 // fields come from the cast ballot; padded slots [nf, NumFields) carry the TE
 // identity so re-encryption leaves them identity (matching the guest's
 // num_fields-aware skip).
-func chainVotes(voters []*Voter, results []*BallotResult) []chain.Vote {
+func chainVotes(t *testing.T, election *Election, voters []*Voter, results []*BallotResult) []chain.Vote {
+	t.Helper()
 	_, nf := ballotModeLeaf()
 	votes := make([]chain.Vote, len(results))
 	for idx, res := range results {
@@ -39,11 +40,14 @@ func chainVotes(voters []*Voter, results []*BallotResult) []chain.Vote {
 				ballot.Ciphertexts[i] = identityCiphertext()
 			}
 		}
+		slot, err := election.slotKey(voters[idx])
+		if err != nil {
+			t.Fatal(err)
+		}
 		votes[idx] = chain.Vote{
-			CensusIdx:   voters[idx].CensusIdx,
-			VoteID:      res.VoteID,
-			AddressLo16: res.AddressLo16,
-			Ballot:      ballot,
+			Slot:   slot,
+			VoteID: res.VoteID,
+			Ballot: ballot,
 		}
 	}
 	return votes
@@ -104,7 +108,7 @@ func TestChainOrchestrator(t *testing.T) {
 		req := batch.ToProveRequest()
 		req.CensusProofs = censusProofs
 
-		jobID, err := seq.ProveBatch(chainVotes(voters, batch.Results), req)
+		jobID, err := seq.ProveBatch(chainVotes(t, election, voters, batch.Results), req)
 		if err != nil {
 			t.Fatalf("batch %d: ProveBatch: %v", b, err)
 		}

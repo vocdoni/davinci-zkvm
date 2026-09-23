@@ -18,6 +18,40 @@ import "encoding/json"
 // host RAM, ~41 GB with --minimal-memory, is the limit, not the GPU).
 const MaxBatchSize = 1024
 
+// State tree key namespaces (davinci-node spec/params). Keys are u64 in a
+// 64-level arbo tree: distinct keys never share a leaf.
+const (
+	// BallotMin is the first ballot slot key (ConfigMax + 1).
+	BallotMin = uint64(0x10)
+	// BallotMax is the last ballot slot key (VoteIDMin - 1).
+	BallotMax = uint64(0x7FFF_FFFF_FFFF_FFFF)
+	// VoteIDMin is the first vote-identifier key (bit 63 set).
+	VoteIDMin = uint64(0x8000_0000_0000_0000)
+)
+
+// SlotKey is the ballot slot of a Merkle-census voter, derived from the
+// position its census proof authenticates: BallotMin + ((1 << depth) |
+// pathBits), where depth is the number of siblings in the (compact) lean-IMT
+// proof. The leading 1 encodes the depth, so distinct leaves get distinct
+// slots even when the census is not a power of two (for a full tree this is
+// BallotMin + 2^depth + leafIndex). The guest recomputes it from the census
+// proof and rejects any other key (FAIL_BALLOT_NS). Mirrors
+// circuit/src/consistency.rs::slot_key.
+func SlotKey(pathBits uint64, depth int) uint64 {
+	return BallotMin + (uint64(1)<<uint(depth) | pathBits)
+}
+
+// CSPSlotKey is the ballot slot of a CSP-census voter: BallotMin plus the
+// index the CSP signed.
+func CSPSlotKey(index uint64) uint64 {
+	return BallotMin + index
+}
+
+// SlotKey returns the ballot slot this census proof authorizes.
+func (p CensusProof) SlotKey() uint64 {
+	return SlotKey(p.Index, len(p.Siblings))
+}
+
 // Silent revoting: every batch must re-randomize occupied ballot slots it did
 // not write, so an observer cannot tell an overwrite from a routine refresh.
 // Mirrors MAX_REFRESH / REFRESH_* in circuit_primitives::types.

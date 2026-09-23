@@ -273,6 +273,23 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   proofs or more, and still escalates to it on any retry. Run the service
   under a memory-capped unit (`systemd-run --user -p MemoryMax=56G`) when
   probing larger sizes so an overflow kills only the prover.
+- **Ballot slots are derived from the census proof, not chosen by the
+  sequencer.** Merkle census: `slot = BallotMin + ((1 << n_siblings) | path_bits)`
+  (`davinci.SlotKey`, `consistency.rs::slot_key`); the leading 1 encodes the
+  compact lean-IMT path length, so distinct leaves get distinct slots even
+  for a non-power-of-two census, and the guest rejects path bits above
+  `n_siblings`. CSP census: `BallotMin + signed index`. davinci-node's gnark
+  circuit binds `BallotMin + LeafIndex` but its lean-IMT verifier never
+  constrains `LeafIndex` (only `PathBits`), so it does not actually
+  authenticate the slot in Merkle mode; do not copy that. `chain.Vote.Slot`
+  carries the key (`CensusProof.SlotKey()` / `davinci.CSPSlotKey`).
+  `TestCheatSlotMismatch` / `TestCheatSlotHighPathBits` guard it.
+- **The state tree has 64 levels** (`SMT_LEVELS`, davinci-node
+  `StateTreeMaxLevels`), keys are u64 and arbo hashes 8 key bytes in the leaf
+  (`sha256(key_le8 ‖ value_le32 ‖ 0x01)`). The host must build trees with
+  `MaxLevels: 64` and 8-byte keys (`keyLen` in `go-sdk/chain` and the harness)
+  and render keys in the guest's LE limb layout (`keyLE32`). Going from 256 to
+  64 padded levels cut ziskemu steps by 25-29% on 1024-vote inputs.
 - **Ballot capacity is `NUM_FIELDS = 16`** (`circuit-primitives/src/types.rs`,
   mirrored in `input-gen/src/lib.rs` and `go-sdk/types.go`;
   davinci-node calls it `FieldsPerBallot`). The fixed-size gnark/circom
@@ -424,18 +441,18 @@ election, which carries `size` refreshes; votes/min = batch / steady; blobs
 
 | batch | first (nf=2) | steady (nf=2) | votes/min | blobs | first (nf=16) | steady (nf=16) | votes/min | blobs |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-|    2 |  15.8 s |  15.8 s |   8 | 1 |  15.9 s |  15.8 s |   8 | 1 |
-|   64 |  21.9 s |  23.9 s | 161 | 1 |  27.7 s |  31.2 s | 123 | 2 |
-|  128 |  29.3 s |  31.6 s | 243 | 1 |  40.5 s |  46.5 s | 165 | 3 |
-|  256 |  46.9 s |  51.9 s | 296 | 1 |  67.2 s |  80.2 s | 192 | 5 |
-|  512 |  63.1 s |  77.7 s | 395 | 2 | 123.0 s | 151.8 s | 202 | 9 |
-| 1024 | 114.5 s | 151.1 s | 407 | 3 | 260.8 s | 322.1 s | 191 | 17 |
+|    2 |  15.5 s |  15.6 s |   8 | 1 |  16.3 s |  15.7 s |   8 | 1 |
+|   64 |  22.0 s |  22.5 s | 171 | 1 |  27.4 s |  30.3 s | 127 | 2 |
+|  128 |  28.5 s |  30.1 s | 255 | 1 |  40.7 s |  45.7 s | 168 | 3 |
+|  256 |  42.6 s |  46.2 s | 332 | 1 |  66.3 s |  76.7 s | 200 | 5 |
+|  512 |  76.6 s |  84.3 s | 364 | 2 | 139.4 s | 164.3 s | 187 | 9 |
+| 1024 | 154.5 s | 171.2 s | 359 | 3 | 311.0 s | 363.9 s | 169 | 17 |
 
 Sizes >= 512 prove with `--minimal-memory` (host RAM peak 41.5 GB at 1024,
-nf=2; GPU peak 30.4 GB throughout); 512 at nf=2 was measured before the
-threshold existed. Ethereum currently allows 9 blobs per block, so 1024 votes
-at nf=16 (17 blobs) is a proving figure, not a settleable transition on
-mainnet today. Settlement gas on the simulated chain: ~498 k with one blob,
+nf=2; GPU peak 30.4 GB throughout). EIP-7594 caps a transaction at 6 blobs,
+so rows above 6 blobs are proving figures: settling them needs the contract to
+accept one transition across several blob transactions, which
+`DavinciSettlement.sol` does not implement. Settlement gas on the simulated chain: ~498 k with one blob,
 ~56 k per extra blob. Ballots for the benchmark are cached under
 `benchmark/cache/plonk-ballots-*.gob` (seeded election, see
 `CachedBallotBatch`); the first run of a size pays ~1.4 s per ballot, later

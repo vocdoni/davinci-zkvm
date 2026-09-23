@@ -176,27 +176,35 @@ for throughput. Both include ZisK's own verification of the result.
 
 | batch | first (nf=2) | steady (nf=2) | votes/min | blobs | first (nf=16) | steady (nf=16) | votes/min | blobs |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-|    2 |  15.8 s |  15.8 s |   8 | 1 |  15.9 s |  15.8 s |   8 | 1 |
-|   64 |  21.9 s |  23.9 s | 161 | 1 |  27.7 s |  31.2 s | 123 | 2 |
-|  128 |  29.3 s |  31.6 s | 243 | 1 |  40.5 s |  46.5 s | 165 | 3 |
-|  256 |  46.9 s |  51.9 s | 296 | 1 |  67.2 s |  80.2 s | 192 | 5 |
-|  512 |  63.1 s |  77.7 s | 395 | 2 | 123.0 s | 151.8 s | 202 | 9 |
-| 1024 | 114.5 s | 151.1 s | 407 | 3 | 260.8 s | 322.1 s | 191 | 17 |
+|    2 |  15.5 s |  15.6 s |   8 | 1 |  16.3 s |  15.7 s |   8 | 1 |
+|   64 |  22.0 s |  22.5 s | 171 | 1 |  27.4 s |  30.3 s | 127 | 2 |
+|  128 |  28.5 s |  30.1 s | 255 | 1 |  40.7 s |  45.7 s | 168 | 3 |
+|  256 |  42.6 s |  46.2 s | 332 | 1 |  66.3 s |  76.7 s | 200 | 5 |
+|  512 |  76.6 s |  84.3 s | 364 | 2 | 139.4 s | 164.3 s | 187 | 9 |
+| 1024 | 154.5 s | 171.2 s | 359 | 3 | 311.0 s | 363.9 s | 169 | 17 |
 
-A refresh costs about 18 ms at 2 fields and 45 ms at 16 fields (the
+Measured 2026-09-23 on the 64-level state tree with slot binding. The
+earlier table's 512 and 1024 rows were proved on batches the guest had
+rejected with FAIL_CENSUS (the harness repeated voter addresses every 256
+voters), so they skipped the census Merkle verification and were 25-35% too
+optimistic; `TestPlonkBenchmark` now asserts the guest's ok flag.
+
+A refresh costs about 13 ms at 2 fields and 40 ms at 16 fields (the
 re-encryption, one SMT update, two leaf hashes and its share of the blob
-evaluation); at `KAPPA = 1` that is +8% and +15% on a 128-vote batch. The
-fixed cost is 15.8 s; per-vote cost flattens past 512, so throughput
-plateaus near 400 votes/min at 2 fields and 200 at 16.
+evaluation); at `KAPPA = 1` that is +6% and +12% on a 128-vote batch. The
+fixed cost is 15.5 s. The per-vote cost grows slowly with the batch (deeper
+census proofs, `--minimal-memory` from 512), so throughput peaks around 512
+votes at 2 fields (~360 votes/min) and 256 at 16 fields (~200 votes/min)
+and eases off at 1024.
 
 `MAX_BATCH_SIZE` is 1024. The limit is host RAM, not the GPU: the GPU peaks
 at ~30.4 GiB for every size from 128 up, while the prover's resident memory
 for the 1024-vote steady transition is ~54 GB without `--minimal-memory`
 (OOM-killed on this 64 GB machine) and 41.5 GB with it. The service therefore
-uses the flag from 512 proofs up (`ZISK_MINIMAL_MEMORY_FROM`); the 512 row at
-2 fields predates the threshold, the rest of the >= 512 rows carry it (a few
-percent). 1024 votes at 16 fields spans 17 blobs, above the 9 blobs per block
-Ethereum allows today, so that row is a proving figure only.
+uses the flag from 512 proofs up (`ZISK_MINIMAL_MEMORY_FROM`), so the >= 512
+rows carry it (a few percent). EIP-7594 caps a transaction at 6 blobs, so the
+rows above 6 blobs are proving figures only until the settlement contract
+accepts one transition across several blob transactions.
 
 Settling a transition through `solidity/DavinciSettlement.sol` on the
 simulated chain (PLONK verification, root and census checks, the

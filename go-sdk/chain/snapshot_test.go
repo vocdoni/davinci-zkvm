@@ -46,10 +46,9 @@ func testConfig(encKey *bjjgnark.BJJ) Config {
 
 func vote(censusIdx int, voteID, addrLo uint64, b *elgamal.Ballot) Vote {
 	return Vote{
-		CensusIdx:   censusIdx,
-		VoteID:      voteID | (uint64(1) << 63),
-		AddressLo16: addrLo,
-		Ballot:      b,
+		Slot:   ballotKey(censusIdx, addrLo),
+		VoteID: voteID | (uint64(1) << 63),
+		Ballot: b,
 	}
 }
 
@@ -165,11 +164,11 @@ func TestApplyBatchValidation(t *testing.T) {
 	_, _, err = st.ApplyBatch(make([]Vote, davinci.MaxBatchSize+1))
 	c.Assert(err, qt.ErrorMatches, ".*exceeds MaxBatchSize.*")
 
-	_, _, err = st.ApplyBatch([]Vote{vote(-1, 1, 0x01, b)})
-	c.Assert(err, qt.ErrorMatches, ".*census index -1 out of range.*")
+	_, _, err = st.ApplyBatch([]Vote{{Slot: davinci.VoteIDMin, VoteID: 1 | 1<<63, Ballot: b}})
+	c.Assert(err, qt.ErrorMatches, ".*outside the ballot namespace.*")
 
-	_, _, err = st.ApplyBatch([]Vote{{CensusIdx: 0, VoteID: 1 | 1<<63, AddressLo16: 0x10000, Ballot: b}})
-	c.Assert(err, qt.ErrorMatches, ".*AddressLo16.*exceeds 16 bits.*")
+	_, _, err = st.ApplyBatch([]Vote{{Slot: 0x04, VoteID: 1 | 1<<63, Ballot: b}})
+	c.Assert(err, qt.ErrorMatches, ".*outside the ballot namespace.*")
 
 	// Rejected batches leave the state untouched.
 	voters, overwrites := st.Voters()

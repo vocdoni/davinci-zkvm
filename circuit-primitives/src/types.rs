@@ -12,7 +12,7 @@
 //! |  12 | `FAIL_SMT_RESULTS`      | smt.rs         | net Results transition invalid             |
 //! |  13 | `FAIL_SMT_PROCESS`      | smt.rs         | Process config proof invalid or missing    |
 //! |  14 | `FAIL_CONSISTENCY`      | consistency.rs | VoteID namespace / proof binding mismatch  |
-//! |  15 | `FAIL_BALLOT_NS`        | consistency.rs | Ballot namespace / address binding mismatch|
+//! |  15 | `FAIL_BALLOT_NS`        | consistency.rs | Ballot namespace / slot binding mismatch   |
 //! |  16 | `FAIL_CENSUS`           | census.rs      | Census membership proof failed             |
 //! |  17 | `FAIL_REENC`            | babyjubjub.rs  | Re-encryption verification failed          |
 //! |  18 | `FAIL_KZG`              | kzg.rs         | KZG barycentric evaluation mismatch        |
@@ -58,12 +58,19 @@ pub const NUM_FIELDS: usize = 16;
 /// Flat ballot width: NUM_FIELDS ciphertexts × 4 BN254 Fr coordinates.
 pub const BALLOT_FIELDS: usize = NUM_FIELDS * 4;
 
+/// Depth of the arbo state tree (davinci-node `StateTreeMaxLevels`). Keys
+/// are u64, so the leaf hash covers 8 key bytes and proofs carry at most 64
+/// siblings. Distinct u64 keys never share a leaf; the only collisions are
+/// between 63-bit truncated vote-id hashes, which just make that voter
+/// resubmit with a fresh k.
+pub const SMT_LEVELS: usize = 64;
+
 /// Maximum number of ballot proofs per batch.
-/// Must be a power of two. Increase here to support larger batches.
+/// Increase here to support larger batches.
 ///
 /// 1024 is the largest size measured end to end on ZisK 1.3 (RTX 5090, 64 GB
 /// host): 1024 votes plus 1024 silent refreshes at num_fields = 16 prove in
-/// ~322 s with the GPU at ~30 GB. Host RAM is the binding limit, not the GPU:
+/// ~364 s with the GPU at ~30 GB. Host RAM is the binding limit, not the GPU:
 /// that transition needs ~41 GB with `cargo-zisk prove --minimal-memory` and
 /// ~54 GB without, so the service uses the flag from 512 proofs up. Raise only
 /// after re-measuring both (and bump input-gen + go-sdk to match).

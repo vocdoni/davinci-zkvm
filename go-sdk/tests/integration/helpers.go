@@ -84,6 +84,14 @@ func arboHexToBEHex(leHex string) string {
 	return "0x" + hex.EncodeToString(pad32(bi.Bytes()))
 }
 
+// keyLE32 renders an arbo key (8 LE bytes in the 64-level tree) as the
+// 32-byte LE limb layout the guest reads: the key bytes first, zeros after.
+func keyLE32(k []byte) []byte {
+	out := make([]byte, 32)
+	copy(out, k)
+	return out
+}
+
 // pad32 right-aligns b into a 32-byte slice (zero-left-padded).
 func pad32(b []byte) []byte {
 	if len(b) == 32 {
@@ -104,7 +112,7 @@ func pad32(b []byte) []byte {
 // The function inserts it and updates the tree.
 func buildArboInsertEntry(tree *arbo.Tree, newKeyBI, newValueBI *big.Int, levels int) (davinci.SmtEntry, error) {
 	bLen := arbo.HashFunctionSha256.Len()
-	newKeyBytes := arbo.BigIntToBytes(bLen, newKeyBI)
+	newKeyBytes := arbo.BigIntToBytes(keyLen, newKeyBI)
 	newValueBytes := arbo.BigIntToBytes(bLen, newValueBI)
 
 	// GenProof BEFORE insertion => detect displaced leaf.
@@ -168,9 +176,9 @@ func buildArboInsertEntry(tree *arbo.Tree, newKeyBI, newValueBI *big.Int, levels
 	entry := davinci.SmtEntry{
 		OldRoot:  "0x" + hex.EncodeToString(pad32(oldRootBytes)),
 		NewRoot:  "0x" + hex.EncodeToString(pad32(newRootBytes)),
-		OldKey:   "0x" + hex.EncodeToString(pad32(oldLeafKey)),
+		OldKey:   "0x" + hex.EncodeToString(keyLE32(oldLeafKey)),
 		OldValue: "0x" + hex.EncodeToString(pad32(oldLeafValue)),
-		NewKey:   "0x" + hex.EncodeToString(pad32(newKeyBytes)),
+		NewKey:   "0x" + hex.EncodeToString(keyLE32(newKeyBytes)),
 		NewValue: "0x" + hex.EncodeToString(pad32(newValueBytes)),
 		Fnc0:     1,
 		Fnc1:     0,
@@ -189,7 +197,7 @@ func buildArboInsertEntry(tree *arbo.Tree, newKeyBI, newValueBI *big.Int, levels
 // The key must already exist in the tree.
 func buildArboUpdateEntry(tree *arbo.Tree, keyBI, newValueBI *big.Int, levels int) (davinci.SmtEntry, error) {
 	bLen := arbo.HashFunctionSha256.Len()
-	keyBytes := arbo.BigIntToBytes(bLen, keyBI)
+	keyBytes := arbo.BigIntToBytes(keyLen, keyBI)
 	newValueBytes := arbo.BigIntToBytes(bLen, newValueBI)
 
 	// Get old value and siblings before update.
@@ -235,9 +243,9 @@ func buildArboUpdateEntry(tree *arbo.Tree, keyBI, newValueBI *big.Int, levels in
 	return davinci.SmtEntry{
 		OldRoot:  "0x" + hex.EncodeToString(pad32(oldRootBytes)),
 		NewRoot:  "0x" + hex.EncodeToString(pad32(newRootBytes)),
-		OldKey:   "0x" + hex.EncodeToString(pad32(keyBytes)),
+		OldKey:   "0x" + hex.EncodeToString(keyLE32(keyBytes)),
 		OldValue: "0x" + hex.EncodeToString(pad32(oldValueBytes)),
-		NewKey:   "0x" + hex.EncodeToString(pad32(keyBytes)),
+		NewKey:   "0x" + hex.EncodeToString(keyLE32(keyBytes)),
 		NewValue: "0x" + hex.EncodeToString(pad32(newValueBytes)),
 		IsOld0:   0,
 		Fnc0:     0,
@@ -258,7 +266,7 @@ func buildArboReadProofs(tree *arbo.Tree, keys []uint64, bLen, levels int) ([]da
 	var entries []davinci.SmtEntry
 	for _, k := range keys {
 		keyBI := new(big.Int).SetUint64(k)
-		keyBytes := arbo.BigIntToBytes(bLen, keyBI)
+		keyBytes := arbo.BigIntToBytes(keyLen, keyBI)
 
 		_, valBytes, packedSibs, exists, err := tree.GenProof(keyBytes)
 		if err != nil {
@@ -286,10 +294,10 @@ func buildArboReadProofs(tree *arbo.Tree, keys []uint64, bLen, levels int) ([]da
 		entries = append(entries, davinci.SmtEntry{
 			OldRoot:  rootHex,
 			NewRoot:  rootHex,
-			OldKey:   "0x" + hex.EncodeToString(pad32(keyBytes)),
+			OldKey:   "0x" + hex.EncodeToString(keyLE32(keyBytes)),
 			OldValue: "0x" + hex.EncodeToString(pad32(valBytes)),
 			IsOld0:   0,
-			NewKey:   "0x" + hex.EncodeToString(pad32(keyBytes)),
+			NewKey:   "0x" + hex.EncodeToString(keyLE32(keyBytes)),
 			NewValue: "0x" + hex.EncodeToString(pad32(valBytes)),
 			Fnc0:     0,
 			Fnc1:     0,

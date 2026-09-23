@@ -117,7 +117,7 @@ func RestoreState(cfg Config, blob []byte) (*State, error) {
 		{0x07, cfg.BallotVKHash},
 	}
 	for _, leaf := range expectedLeaves {
-		keyBytes := arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(leaf.key))
+		keyBytes := arbo.BigIntToBytes(keyLen, new(big.Int).SetUint64(leaf.key))
 		_, got, err := tree.Get(keyBytes)
 		if err != nil {
 			return nil, fmt.Errorf("snapshot anchor: config leaf 0x%02x not found: %w", leaf.key, err)

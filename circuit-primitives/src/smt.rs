@@ -42,12 +42,14 @@ pub fn le_to_fr(b: &[u8; 32]) -> FrRaw {
 
 // Arbo-compatible hash functions
 
-/// Arbo leaf hash: `SHA256(key_le32 || value_le32 || 0x01)` => 65 bytes.
+/// Arbo leaf hash: `SHA256(key_le8 || value_le32 || 0x01)` => 41 bytes.
+/// The tree has `SMT_LEVELS = 64` levels, so arbo keys are 8 bytes; only
+/// limb 0 of the key is ever hashed or walked.
 pub fn leaf_hash(key: &FrRaw, value: &FrRaw) -> FrRaw {
-    let mut input = [0u8; 65];
-    input[0..32].copy_from_slice(&fr_to_le(key));
-    input[32..64].copy_from_slice(&fr_to_le(value));
-    input[64] = 0x01;
+    let mut input = [0u8; 41];
+    input[0..8].copy_from_slice(&key[0].to_le_bytes());
+    input[8..40].copy_from_slice(&fr_to_le(value));
+    input[40] = 0x01;
     le_to_fr(&sha256_once(&input))
 }
 

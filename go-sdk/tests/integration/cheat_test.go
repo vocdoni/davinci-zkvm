@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	arbo "github.com/vocdoni/arbo"
@@ -99,14 +100,20 @@ func (c *cheatElectionInput) fullInput() []byte {
 // Returns the assembled input ready for ziskemu.
 func buildCheatInput(t *testing.T) (*cheatElectionInput, *Election, []*BallotResult) {
 	t.Helper()
+	return buildCheatInputN(t, 2)
+}
 
-	// Create election with exactly 2 voters.
-	election, err := NewElection(2)
+// buildCheatInputN is buildCheatInput for an election of n voters, all
+// voting in one batch.
+func buildCheatInputN(t *testing.T, n int) (*cheatElectionInput, *Election, []*BallotResult) {
+	t.Helper()
+
+	election, err := NewElection(n)
 	if err != nil {
 		t.Fatalf("NewElection: %v", err)
 	}
 
-	// Generate 2 ballot proofs.
+	// Generate the ballot proofs.
 	batch, err := GenerateBallotBatch(election.ProcessID, election.EncKey, election.Voters, 42)
 	if err != nil {
 		t.Fatalf("GenerateBallotBatch: %v", err)
@@ -148,7 +155,7 @@ func buildCheatInput(t *testing.T) (*cheatElectionInput, *Election, []*BallotRes
 	// Run gen-input.
 	genInputBin := findGenInputBin(t)
 	outBin := filepath.Join(tmpDir, "input.bin")
-	cmd := exec.Command(genInputBin, "--proofs-dir", tmpDir, "--output", outBin, "--nproofs", "2")
+	cmd := exec.Command(genInputBin, "--proofs-dir", tmpDir, "--output", outBin, "--nproofs", strconv.Itoa(n))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("gen-input: %v\n%s", err, out)
 	}
@@ -423,6 +430,60 @@ func TestCheatWrongCensusRoot(t *testing.T) {
 	tampered = append(tampered, base.reencBlock...)
 	tampered = append(tampered, base.kzgBlock...)
 	assertCircuitFails(t, tampered, failCensus, "wrong_census_root")
+}
+
+// TestCheatSingleVote proves that a transition may carry a single vote
+// package (open inclusion): nothing in the guest or input-gen needs a
+// power-of-two batch.
+func TestCheatSingleVote(t *testing.T) {
+	base, _, _ := buildCheatInputN(t, 1)
+	assertCircuitValid(t, base.fullInput(), "single_vote")
+}
+
+// TestCheatSlotMismatch writes voter 0's ballot to a slot other than the one
+// its census proof authenticates (spec 4.1.6). The key is still inside the
+// ballot namespace, so only the slot binding can catch it.
+func TestCheatSlotMismatch(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+	keyBI, err := davinci.LeHexToBigInt(base.stateData.BallotSmt[0].NewKey)
+	if err != nil || !keyBI.IsUint64() {
+		t.Fatalf("ballot key %s: %v", base.stateData.BallotSmt[0].NewKey, err)
+	}
+	// Stay inside the namespace and keep limbs 1..3 zero, so only the slot
+	// equality can reject it.
+	wrong := smtKeyHex(keyBI.Uint64() + 1)
+	base.stateData.BallotSmt[0].NewKey = wrong
+	base.stateData.BallotSmt[0].OldKey = wrong
+	assertCircuitFails(t, base.reencodeState(t), failBallotNS, "slot_mismatch")
+}
+
+// smtKeyHex renders a u64 SMT key the way the state encoder expects it: 32
+// LE bytes, key in limb 0.
+func smtKeyHex(key uint64) string {
+	return "0x" + hex.EncodeToString(keyLE32(arbo.BigIntToBytes(keyLen, new(big.Int).SetUint64(key))))
+}
+
+// TestCheatSlotHighPathBits sets the path bit just above the proof's sibling
+// count. The census walk never reads it, so the proof still verifies, and
+// because that bit is exactly the slot formula's leading 1, the derived slot
+// is unchanged: the state block stays valid and only the explicit
+// `index >> n_siblings == 0` rule can reject the input. Without it one leaf
+// could claim 2^(64-depth) different slots.
+func TestCheatSlotHighPathBits(t *testing.T) {
+	base, election, _ := buildCheatInput(t)
+	censusProofs, err := election.BuildCensusProofs(election.Voters)
+	if err != nil {
+		t.Fatalf("BuildCensusProofs: %v", err)
+	}
+	censusProofs[0].Index |= 1 << uint(len(censusProofs[0].Siblings))
+	tamperedCensus, err := davinci.EncodeCensusBlock(censusProofs)
+	if err != nil {
+		t.Fatalf("EncodeCensusBlock: %v", err)
+	}
+	tampered := append(append(base.baseBin, base.stateBlock...), tamperedCensus...)
+	tampered = append(tampered, base.reencBlock...)
+	tampered = append(tampered, base.kzgBlock...)
+	assertCircuitFails(t, tampered, failBallotNS, "slot_high_path_bits")
 }
 
 // TestCheatWrongReencKey verifies that a wrong re-encryption public key causes FAIL_REENC.
@@ -1104,7 +1165,7 @@ func TestCheatRefreshSkipsAccumulator(t *testing.T) {
 	// matches what a valid Results transition from the pre-Results state
 	// would produce with WRONG_LEAF (key-layout unchanged ⇒ path unchanged).
 	bLen := arbo.HashFunctionSha256.Len()
-	keyBytes := arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(keyResults))
+	keyBytes := arbo.BigIntToBytes(keyLen, new(big.Int).SetUint64(keyResults))
 	if err := election.ProcTree.Update(keyBytes, arbo.BigIntToBytes(bLen, wrongLeaf)); err != nil {
 		t.Fatalf("tree.Update(wrong leaf): %v", err)
 	}

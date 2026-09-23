@@ -64,14 +64,12 @@ func runBallotWorkerMode() {
 	}
 	encKey := bjjgnark.New().(*bjjgnark.BJJ).SetPoint(x, y).(*bjjgnark.BJJ)
 
-	// Reconstruct voters deterministically from CensusIdx (same seed formula as NewElection)
+	// Reconstruct voters deterministically from CensusIdx with the same
+	// derivation as NewElection (voterSeed), so the ballots bind the census
+	// addresses of the parent's election.
 	voters := make([]*Voter, len(inp.Voters))
 	for i, wv := range inp.Voters {
-		seed := make([]byte, 32)
-		for j := range seed {
-			seed[j] = byte((wv.CensusIdx*7 + j*3 + 42) % 256)
-		}
-		signer, err := nodesig.NewSignerFromSeed(seed)
+		signer, err := nodesig.NewSignerFromSeed(voterSeed(wv.CensusIdx))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ballot worker: voter %d signer: %v\n", i, err)
 			os.Exit(1)

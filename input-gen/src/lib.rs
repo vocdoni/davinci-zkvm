@@ -593,7 +593,7 @@ fn write_u64_slice(buf: &mut Vec<u8>, words: &[u64]) {
 
 /// Generate ZisK binary input from a snarkjs VK and an array of proofs + public inputs.
 /// The `proofs` and `public_inputs` arrays must have the same length, which must be a
-/// power of two >= 2 up to MAX_BATCH_SIZE.
+/// between 1 and MAX_BATCH_SIZE.
 /// Returns raw bytes suitable for writing to disk and passing to `cargo-zisk prove --input`.
 pub fn generate_input(
     vk: &SnarkJsVk,
@@ -602,9 +602,9 @@ pub fn generate_input(
     sigs: &[EcdsaSig],
 ) -> Result<Vec<u8>> {
     let num_proofs = proofs_json.len();
-    if num_proofs < 2 || !num_proofs.is_power_of_two() || num_proofs > MAX_BATCH_SIZE {
+    if num_proofs < 1 || num_proofs > MAX_BATCH_SIZE {
         bail!(
-            "num_proofs ({}) must be a power of two between 2 and {} (MAX_BATCH_SIZE)",
+            "num_proofs ({}) must be between 1 and {} (MAX_BATCH_SIZE)",
             num_proofs,
             MAX_BATCH_SIZE
         );

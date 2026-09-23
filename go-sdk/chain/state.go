@@ -21,8 +21,10 @@ import (
 )
 
 const (
-	// procLevels is the number of levels in the arbo SHA-256 state tree.
-	procLevels = 256
+	// procLevels is the number of levels in the arbo SHA-256 state tree
+	// (davinci-node StateTreeMaxLevels). Keys are u64, hence keyLen.
+	procLevels = 64
+	keyLen     = 8
 	// ballotMin is the minimum key for ballot SMT entries.
 	ballotMin = uint64(0x10)
 	// keyResults is the net accumulated results leaf.
@@ -59,12 +61,12 @@ type Config struct {
 // and census/signature material travel separately in the ProveRequest;
 // the state tree only needs the key parts and the ciphertexts.
 type Vote struct {
-	// CensusIdx is the voter's census index (ballot key bits [16..62]).
-	CensusIdx int
+	// Slot is the voter's ballot slot key: davinci.CensusProof.SlotKey() for a
+	// Merkle census, davinci.CSPSlotKey(index) for a CSP census. The guest
+	// derives the same key from the census proof and rejects any other.
+	Slot uint64
 	// VoteID is the unique vote identifier key (bit 63 set).
 	VoteID uint64
-	// AddressLo16 is the low 16 bits of the voter address (ballot key bits [0..15]).
-	AddressLo16 uint64
 	// Ballot is the voter-encrypted ElGamal ballot (before re-encryption).
 	Ballot *elgamal.Ballot
 }
@@ -76,9 +78,8 @@ type State struct {
 	cfg  Config
 	tree *arbo.Tree
 	root string // current root, 0x-prefixed arbo LE hex
-	// votedBallots is keyed by the full ballot tree key (census index +
-	// address bits), so two votes only count as an overwrite when they
-	// target the exact same leaf.
+	// votedBallots is keyed by the ballot slot, so two votes only count as
+	// an overwrite when they target the exact same leaf.
 	results      accumBallot
 	votedBallots map[uint64]*elgamal.Ballot
 	voters       uint64
@@ -114,7 +115,7 @@ func NewState(cfg Config) (*State, error) {
 	}
 	for i, k := range configKeys {
 		if err := tree.Add(
-			arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(k)),
+			arbo.BigIntToBytes(keyLen, new(big.Int).SetUint64(k)),
 			arbo.BigIntToBytes(bLen, configVals[i]),
 		); err != nil {
 			return nil, fmt.Errorf("genesis config leaf 0x%02x: %w", k, err)
@@ -122,7 +123,7 @@ func NewState(cfg Config) (*State, error) {
 	}
 	zeroLeaf := accumLeafHash(newIdentityAccum())
 	if err := tree.Add(
-		arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(keyResults)),
+		arbo.BigIntToBytes(keyLen, new(big.Int).SetUint64(keyResults)),
 		arbo.BigIntToBytes(bLen, zeroLeaf),
 	); err != nil {
 		return nil, fmt.Errorf("genesis results leaf 0x%02x: %w", keyResults, err)
@@ -185,14 +186,8 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 	// size is the ground truth (both counters are derived from it).
 	occupiedBefore := len(s.votedBallots)
 	for i, v := range votes {
-		// Ballot key layout: bits [0..15] address, [16..62] census index,
-		// bit 63 is the voteID namespace. Out-of-range parts silently
-		// corrupt the key and the guest rejects the whole batch.
-		if v.CensusIdx < 0 || uint64(v.CensusIdx) >= 1<<47 {
-			return nil, nil, fmt.Errorf("vote[%d]: census index %d out of range", i, v.CensusIdx)
-		}
-		if v.AddressLo16 > 0xffff {
-			return nil, nil, fmt.Errorf("vote[%d]: AddressLo16 %#x exceeds 16 bits", i, v.AddressLo16)
+		if v.Slot < davinci.BallotMin || v.Slot > davinci.BallotMax {
+			return nil, nil, fmt.Errorf("vote[%d]: slot %#x outside the ballot namespace", i, v.Slot)
 		}
 	}
 	bLen := arbo.HashFunctionSha256.Len()
@@ -265,7 +260,7 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 	var overwritten []*elgamal.Ballot
 	batchKeys := make(map[uint64]struct{}, n)
 	for i, v := range votes {
-		key := ballotMin + uint64(v.CensusIdx)<<16 + v.AddressLo16
+		key := v.Slot
 		leaf := ballotLeafHash(reencBallots[i])
 		if old, isOverwrite := s.votedBallots[key]; isOverwrite {
 			entry, err := buildArboUpdateEntry(s.tree, new(big.Int).SetUint64(key), leaf, procLevels)
@@ -517,7 +512,7 @@ func (s *State) EncryptedResults() []string {
 // zero-padded to procLevels, as plain LE hex.
 func (s *State) leafSiblings(key uint64) ([]string, error) {
 	bLen := arbo.HashFunctionSha256.Len()
-	keyBytes := arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(key))
+	keyBytes := arbo.BigIntToBytes(keyLen, new(big.Int).SetUint64(key))
 	_, _, packed, exists, err := s.tree.GenProof(keyBytes)
 	if err != nil {
 		return nil, err

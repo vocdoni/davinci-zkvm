@@ -23,6 +23,7 @@ package integration
 // (`ENABLE_PLONK=1 docker compose --profile cuda up -d`).
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -178,5 +179,56 @@ func proveBench(t *testing.T, client *davinci.Client, election *Election, voters
 	if job.ElapsedMs != nil {
 		run.proofMs = *job.ElapsedMs
 	}
+	// A PLONK of a rejected batch verifies just as well on-chain, so the
+	// guest's own verdict is what makes the timing meaningful.
+	publics, err := client.FetchPublics(jobID)
+	if err != nil {
+		t.Fatalf("size=%d: FetchPublics: %v", size, err)
+	}
+	if len(publics) < 8 {
+		t.Fatalf("size=%d: publics too short (%d bytes)", size, len(publics))
+	}
+	ok, failMask := binary.LittleEndian.Uint32(publics[0:]), binary.LittleEndian.Uint32(publics[4:])
+	if ok != 1 {
+		t.Fatalf("size=%d: guest rejected job %s: fail_mask=%#x", size, jobID, failMask)
+	}
 	return run
+}
+
+// TestGenerateBenchBallots only fills the ballot cache TestPlonkBenchmark
+// reads, so the slow part can run ahead of (and in parallel with) the
+// proving sweep. Gated by BENCH_PREGEN=1; honours BENCH_SIZES,
+// BALLOT_NUM_FIELDS and DAVINCI_TEST_ELECTION_SEED like the benchmark.
+func TestGenerateBenchBallots(t *testing.T) {
+	if os.Getenv("BENCH_PREGEN") == "" {
+		t.Skip("set BENCH_PREGEN=1 to pre-generate benchmark ballots")
+	}
+	if os.Getenv("DAVINCI_TEST_ELECTION_SEED") == "" {
+		t.Setenv("DAVINCI_TEST_ELECTION_SEED", "plonk-bench")
+	}
+	sizes := []int{64, 128, 256}
+	if v := os.Getenv("BENCH_SIZES"); v != "" {
+		sizes = nil
+		for _, s := range strings.Split(v, ",") {
+			n, err := strconv.Atoi(strings.TrimSpace(s))
+			if err != nil || n <= 0 {
+				t.Fatalf("bad BENCH_SIZES entry %q: %v", s, err)
+			}
+			sizes = append(sizes, n)
+		}
+	}
+	for _, size := range sizes {
+		election, err := NewElection(2 * size)
+		if err != nil {
+			t.Fatalf("size=%d: NewElection: %v", size, err)
+		}
+		for i, seedBase := range []int64{42, 43} {
+			start := time.Now()
+			voters := election.Voters[i*size : (i+1)*size]
+			if _, err := CachedBallotBatch(election, voters, seedBase); err != nil {
+				t.Fatalf("size=%d: CachedBallotBatch: %v", size, err)
+			}
+			t.Logf("size=%d batch %d: %d ballots ready in %.0fs", size, i+1, size, time.Since(start).Seconds())
+		}
+	}
 }

@@ -25,9 +25,9 @@ import (
 
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/chain"
+	davinciSolidity "github.com/vocdoni/davinci-zkvm/go-sdk/solidity"
 	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/bjj_gnark"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/elgamal"
-	davinciSolidity "github.com/vocdoni/davinci-zkvm/go-sdk/solidity"
 )
 
 // cachedVoter is one pre-generated vote: ballot proof, signature, census
@@ -65,7 +65,9 @@ func benchCachePath(totalVotes int) string {
 	if dir == "" {
 		dir = filepath.Join("..", "..", "..", "benchmark", "cache")
 	}
-	return filepath.Join(dir, fmt.Sprintf("ballots-%d.gob", totalVotes))
+	// v2: 64-level tree with 8-byte keys and slot-derived ballot keys; the
+	// persisted genesis root of older caches cannot match.
+	return filepath.Join(dir, fmt.Sprintf("ballots-v2-%d.gob", totalVotes))
 }
 
 // generateBallotCache builds a fresh election and all its ballot inputs
@@ -186,10 +188,9 @@ func (c *ballotCache) batchRequest(a, b int) (*davinci.ProveRequest, []chain.Vot
 			}
 		}
 		votes[i] = chain.Vote{
-			CensusIdx:   v.CensusIdx,
-			VoteID:      v.VoteID,
-			AddressLo16: v.AddressLo16,
-			Ballot:      ballot,
+			Slot:   v.CensusProof.SlotKey(),
+			VoteID: v.VoteID,
+			Ballot: ballot,
 		}
 	}
 	return req, votes

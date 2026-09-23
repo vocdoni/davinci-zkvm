@@ -2,8 +2,8 @@
 /// 1. **VoteID namespace**: each `vote_id_chain[i].new_key[0] ∈ [VoteIDMin, VoteIDMax]`
 /// 2. **VoteID–proof binding**: `vote_id_chain[i].new_key[0] == proofs[i].public_inputs[1][0]`
 /// 3. **Ballot namespace**: each `ballot_chain[i].new_key[0] ∈ [BallotMin, BallotMax]`
-/// 4. **Ballot–address binding**: `(ballot_chain[i].new_key[0] & 0xFFFF) ==
-///    (proofs[i].public_inputs[0][0] & 0xFFFF)` (lower 16 bits of address)
+/// 4. **Ballot–slot binding**: `ballot_chain[i].new_key[0] == slot(i)`, where the
+///    slot is a function of the authenticated census position (see `slot_key`)
 /// These checks are only applied when a STATETX block is present.
 /// When no state block is present, returns `true` immediately (absence is not a failure).
 
@@ -14,8 +14,7 @@ const VOTE_ID_MIN: u64 = 0x8000_0000_0000_0000;
 const BALLOT_MIN: u64 = 0x0000_0000_0000_0010; // ConfigMax + 1
 const BALLOT_MAX: u64 = 0x7FFF_FFFF_FFFF_FFFF; // VoteIDMin - 1
 
-// Public input indices for the BN254 Groth16 ballot proof.
-const PUB_ADDRESS: usize = 0;
+// Public input index of the voteID in the BN254 Groth16 ballot proof.
 const PUB_VOTE_ID: usize = 1;
 
 use crate::types::{FAIL_CONSISTENCY, FAIL_BALLOT_NS};
@@ -81,6 +80,8 @@ pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     // Only check when ballot chain is present (n_voters may exceed ballot_chain.len()
     // in partial batches that only update voteID => not typical but allowed).
     if !state.ballot_chain.is_empty() {
+        // censusOrigin lives in process config leaf 0x06 (process_proofs[3]).
+        let census_origin = state.process_proofs.get(3).map(|p| p.new_value[0]).unwrap_or(0);
         for i in 0..n_voters {
             if i >= state.ballot_chain.len() {
                 *fail_mask |= FAIL_BALLOT_NS;
@@ -101,18 +102,40 @@ pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
                 ok = false;
             }
 
-            // Address binding: (ballot_key - BallotMin) lower 16 bits == address lower 16 bits.
-            // key = BallotMin + (censusIdx << 16) + (addr & 0xFFFF)
-            if ballot_key >= BALLOT_MIN && i < parsed.proofs.len() && parsed.n_public > PUB_ADDRESS {
-                let pub_addr_lo16 = parsed.proofs[i].public_inputs[PUB_ADDRESS][0] & 0xFFFF;
-                let key_addr_lo16 = (ballot_key.wrapping_sub(BALLOT_MIN)) & 0xFFFF;
-                if pub_addr_lo16 != key_addr_lo16 {
-                    *fail_mask |= FAIL_BALLOT_NS;
-                    ok = false;
-                }
+            // Slot binding: the key is derived from the census proof the guest
+            // verified for this voter, so a ballot can only land in its owner's
+            // slot. The census leaf is bound to the ballot proof's address in
+            // main.rs (FAIL_BINDING).
+            if slot_key(parsed, census_origin, i) != Some(ballot_key) {
+                *fail_mask |= FAIL_BALLOT_NS;
+                ok = false;
             }
         }
     }
 
     ok
+}
+
+/// Ballot slot of voter `i`, derived from its authenticated census position.
+///
+/// Merkle census: `BallotMin + ((1 << n_siblings) | path_bits)`. A lean-IMT
+/// proof identifies a leaf by its compact path bits and their count (the
+/// leading 1 marks the count), so distinct leaves get distinct slots even
+/// when the census is not a power of two. Bits above `n_siblings` are never
+/// consumed by the path walk, so they must be zero. CSP census: the index the
+/// CSP signed. `None` when the derivation is impossible (missing proof, path
+/// too long, index out of the namespace).
+fn slot_key(parsed: &ParsedInput, census_origin: u64, i: usize) -> Option<u64> {
+    let off = if census_origin == crate::types::CENSUS_ORIGIN_CSP {
+        parsed.csp_block.as_ref()?.entries.get(i)?.index
+    } else {
+        let cp = parsed.census_proofs.get(i)?;
+        let n = cp.siblings.len();
+        if n > 61 || cp.index >> n != 0 {
+            return None;
+        }
+        (1u64 << n) | cp.index
+    };
+    let key = BALLOT_MIN.checked_add(off)?;
+    (key <= BALLOT_MAX).then_some(key)
 }

@@ -316,11 +316,11 @@ writes. `nf` is the election's declared field count.
 
 | batch | PLONK (nf=2) | votes/s | PLONK (nf=16) | votes/s | settlement gas |
 |---:|---:|---:|---:|---:|---:|
-|   64 |  23.9 s | 2.7 |  31.2 s | 2.1 | ~500 k |
-|  128 |  31.6 s | 4.1 |  46.5 s | 2.8 | ~500 k (1 blob) / ~612 k (3 blobs) |
-|  256 |  51.9 s | 4.9 |  80.2 s | 3.2 | ~500 k (1) / ~724 k (5) |
-|  512 |  77.7 s | 6.6 | 151.8 s | 3.4 | ~554 k (2) / ~948 k (9) |
-| 1024 | 151.1 s | 6.8 | 322.1 s | 3.2 | ~612 k (3) / 17 blobs, above the mainnet limit |
+|   64 |  22.5 s | 2.8 |  30.3 s | 2.1 | ~500 k |
+|  128 |  30.1 s | 4.3 |  45.7 s | 2.8 | ~500 k (1 blob) / ~612 k (3 blobs) |
+|  256 |  46.2 s | 5.5 |  76.7 s | 3.3 | ~500 k (1) / ~724 k (5) |
+|  512 |  84.3 s | 6.1 | 164.3 s | 3.1 | ~554 k (2) / 9 blobs, above the 6-blob per-tx cap |
+| 1024 | 171.2 s | 6.0 | 363.9 s | 2.8 | ~612 k (3) / 17 blobs, above the 6-blob per-tx cap |
 
 The fixed cost (recursion, PLONK wrap, verification) is about 16 s; the
 batch cap is 1024, set by the prover's host RAM (~41 GB with

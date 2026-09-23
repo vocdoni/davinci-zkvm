@@ -109,16 +109,23 @@ Then, in order:
                         refreshed_ballots (0..MAX_REFRESH)
 ```
 
-Every SMT chain is prefixed by `(count: u64, n_levels: u64)`; each entry is
-laid out below. `refreshed_ballots` is prefixed by its own `(count: u64)` and
+Every SMT chain is prefixed by `(count: u64, n_levels: u64)`; `n_levels` is
+at most `SMT_LEVELS = 64` (the arbo tree depth, davinci-node
+`StateTreeMaxLevels`; the parser flags and clamps larger values) and the
+three flags are u64 words. Each entry is laid out below. A leaf at the last
+level would need 64 non-zero siblings plus the zero leaf-level sentinel the
+processor expects, which does not fit; arbo never creates one (`Add` fails
+with `ErrMaxVirtualLevel` for a key that agrees with an existing key on its
+first 63 path bits), so such a vote-id simply cannot be inserted and the
+voter resubmits with a fresh `k`. `refreshed_ballots` is prefixed by its own `(count: u64)` and
 each ballot is 64 × 32 B (`NUM_FIELDS = 16` ciphertexts × 4 TE coords).
 
 Each SMT transition entry is:
 
 ```
 old_root[32] new_root[32] old_key[32] old_value[32]
-is_old0[1]   new_key[32]  new_value[32]
-fnc0[1]      fnc1[1]
+is_old0[8]   new_key[32]  new_value[32]
+fnc0[8]      fnc1[8]
 siblings[n_levels × 32]
 ```
 
@@ -319,6 +326,12 @@ assert node == root
 
 The `census_root` output is taken from the first census proof's root field.
 
+The path also fixes the voter's ballot slot (4.1.6): lean-IMT proofs are
+compact (levels where the node has no sibling are omitted), so the pair
+`(index, siblings.len())` identifies the leaf, and the guest requires
+`index >> siblings.len() == 0` (bits the walk never reads must be zero) and
+`siblings.len() <= 61` so the slot stays inside the ballot namespace.
+
 ### 3B. CSP ECDSA Census (censusOrigin 4)
 
 In CSP mode, a trusted Credential Service Provider signs each voter's eligibility
@@ -359,7 +372,7 @@ census_root = uint160(csp_address) as FrRaw
 |---|-------|----------|
 | 3B.1 | CSP block is present when censusOrigin=4 | FAIL_MISSING_BLOCK |
 | 3B.2 | CSP block has at least 1 entry | FAIL_CSP |
-| 3B.3 | No duplicate `(voter_address, index)` pairs | FAIL_CSP |
+| 3B.3 | No duplicate `voter_address` and no duplicate `index` across entries (the index is the ballot slot, 4.1.6; the CSP must assign one index per voter) | FAIL_CSP |
 | 3B.4 | Each CSP signature is valid: `secp256k1_ecdsa_verify(csp_pk, z, r, s)` | FAIL_CSP |
 
 ### Extensibility
@@ -391,15 +404,27 @@ the ballot/voteID data is bound to the corresponding ballot proof.
 | 4.1.4 | VoteID public input upper limbs zero: `pubs[1][1..3] == 0` | FAIL_CONSISTENCY |
 | 4.1.4b | `vote_id_chain[i].new_key[1..3] == 0` and `ballot_chain[i].new_key[1..3] == 0`: slot keys are u64, and the DA blob publishes limb 0 only, so a leaf at `key + 2^64` would be unreconstructible | FAIL_CONSISTENCY / FAIL_BALLOT_NS |
 | 4.1.5 | Each `ballot_chain[i].new_key[0] ∈ [0x10, 0x7FFF_FFFF_FFFF_FFFF]` (Ballot namespace) | FAIL_BALLOT_NS |
-| 4.1.6 | `(ballot_key - 0x10) & 0xFFFF == proofs[i].public_inputs[0][0] & 0xFFFF` (address lo16) | FAIL_BALLOT_NS |
+| 4.1.6 | `ballot_chain[i].new_key[0] == slot(i)` (slot binding): Merkle census `slot = BallotMin + ((1 << n_siblings) \| index)` from census proof `i` (with `index >> n_siblings == 0`, `n_siblings <= 61`); CSP census `slot = BallotMin + entries[i].index` (the index the CSP signed) | FAIL_BALLOT_NS |
+
+The slot is a function of the census position the guest verified (3A.4 /
+3B.4), and that leaf's address is bound to ballot proof `i` (§6), so a ballot
+can only be written to its owner's slot. Two census leaves never share a slot:
+the leading 1 encodes the path length, so distinct compact paths map to
+distinct keys even when the census is not a power of two (for a full tree of
+depth `d` the slot is `BallotMin + 2^d + leaf_index`).
 
 **Key namespace layout:**
 
 ```
 0x00 .. 0x0F    Process config keys (reserved)
-0x10 .. 0x7FFF...  Ballot keys:  BallotMin + (censusIdx << 16) + (addr & 0xFFFF)
+0x10 .. 0x7FFF...  Ballot keys:  BallotMin + ((1 << n_siblings) | path_bits)   (Merkle)
+                                 BallotMin + csp_index                          (CSP)
 0x8000... .. 0xFFFF...  VoteID keys: unique per ballot proof
 ```
+
+Keys are u64 in a 64-level tree, so distinct keys never share a leaf. The
+only collisions possible are between vote-id keys (63-bit truncated hashes),
+which make the INSERT fail and that voter resubmit with a fresh `k`.
 
 ### 4.2 SMT Chain Verification
 
@@ -484,7 +509,7 @@ Compute:
 **Hash functions (Arbo SHA-256 compatible):**
 
 ```
-leaf_hash(key, value) = SHA-256(key_LE32 ‖ value_LE32 ‖ 0x01)    // 65 bytes
+leaf_hash(key, value) = SHA-256(key_LE8 ‖ value_LE32 ‖ 0x01)     // 41 bytes (arbo, 8-byte keys)
 node_hash(left, right) = SHA-256(left_LE32 ‖ right_LE32)          // 64 bytes
 ```
 
@@ -1078,8 +1103,8 @@ preserving refactor of *when* work happens, not *what* is checked.
 
 ### 15.1 SMT node-hash skip on padding levels (`smt.rs`)
 
-The SMT proofs are padded to a fixed 256 levels, but the real tree depth is
-only ~log₂(N). On the "not-applicable" levels below the insertion point the
+The SMT proofs are padded to the fixed 64 levels of the tree, but the real
+depth is only ~log₂(N). On the "not-applicable" levels below the insertion point the
 reconstructed node hash is discarded by the state machine, so
 `processor_level` computes the `node_hash` SHA-256 only inside the
 `stTop | stBot | stNew1` guard and skips it otherwise. This elides the large

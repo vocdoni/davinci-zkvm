@@ -20,9 +20,9 @@ import (
 
 	arbo "github.com/vocdoni/arbo"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
+	davinciSolidity "github.com/vocdoni/davinci-zkvm/go-sdk/solidity"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/format"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/elgamal"
-	davinciSolidity "github.com/vocdoni/davinci-zkvm/go-sdk/solidity"
 )
 
 // buildChainConfig assembles the aggregator ChainConfig for an election.
@@ -101,7 +101,7 @@ func buildResultsPayload(e *Election) (*davinci.ResultsPayload, []uint64, error)
 
 	siblings := func(key uint64) ([]string, error) {
 		bLen := arbo.HashFunctionSha256.Len()
-		keyBytes := arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(key))
+		keyBytes := arbo.BigIntToBytes(keyLen, new(big.Int).SetUint64(key))
 		_, _, packedSibs, exists, err := e.ProcTree.GenProof(keyBytes)
 		if err != nil {
 			return nil, err

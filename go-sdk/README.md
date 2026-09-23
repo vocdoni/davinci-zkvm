@@ -223,7 +223,9 @@ seq, err := chain.NewSequencer(client, chain.Config{
 }, 4 /* fold every 4 batches */, 30*time.Minute)
 
 // For each batch of incoming votes:
-//  - votes: []chain.Vote (census index, voteID, address, ElGamal ballot)
+//  - votes: []chain.Vote{Slot: censusProof.SlotKey(), VoteID: ..., Ballot: ...}
+//    (Slot is davinci.CSPSlotKey(index) for a CSP census; the guest derives
+//    the same key from the census proof and rejects any other)
 //  - req:   *ProveRequest with the voters' ballot proofs + census proofs
 //    (the sequencer fills in State, Reencryption and Output itself)
 jobID, err := seq.ProveBatch(votes, req)

@@ -117,11 +117,14 @@ pub fn verify_csp(
 
     let n = csp.entries.len();
 
-    // Invariant 1: no duplicate (voter_address, index) pairs.
+    // Invariant 1: no duplicate voter address and no duplicate index. The
+    // index is the voter's ballot slot (consistency.rs::slot_key), so two
+    // credentials sharing one would share a slot; two credentials for one
+    // address would give that voter two slots.
     for i in 0..n {
         for j in (i + 1)..n {
             if csp.entries[i].voter_address == csp.entries[j].voter_address
-                && csp.entries[i].index == csp.entries[j].index
+                || csp.entries[i].index == csp.entries[j].index
             {
                 *fail_mask |= FAIL_CSP;
                 return (false, ZERO_FR);

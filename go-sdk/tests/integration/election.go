@@ -31,8 +31,10 @@ import (
 )
 
 const (
-	// procLevels is the number of levels in the arbo SHA-256 process state tree.
-	procLevels = 256
+	// procLevels is the number of levels in the arbo SHA-256 process state
+	// tree (davinci-node StateTreeMaxLevels); keys are u64, hence keyLen.
+	procLevels = 64
+	keyLen     = 8
 	// ballotMin is the minimum key for ballot SMT entries (matches circuit constant).
 	ballotMin = uint64(0x10)
 	// voteIDMin is the minimum key for voteID SMT entries (bit 63 set).
@@ -129,6 +131,17 @@ type daBatchState struct {
 // NewElection creates a new test election with nVoters registered voters.
 // It builds the process state tree (with config), the census IMT, and
 // generates random ElGamal and ECDSA keys.
+// voterSeed derives the signer seed of test voter i. It must be injective:
+// the previous byte((i*7+j*3+42)%256) scheme repeated every 256 voters, so
+// batches above 256 carried duplicate census leaves and the guest rejected
+// them (FAIL_CENSUS) without anyone noticing.
+func voterSeed(i int) []byte {
+	var idx [8]byte
+	binary.BigEndian.PutUint64(idx[:], uint64(i))
+	h := sha256.Sum256(append([]byte("davinci-test-voter"), idx[:]...))
+	return h[:]
+}
+
 func NewElection(nVoters int) (*Election, error) {
 	// ProcessID (for ballot proofs and state tree key 0x00)
 	var processID types.ProcessID
@@ -185,7 +198,7 @@ func NewElection(nVoters int) (*Election, error) {
 	}
 	for i, k := range configKeys {
 		if err := procTree.Add(
-			arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(k)),
+			arbo.BigIntToBytes(keyLen, new(big.Int).SetUint64(k)),
 			arbo.BigIntToBytes(bLen, configValsBI[i]),
 		); err != nil {
 			return nil, fmt.Errorf("procTree.Add config[%d]: %w", i, err)
@@ -196,7 +209,7 @@ func NewElection(nVoters int) (*Election, error) {
 	zeroAccum := newZeroFrAccum()
 	zeroLeafBI := frAccumLeafHash(zeroAccum)
 	if err := procTree.Add(
-		arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(keyResults)),
+		arbo.BigIntToBytes(keyLen, new(big.Int).SetUint64(keyResults)),
 		arbo.BigIntToBytes(bLen, zeroLeafBI),
 	); err != nil {
 		return nil, fmt.Errorf("procTree.Add results key 0x%02x: %w", keyResults, err)
@@ -211,11 +224,7 @@ func NewElection(nVoters int) (*Election, error) {
 	// Voters
 	voters := make([]*Voter, nVoters)
 	for i := 0; i < nVoters; i++ {
-		seed := make([]byte, 32)
-		// Deterministic seed per voter index.
-		for j := range seed {
-			seed[j] = byte((i*7 + j*3 + 42) % 256)
-		}
+		seed := voterSeed(i)
 		signer, err := nodesig.NewSignerFromSeed(seed)
 		if err != nil {
 			return nil, fmt.Errorf("voter %d signer: %w", i, err)
@@ -314,7 +323,7 @@ func NewCSPElection(nVoters int) (*Election, error) {
 	}
 	for i, k := range configKeys {
 		if err := procTree.Add(
-			arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(k)),
+			arbo.BigIntToBytes(keyLen, new(big.Int).SetUint64(k)),
 			arbo.BigIntToBytes(bLen, configValsBI[i]),
 		); err != nil {
 			return nil, fmt.Errorf("procTree.Add config[%d]: %w", i, err)
@@ -325,7 +334,7 @@ func NewCSPElection(nVoters int) (*Election, error) {
 	zeroAccum := newZeroFrAccum()
 	zeroLeafBI := frAccumLeafHash(zeroAccum)
 	if err := procTree.Add(
-		arbo.BigIntToBytes(bLen, new(big.Int).SetUint64(keyResults)),
+		arbo.BigIntToBytes(keyLen, new(big.Int).SetUint64(keyResults)),
 		arbo.BigIntToBytes(bLen, zeroLeafBI),
 	); err != nil {
 		return nil, fmt.Errorf("procTree.Add results key 0x%02x: %w", keyResults, err)
@@ -340,10 +349,7 @@ func NewCSPElection(nVoters int) (*Election, error) {
 	// Voters (same key generation as Merkle mode).
 	voters := make([]*Voter, nVoters)
 	for i := 0; i < nVoters; i++ {
-		seed := make([]byte, 32)
-		for j := range seed {
-			seed[j] = byte((i*7 + j*3 + 42) % 256)
-		}
+		seed := voterSeed(i)
 		signer, err := nodesig.NewSignerFromSeed(seed)
 		if err != nil {
 			return nil, fmt.Errorf("voter %d signer: %w", i, err)
@@ -496,8 +502,10 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 	var ballotChain []davinci.SmtEntry
 	var overwrittenBallots []wideBallot
 	for i, v := range batchVoters {
-		res := ballotResults[i]
-		key := ballotMin + uint64(v.CensusIdx)<<16 + res.AddressLo16
+		key, err := e.slotKey(v)
+		if err != nil {
+			return nil, nil, err
+		}
 		newLeafVal := ballotLeafHash(reencBallots[i])
 
 		if oldBallot, isOverwrite := e.VotedBallots[v.CensusIdx]; isOverwrite {
@@ -569,10 +577,11 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 	}
 	items := make([]refreshItem, len(selected))
 	for i, idx := range selected {
-		voter := e.Voters[idx]
-		addrBig := new(big.Int).SetBytes(voter.AddressBytes)
-		addrLo16 := addrBig.Uint64() & 0xFFFF
-		items[i] = refreshItem{idx: idx, key: ballotMin + uint64(idx)<<16 + addrLo16}
+		key, err := e.slotKey(e.Voters[idx])
+		if err != nil {
+			return nil, nil, err
+		}
+		items[i] = refreshItem{idx: idx, key: key}
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].key < items[j].key })
 
@@ -675,8 +684,10 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 		da.VoteIDs[i] = res.VoteID
 	}
 	for i, v := range batchVoters {
-		res := ballotResults[i]
-		key := ballotMin + uint64(v.CensusIdx)<<16 + res.AddressLo16
+		key, err := e.slotKey(v)
+		if err != nil {
+			return nil, nil, err
+		}
 		da.Updates = append(da.Updates, davinci.SlotUpdate{
 			Key:    key,
 			Ballot: voterBallotStrs[i],
@@ -704,6 +715,20 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 		ProcessSmt:       processSmtProofs,
 		BallotProofs:     ballotProofs,
 	}, overwrittenBallots, nil
+}
+
+// slotKey is the ballot slot the guest will derive for v: from the census
+// index the CSP signed, or from the lean-IMT path its census proof
+// authenticates (davinci.SlotKey).
+func (e *Election) slotKey(v *Voter) (uint64, error) {
+	if e.CspKey != nil {
+		return davinci.CSPSlotKey(uint64(v.CensusIdx)), nil
+	}
+	proof, err := e.Census.GenerateProof(v.CensusIdx)
+	if err != nil {
+		return 0, fmt.Errorf("slot of voter %d: %w", v.CensusIdx, err)
+	}
+	return davinci.SlotKey(proof.PathBits, len(proof.Siblings)), nil
 }
 
 // BuildCensusProofs builds lean-IMT Poseidon membership proofs for batchVoters.

@@ -255,7 +255,8 @@ func CachedBallotBatch(e *Election, voters []*Voter, seedBase int64) (*BatchProv
 		return GenerateBallotBatch(e.ProcessID, e.EncKey, voters, seedBase)
 	}
 	_, nf := ballotModeLeaf()
-	tag := sha256.Sum256([]byte(seed))
+	// "v2": voter seeds changed (voterSeed); older caches hold other addresses.
+	tag := sha256.Sum256([]byte(seed + "|v2"))
 	name := fmt.Sprintf("plonk-ballots-nf%d-v%d-%d-s%d-%s.gob",
 		nf, voters[0].CensusIdx, voters[len(voters)-1].CensusIdx, seedBase, hex.EncodeToString(tag[:4]))
 	dir := os.Getenv("BENCH_CACHE_DIR")

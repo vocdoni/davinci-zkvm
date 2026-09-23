@@ -26,9 +26,9 @@ func testEncKeyPair(t *testing.T) (*bjjgnark.BJJ, *big.Int) {
 	return pub.(*bjjgnark.BJJ), priv
 }
 
-// ballotKey mirrors the layout ApplyBatch uses so the tests can compare
-// refresh keys against the batch's ballot keys without duplicating the bit
-// packing.
+// ballotKey spreads test voters over the slot namespace. ApplyBatch takes
+// the slot as given (the guest is what ties it to the census proof), so any
+// injective layout works here.
 func ballotKey(censusIdx int, addrLo16 uint64) uint64 {
 	return ballotMin + uint64(censusIdx)<<16 + addrLo16
 }
