@@ -449,10 +449,13 @@ election, which carries `size` refreshes; votes/min = batch / steady; blobs
 | 1024 | 154.5 s | 171.2 s | 359 | 3 | 311.0 s | 363.9 s | 169 | 17 |
 
 Sizes >= 512 prove with `--minimal-memory` (host RAM peak 41.5 GB at 1024,
-nf=2; GPU peak 30.4 GB throughout). EIP-7594 caps a transaction at 6 blobs,
-so rows above 6 blobs are proving figures: settling them needs the contract to
-accept one transition across several blob transactions, which
-`DavinciSettlement.sol` does not implement. Settlement gas on the simulated chain: ~498 k with one blob,
+nf=2; GPU peak 30.4 GB throughout). EIP-7594 caps a transaction at 6 blobs
+and `DavinciSettlement.sol` reads all of a transition's blobs from one
+transaction, so rows above 6 blobs are proving figures. A ballot is 2*nf
+incompressible curve points, so this is a hard limit of the DA channel: a
+per-batch sequencer sizes its batches with `davinci.MaxSingleTxBatch(nf)`
+(1024 up to nf=5, 909 at 6, 701 at 8, 481 at 12, 366 at 16 for a steady batch
+with as many refreshes as votes). The throughput-optimal batches fit. Settlement gas on the simulated chain: ~498 k with one blob,
 ~56 k per extra blob. Ballots for the benchmark are cached under
 `benchmark/cache/plonk-ballots-*.gob` (seeded election, see
 `CachedBallotBatch`); the first run of a size pays ~1.4 s per ballot, later

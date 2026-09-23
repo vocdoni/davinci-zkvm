@@ -322,6 +322,9 @@ writes. `nf` is the election's declared field count.
 |  512 |  84.3 s | 6.1 | 164.3 s | 3.1 | ~554 k (2) / 9 blobs, above the 6-blob per-tx cap |
 | 1024 | 171.2 s | 6.0 | 363.9 s | 2.8 | ~612 k (3) / 17 blobs, above the 6-blob per-tx cap |
 
+EIP-7594 caps a transaction at 6 blobs, so a sequencer settling on Ethereum
+sizes its batches with `davinci.MaxSingleTxBatch(nf)` (1024 up to 5 fields,
+366 at 16); the fastest configurations fit.
 The fixed cost (recursion, PLONK wrap, verification) is about 16 s; the
 batch cap is 1024, set by the prover's host RAM (~41 GB with
 `--minimal-memory`, which the service enables from 512 proofs). Gas for more

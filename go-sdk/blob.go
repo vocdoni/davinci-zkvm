@@ -17,6 +17,35 @@ import (
 // bumping the constant in both places (and in the settlement contract).
 const MaxBlobs = 32
 
+// MaxBlobsPerTx is the EIP-7594 cap on blobs in one Ethereum transaction.
+// DavinciSettlement reads every blob of a transition from the transaction
+// that submits it, so a transition spanning more blobs cannot be settled.
+const MaxBlobsPerTx = 6
+
+// TransitionBlobCount is the number of blobs a transition with nVotes new
+// vote identifiers and nUpdates slot updates (votes plus refreshes) spans at
+// numFields active fields.
+func TransitionBlobCount(nVotes, nUpdates, numFields int) int {
+	return (totalCells(nVotes, nUpdates, numFields) + cellsPerBlob - 1) / cellsPerBlob
+}
+
+// MaxSingleTxBatch is the largest steady-state batch at numFields whose
+// transition fits in MaxBlobsPerTx blobs: n votes plus the RefreshTarget(n, 0,
+// many) silent refreshes a batch with few overwrites carries, capped at
+// MaxBatchSize. A ballot is 2*numFields incompressible curve points, so this
+// is a hard limit of the data-availability channel, not of the prover; a
+// sequencer settling on Ethereum should size its batches by it. The
+// throughput-optimal batches (512 at 2 fields, 256 at 16) fit.
+func MaxSingleTxBatch(numFields int) int {
+	for n := MaxBatchSize; n > 0; n-- {
+		refreshes := RefreshTarget(n, 0, MaxBatchSize+MaxRefresh)
+		if TransitionBlobCount(n, n+refreshes, numFields) <= MaxBlobsPerTx {
+			return n
+		}
+	}
+	return 0
+}
+
 // cellsPerBlob is the EIP-4844 fixed cell count per blob (matches
 // da_blob::CELLS_PER_BLOB and kzg::N in the guest).
 const cellsPerBlob = 4096

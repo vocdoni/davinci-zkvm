@@ -202,9 +202,11 @@ at ~30.4 GiB for every size from 128 up, while the prover's resident memory
 for the 1024-vote steady transition is ~54 GB without `--minimal-memory`
 (OOM-killed on this 64 GB machine) and 41.5 GB with it. The service therefore
 uses the flag from 512 proofs up (`ZISK_MINIMAL_MEMORY_FROM`), so the >= 512
-rows carry it (a few percent). EIP-7594 caps a transaction at 6 blobs, so the
-rows above 6 blobs are proving figures only until the settlement contract
-accepts one transition across several blob transactions.
+rows carry it (a few percent). EIP-7594 caps a transaction at 6 blobs and the
+settlement contract reads all of a transition's blobs from one transaction,
+so the rows above 6 blobs are proving figures only; a per-batch sequencer
+sizes its batches with `davinci.MaxSingleTxBatch(nf)` (366 at 16 fields, 1024
+up to 5 fields), which costs no throughput since the fastest batches fit.
 
 Settling a transition through `solidity/DavinciSettlement.sol` on the
 simulated chain (PLONK verification, root and census checks, the
