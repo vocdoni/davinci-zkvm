@@ -1,13 +1,14 @@
 [workspace]
 members = [
     "input-gen",
+    "rust-sdk",
     "service",
 ]
-# circuit/ and circuit-aggregator/ are ZisK RISC-V guest programs — build with
-# cargo-zisk from inside each directory. circuit-primitives/ is their shared
-# library. All require the +zisk toolchain and cannot be compiled with
-# standard cargo.
-exclude = ["circuit", "circuit-primitives", "circuit-aggregator"]
+# circuit/, circuit-aggregator/ and circuit-results/ are ZisK RISC-V guest
+# programs — build with cargo-zisk from inside each directory.
+# circuit-primitives/ is their shared library. All require the +zisk toolchain
+# and cannot be compiled with standard cargo.
+exclude = ["circuit", "circuit-primitives", "circuit-aggregator", "circuit-results"]
 resolver = "2"
 
 [workspace.package]

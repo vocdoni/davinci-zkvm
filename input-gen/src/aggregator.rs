@@ -241,8 +241,7 @@ pub fn vadcop_blob_from_proof_bin(bytes: &[u8]) -> Result<VadcopBlob> {
 
     // Format: [minimal(1)][n_publics(1)][flag?|vk|inputs][proof][zisk_vk(4)][tag(1)]
     let n_publics = stark_publics.len();
-    let mut words: Vec<u64> =
-        Vec::with_capacity(3 + n_publics + proof_words.len() + zisk_vk.len());
+    let mut words: Vec<u64> = Vec::with_capacity(3 + n_publics + proof_words.len() + zisk_vk.len());
     words.push((kind == VadcopKind::Minimal) as u64);
     words.push(n_publics as u64);
     words.extend_from_slice(&stark_publics);
@@ -432,9 +431,7 @@ pub fn parse_agg_digest(bytes: &[u8]) -> Result<AggDigest> {
         v
     };
     let mut results = [0u32; 16];
-    for i in 0..16 {
-        results[i] = w[37 + i];
-    }
+    results.copy_from_slice(&w[37..53]);
     Ok(AggDigest {
         mode: w[1],
         step_count: w[2],

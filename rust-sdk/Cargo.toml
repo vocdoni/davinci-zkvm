@@ -1,0 +1,34 @@
+[package]
+name = "davinci-zkvm-sdk"
+description = "Rust SDK for the davinci-zkvm prover: client, wire formats and DAVINCI protocol primitives"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ark-bn254 = { version = "0.4", default-features = false, features = ["curve"] }
+ark-ec = { version = "0.4", default-features = false }
+ark-ff = { version = "0.4", default-features = false }
+ark-groth16 = { version = "0.4", default-features = false }
+ark-serialize = { version = "0.4", default-features = false }
+ark-std = { version = "0.4", default-features = false, features = ["std"] }
+sha2 = "0.10"
+sha3 = "0.10"
+k256 = { version = "0.13", features = ["ecdsa"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = { version = "0.4", features = ["serde"] }
+num-bigint = "0.4"
+thiserror = "2"
+rand = "0.8"
+c-kzg = "2.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["time"] }
+
+[dev-dependencies]
+rand_chacha = "0.3"
+proptest = "1"
+axum = "0.7"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+davinci-zkvm-input-gen = { path = "../input-gen" }

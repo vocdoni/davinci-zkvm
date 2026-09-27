@@ -49,11 +49,15 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY input-gen/Cargo.toml input-gen/Cargo.toml
 COPY service/Cargo.toml service/Cargo.toml
+# rust-sdk is a workspace member the service does not use: its manifest plus a
+# stub lib keep the workspace loadable without copying the crate.
+COPY rust-sdk/Cargo.toml rust-sdk/Cargo.toml
 
-RUN mkdir -p input-gen/src input-gen/src/bin service/src && \
+RUN mkdir -p input-gen/src input-gen/src/bin service/src rust-sdk/src && \
     echo 'pub fn placeholder() {}' > input-gen/src/lib.rs && \
     echo 'fn main() {}' > input-gen/src/bin/gen-input.rs && \
-    echo 'fn main() {}' > service/src/main.rs
+    echo 'fn main() {}' > service/src/main.rs && \
+    touch rust-sdk/src/lib.rs
 
 RUN cargo build --release -p davinci-zkvm-service -p davinci-zkvm-input-gen 2>&1 || true
 RUN rm -rf input-gen/src service/src
@@ -106,6 +110,7 @@ COPY --from=service-builder /build/target/release/davinci-zkvm /app/davinci-zkvm
 # Copy pre-built circuit ELFs
 COPY circuit/elf/circuit.elf /app/circuit.elf
 COPY circuit-aggregator/elf/aggregator.elf /app/aggregator.elf
+COPY circuit-results/elf/results.elf /app/results.elf
 
 ENV PATH=/root/.zisk/bin:$PATH
 ENV LISTEN_ADDR=0.0.0.0:8080
@@ -113,6 +118,7 @@ ENV PROVING_KEY_PATH=/proving-key
 ENV PROVING_KEY_PLONK_PATH=/proving-key-plonk
 ENV CIRCUIT_ELF_PATH=/app/circuit.elf
 ENV AGGREGATOR_ELF_PATH=/app/aggregator.elf
+ENV RESULTS_ELF_PATH=/app/results.elf
 ENV CARGO_ZISK_BIN=/root/.zisk/bin/cargo-zisk
 ENV PROOF_OUTPUT_DIR=/proofs
 ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
