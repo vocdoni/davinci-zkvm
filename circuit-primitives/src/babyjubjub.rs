@@ -120,7 +120,7 @@ const B8Y_LE: FrRaw = [
 /// 2736030358979909402780800718157159386076813972158567259200215660948447373041
 /// (r_bjj = 8 * l is the full curve order). Any point on the curve that also
 /// satisfies `l * P = O` sits in the prime-order subgroup B8 generates.
-const BJJ_SUBGROUP_L: FrRaw = [
+pub const BJJ_SUBGROUP_L: FrRaw = [
     0x677297dc392126f1,
     0xab3eedb83920ee0a,
     0x370a08b6d0302b0b,

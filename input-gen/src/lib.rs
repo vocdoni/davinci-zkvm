@@ -16,6 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub mod aggregator;
+pub mod results;
 
 /// Number of ElGamal ciphertexts per ballot. Must match the guest's
 /// `circuit_primitives::types::NUM_FIELDS`.
@@ -157,7 +158,9 @@ pub fn write_state_block(sd: &StateData) -> Result<Vec<u8>> {
             if rb.len() != BALLOT_FIELDS {
                 bail!(
                     "refreshed_ballots[{}] must have {} elements, got {}",
-                    i, BALLOT_FIELDS, rb.len()
+                    i,
+                    BALLOT_FIELDS,
+                    rb.len()
                 );
             }
         }
@@ -602,7 +605,7 @@ pub fn generate_input(
     sigs: &[EcdsaSig],
 ) -> Result<Vec<u8>> {
     let num_proofs = proofs_json.len();
-    if num_proofs < 1 || num_proofs > MAX_BATCH_SIZE {
+    if !(1..=MAX_BATCH_SIZE).contains(&num_proofs) {
         bail!(
             "num_proofs ({}) must be between 1 and {} (MAX_BATCH_SIZE)",
             num_proofs,
@@ -780,7 +783,7 @@ pub struct CensusProofData {
 
 /// Serialize census membership proofs into the CENSUS binary block.
 /// Format:
-/// ```
+/// ```text
 /// magic:    u64 = "CENSUS!!"
 /// n_proofs: u64
 /// Per proof:
@@ -856,7 +859,7 @@ pub struct ReencEntryData {
 
 /// Serialize re-encryption entries into the REENCBLK binary block.
 /// Format:
-/// ```
+/// ```text
 /// magic:     u64 = "REENCBLK"
 /// n_voters:  u64
 /// pub_key_x: [u64; 4]
@@ -1131,10 +1134,18 @@ mod tests {
 
         let bytes = write_state_block(&sd).expect("write_state_block failed");
 
-        let ob = u64::from_le_bytes(bytes[OFF_OCCUPIED_BEFORE..OFF_OCCUPIED_BEFORE + 8].try_into().unwrap());
+        let ob = u64::from_le_bytes(
+            bytes[OFF_OCCUPIED_BEFORE..OFF_OCCUPIED_BEFORE + 8]
+                .try_into()
+                .unwrap(),
+        );
         assert_eq!(ob, 5, "occupied_before mismatch");
 
-        let rc = u64::from_le_bytes(bytes[OFF_REFRESH_COUNT..OFF_REFRESH_COUNT + 8].try_into().unwrap());
+        let rc = u64::from_le_bytes(
+            bytes[OFF_REFRESH_COUNT..OFF_REFRESH_COUNT + 8]
+                .try_into()
+                .unwrap(),
+        );
         assert_eq!(rc, 1, "refresh_chain count mismatch");
 
         let n_rb = u64::from_le_bytes(bytes[OFF_N_RB..OFF_N_RB + 8].try_into().unwrap());
@@ -1185,7 +1196,12 @@ mod tests {
             let buf = write_kzg_block(&d).expect("write_kzg_block failed");
 
             // Total length: 8 + 32 + 32 + 8 + 48·n
-            assert_eq!(buf.len(), 8 + 32 + 32 + 8 + 48 * n, "byte length for n={}", n);
+            assert_eq!(
+                buf.len(),
+                8 + 32 + 32 + 8 + 48 * n,
+                "byte length for n={}",
+                n
+            );
 
             // n_blobs field at OFF_N_BLOBS
             let n_blobs = u64::from_le_bytes(buf[OFF_N_BLOBS..OFF_N_BLOBS + 8].try_into().unwrap());

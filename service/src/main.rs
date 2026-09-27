@@ -55,23 +55,37 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    if !config.results_elf_path.exists() {
+        anyhow::bail!(
+            "Results ELF not found at {:?}. Set RESULTS_ELF_PATH.",
+            config.results_elf_path
+        );
+    }
+
     tokio::fs::create_dir_all(&config.proof_output_dir).await?;
 
     info!("davinci-zkvm v{}", env!("CARGO_PKG_VERSION"));
     info!("  stark key:    {:?}", config.proving_key_path);
     info!("  plonk key:    {:?}", config.proving_key_plonk_path);
     info!("  circuit ELF:  {:?}", config.circuit_elf_path);
+    info!("  results ELF:  {:?}", config.results_elf_path);
     info!("  cargo-zisk:   {}", config.cargo_zisk_bin);
     info!(
         "  zisk mpi:     procs={}, threads={}, bind-to={}",
         config.zisk_mpi_procs, config.zisk_mpi_threads, config.zisk_mpi_bind_to
     );
     info!("  proof output: {:?}", config.proof_output_dir);
-    info!("  min-memory:   {} (auto-enabled on retry)", config.zisk_minimal_memory);
+    info!(
+        "  min-memory:   {} (auto-enabled on retry)",
+        config.zisk_minimal_memory
+    );
     info!("  listen:       {}", config.listen_addr);
 
     let prover = Arc::new(ProverHandle::new(config.clone()));
-    let state = AppState { config: config.clone(), prover };
+    let state = AppState {
+        config: config.clone(),
+        prover,
+    };
     let app = router(state);
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;

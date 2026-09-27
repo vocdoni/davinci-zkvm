@@ -38,8 +38,7 @@ impl ProverHandle {
     /// Spawn the background prove worker and return a handle to it.
     pub fn new(config: Config) -> Self {
         let jobs: Arc<DashMap<Uuid, Job>> = Arc::new(DashMap::new());
-        let (sender, receiver) =
-            tokio::sync::mpsc::channel::<ProveTask>(config.max_queue_size);
+        let (sender, receiver) = tokio::sync::mpsc::channel::<ProveTask>(config.max_queue_size);
 
         let worker_jobs = jobs.clone();
         tokio::spawn(worker_loop(config, receiver, worker_jobs));
@@ -62,17 +61,20 @@ impl ProverHandle {
         proof_count: usize,
     ) -> anyhow::Result<Uuid> {
         let job_id = Uuid::new_v4();
-        self.jobs.insert(job_id, Job::new(job_id, kind, parent_job_ids));
+        self.jobs
+            .insert(job_id, Job::new(job_id, kind, parent_job_ids));
 
         let job_dir = proof_output_dir.join(job_id.to_string());
         tokio::fs::create_dir_all(&job_dir).await?;
 
-        // The batch circuit reads its input through read_input_slice and
-        // needs the u64 length prefix; the aggregator guest parses
+        // The batch and results guests read one read_input_slice frame and
+        // need the u64 length prefix; the aggregator guest parses
         // self-delimiting frames and takes the payload raw.
         let input_path = job_dir.join("input.bin");
         let encoded = match kind {
-            JobKind::Batch | JobKind::BatchStark => encode_zisk_input(&input_bytes),
+            JobKind::Batch | JobKind::BatchStark | JobKind::Results => {
+                encode_zisk_input(&input_bytes)
+            }
             JobKind::Fold | JobKind::Finalize => input_bytes,
         };
         tokio::fs::write(&input_path, &encoded).await?;
@@ -93,7 +95,10 @@ impl ProverHandle {
 
     /// Number of jobs currently waiting for the worker (not yet started).
     pub fn queue_len(&self) -> usize {
-        self.jobs.iter().filter(|e| e.status == JobStatus::Queued).count()
+        self.jobs
+            .iter()
+            .filter(|e| e.status == JobStatus::Queued)
+            .count()
     }
 }
 
@@ -132,7 +137,10 @@ async fn worker_loop(
         // The input is the private witness (seed, overwrite and refresh sets);
         // once the proof exists it must not linger on disk.
         if !config.keep_inputs {
-            let input_path = config.proof_output_dir.join(job_id.to_string()).join("input.bin");
+            let input_path = config
+                .proof_output_dir
+                .join(job_id.to_string())
+                .join("input.bin");
             if let Err(e) = tokio::fs::remove_file(&input_path).await {
                 if e.kind() != std::io::ErrorKind::NotFound {
                     error!("Job {}: could not delete input.bin: {}", job_id, e);
@@ -236,8 +244,7 @@ async fn run_prove_with_retry(config: &Config, task: &ProveTask) -> anyhow::Resu
                     task.job_id, attempt, MAX_PROVE_RETRIES, PROVE_RETRY_DELAY_SECS
                 );
                 last_err = e;
-                tokio::time::sleep(tokio::time::Duration::from_secs(PROVE_RETRY_DELAY_SECS))
-                    .await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(PROVE_RETRY_DELAY_SECS)).await;
             }
             Err(e) => return Err(e),
         }
@@ -307,7 +314,12 @@ async fn run_prove(config: &Config, task: &ProveTask, minimal_memory: bool) -> a
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        anyhow::bail!("cargo-zisk prove failed (exit {}): {}\n{}", output.status, stderr, stdout);
+        anyhow::bail!(
+            "cargo-zisk prove failed (exit {}): {}\n{}",
+            output.status,
+            stderr,
+            stdout
+        );
     }
 
     // The raw `proof.bin` is a bincode-encoded ZisK `Proof` struct that is

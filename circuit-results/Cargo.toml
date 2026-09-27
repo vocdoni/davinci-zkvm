@@ -1,0 +1,9 @@
+[package]
+name = "davinci-zkvm-results"
+version = "0.1.0"
+edition = "2021"
+default-run = "davinci-zkvm-results"
+
+[dependencies]
+ziskos = "=1.3.0-alpha"
+circuit-primitives = { path = "../circuit-primitives" }

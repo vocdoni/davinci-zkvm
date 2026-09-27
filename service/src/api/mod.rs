@@ -3,10 +3,16 @@
 pub mod fold;
 pub mod jobs;
 pub mod prove;
+pub mod results;
 
 use crate::config::Config;
 use crate::prover::ProverHandle;
-use axum::{extract::{DefaultBodyLimit, State}, routing::get, routing::post, Json, Router};
+use axum::{
+    extract::{DefaultBodyLimit, State},
+    routing::get,
+    routing::post,
+    Json, Router,
+};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -26,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/prove", post(prove::submit_prove))
         .route("/fold", post(fold::submit_fold))
         .route("/finalize", post(fold::submit_finalize))
+        .route("/results", post(results::submit_results))
         .route("/jobs/import", post(jobs::import_stark))
         .route("/jobs/:id", get(jobs::get_job_status))
         .route("/jobs/:id/stark", get(jobs::get_job_stark))

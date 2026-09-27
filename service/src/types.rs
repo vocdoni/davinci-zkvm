@@ -242,6 +242,10 @@ pub struct FinalizeRequest {
     pub results: davinci_zkvm_input_gen::aggregator::ResultsPayload,
 }
 
+/// HTTP request body for POST /results: the single-key tally of one election
+/// (circuit-results/RESULTS.md). 32-byte values are arbo-LE hex.
+pub type ResultsRequest = davinci_zkvm_input_gen::results::ResultsJson;
+
 /// Job status enum
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -264,11 +268,13 @@ pub enum JobKind {
     Fold,
     /// Aggregator finalize step, PLONK wrap.
     Finalize,
+    /// Single-key tally (circuit-results), PLONK wrap.
+    Results,
 }
 
 impl JobKind {
     pub fn is_plonk(self) -> bool {
-        matches!(self, JobKind::Batch | JobKind::Finalize)
+        matches!(self, JobKind::Batch | JobKind::Finalize | JobKind::Results)
     }
 }
 
@@ -306,4 +312,3 @@ impl Job {
         }
     }
 }
-

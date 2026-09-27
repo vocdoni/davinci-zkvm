@@ -534,14 +534,19 @@ func deriveKZGZ(processIDHex, rootBeforeHex string, commitment [48]byte) *big.In
 // circuit ELF. Returns the parsed uint32 output registers or an error.
 // The ELF path can be overridden with the CIRCUIT_ELF_PATH environment variable.
 func runZiskEmu(inputBytes []byte) ([]uint32, error) {
-	ziskemuBin, err := exec.LookPath("ziskemu")
-	if err != nil {
-		return nil, fmt.Errorf("ziskemu not in PATH: %w", err)
-	}
 	elfPath := os.Getenv("CIRCUIT_ELF_PATH")
 	if elfPath == "" {
 		// Repo-relative default: tests run from go-sdk/tests/integration.
 		elfPath = "../../../circuit/elf/circuit.elf"
+	}
+	return runZiskEmuELF(elfPath, inputBytes)
+}
+
+// runZiskEmuELF runs ziskemu on elfPath with inputBytes as one read_slice frame.
+func runZiskEmuELF(elfPath string, inputBytes []byte) ([]uint32, error) {
+	ziskemuBin, err := exec.LookPath("ziskemu")
+	if err != nil {
+		return nil, fmt.Errorf("ziskemu not in PATH: %w", err)
 	}
 	tmp, err := os.CreateTemp("", "davinci-integration-*.bin")
 	if err != nil {
@@ -549,8 +554,8 @@ func runZiskEmu(inputBytes []byte) ([]uint32, error) {
 	}
 	defer os.Remove(tmp.Name())
 	// The guest reads its input via read_slice(), which expects a
-	// u64 LE length prefix before the data (the service adds the same
-	// frame when writing job input.bin files).
+	// u64 LE length prefix before the data, and ziskemu wants the file
+	// padded to 8 bytes (the service's encode_zisk_input does both).
 	var lenPrefix [8]byte
 	binary.LittleEndian.PutUint64(lenPrefix[:], uint64(len(inputBytes)))
 	if _, err := tmp.Write(lenPrefix[:]); err != nil {
@@ -558,6 +563,11 @@ func runZiskEmu(inputBytes []byte) ([]uint32, error) {
 	}
 	if _, err := tmp.Write(inputBytes); err != nil {
 		return nil, err
+	}
+	if pad := (8 - len(inputBytes)%8) % 8; pad > 0 {
+		if _, err := tmp.Write(make([]byte, pad)); err != nil {
+			return nil, err
+		}
 	}
 	tmp.Close()
 

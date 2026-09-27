@@ -24,6 +24,9 @@ pub struct Config {
     /// Path to the compiled aggregator ELF used by /fold and /finalize
     /// (default `/app/aggregator.elf`).
     pub aggregator_elf_path: PathBuf,
+    /// Path to the compiled results ELF used by /results (default
+    /// `circuit-results/elf/results.elf`, relative to the working directory).
+    pub results_elf_path: PathBuf,
     /// `cargo-zisk` binary to invoke (default `cargo-zisk`).
     pub cargo_zisk_bin: String,
     /// Directory for per-job proof output (default `/tmp/proofs`).
@@ -68,6 +71,9 @@ impl Config {
             aggregator_elf_path: env::var("AGGREGATOR_ELF_PATH")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("/app/aggregator.elf")),
+            results_elf_path: env::var("RESULTS_ELF_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("circuit-results/elf/results.elf")),
             cargo_zisk_bin: env::var("CARGO_ZISK_BIN").unwrap_or_else(|_| "cargo-zisk".to_string()),
             proof_output_dir: env::var("PROOF_OUTPUT_DIR")
                 .map(PathBuf::from)
