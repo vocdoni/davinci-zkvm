@@ -4,7 +4,12 @@ use crate::api::AppState;
 use crate::types::{JobKind, ProveRequest, SmtEntryJson};
 use anyhow::{bail, Context};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use davinci_zkvm_input_gen::{census_proof_from_hex, generate_input, write_census_block, write_csp_block, write_kzg_block, write_reenc_block, write_state_block, be_hex32_to_fr_le, address_hex_to_fr_le, BjjCiphertextData, CspBlockData, CspEntryData, KzgData, ReencEntryData, SmtEntry, StateData, NUM_FIELDS, MAX_BLOBS};
+use davinci_zkvm_input_gen::{
+    address_hex_to_fr_le, be_hex32_to_fr_le, census_proof_from_hex, generate_input,
+    write_census_block, write_csp_block, write_kzg_block, write_reenc_block, write_state_block,
+    BjjCiphertextData, CspBlockData, CspEntryData, KzgData, ReencEntryData, SmtEntry, StateData,
+    MAX_BLOBS, NUM_FIELDS,
+};
 use tracing::{debug, error, info, warn};
 
 pub async fn submit_prove(
@@ -14,7 +19,11 @@ pub async fn submit_prove(
     // Validate request
     let num_proofs = req.proofs.len();
     if num_proofs == 0 {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "proofs array is empty"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "proofs array is empty"})),
+        )
+            .into_response();
     }
     if req.public_inputs.len() != num_proofs {
         return (
@@ -35,7 +44,10 @@ pub async fn submit_prove(
     };
 
     // Log request summary
-    info!("Received prove request: {} ballot proof(s), output={:?}", num_proofs, kind);
+    info!(
+        "Received prove request: {} ballot proof(s), output={:?}",
+        num_proofs, kind
+    );
 
     if let Some(st) = &req.state {
         info!(
@@ -55,7 +67,11 @@ pub async fn submit_prove(
     }
 
     if !req.census_proofs.is_empty() {
-        let root = req.census_proofs.first().map(|p| p.root.as_str()).unwrap_or("?");
+        let root = req
+            .census_proofs
+            .first()
+            .map(|p| p.root.as_str())
+            .unwrap_or("?");
         debug!(count = req.census_proofs.len(), census_root = %root, "Census proofs");
     }
 
@@ -77,8 +93,8 @@ pub async fn submit_prove(
     }
 
     debug!(
-        sigs          = req.sigs.len(),
-        queue_len     = state.prover.queue_len(),
+        sigs = req.sigs.len(),
+        queue_len = state.prover.queue_len(),
         "Request accepted; generating ZisK input"
     );
 
@@ -125,16 +141,25 @@ pub async fn submit_prove(
                 vote_id_chain: smt_entries_from_json(&st.vote_id_smt)?,
                 ballot_chain: smt_entries_from_json(&st.ballot_smt)?,
                 refresh_chain: smt_entries_from_json(&st.refresh_smt)?,
-                results: st.results_smt.as_ref().map(smt_entry_from_json).transpose()?,
+                results: st
+                    .results_smt
+                    .as_ref()
+                    .map(smt_entry_from_json)
+                    .transpose()?,
                 process_proofs: smt_entries_from_json(&st.process_smt)?,
-                ballot_proof_data: st.ballot_proofs.as_ref().map(ballot_proof_data_from_json).transpose()?,
+                ballot_proof_data: st
+                    .ballot_proofs
+                    .as_ref()
+                    .map(ballot_proof_data_from_json)
+                    .transpose()?,
             };
             bytes.extend(write_state_block(&sd)?);
         }
 
         // Append census block.
         if !census_json.is_empty() {
-            let proofs = census_json.iter()
+            let proofs = census_json
+                .iter()
                 .map(|cp| census_proof_from_hex(&cp.root, &cp.leaf, cp.index, &cp.siblings))
                 .collect::<anyhow::Result<Vec<_>>>()?;
             bytes.extend(write_census_block(&proofs)?);
@@ -144,16 +169,20 @@ pub async fn submit_prove(
         // shipped in the request; the circuit recovers it from each entry's
         // signature via `ecdsa_recover_secp256k1`.
         if let Some(csp) = csp_json {
-            let entries = csp.proofs.iter().map(|p| {
-                Ok(CspEntryData {
-                    r: be_hex32_to_fr_le(&p.r)?,
-                    s: be_hex32_to_fr_le(&p.s)?,
-                    recid: p.recid,
-                    voter_address: address_hex_to_fr_le(&p.voter_address)?,
-                    weight: be_hex32_to_fr_le(&p.weight)?,
-                    index: p.index,
+            let entries = csp
+                .proofs
+                .iter()
+                .map(|p| {
+                    Ok(CspEntryData {
+                        r: be_hex32_to_fr_le(&p.r)?,
+                        s: be_hex32_to_fr_le(&p.s)?,
+                        recid: p.recid,
+                        voter_address: address_hex_to_fr_le(&p.voter_address)?,
+                        weight: be_hex32_to_fr_le(&p.weight)?,
+                        index: p.index,
+                    })
                 })
-            }).collect::<anyhow::Result<Vec<_>>>()?;
+                .collect::<anyhow::Result<Vec<_>>>()?;
             bytes.extend(write_csp_block(&CspBlockData { entries })?);
         }
 
@@ -164,27 +193,36 @@ pub async fn submit_prove(
             let seed = be_hex32_to_fr_le(&r.seed)?;
             let mut entries = Vec::with_capacity(r.entries.len());
             for e in &r.entries {
-                let parse_ct = |ct: &crate::types::BjjCiphertextJson| -> anyhow::Result<BjjCiphertextData> {
-                    Ok(BjjCiphertextData {
-                        c1x: be_hex32_to_fr_le(&ct.c1.x)?,
-                        c1y: be_hex32_to_fr_le(&ct.c1.y)?,
-                        c2x: be_hex32_to_fr_le(&ct.c2.x)?,
-                        c2y: be_hex32_to_fr_le(&ct.c2.y)?,
-                    })
-                };
+                let parse_ct =
+                    |ct: &crate::types::BjjCiphertextJson| -> anyhow::Result<BjjCiphertextData> {
+                        Ok(BjjCiphertextData {
+                            c1x: be_hex32_to_fr_le(&ct.c1.x)?,
+                            c1y: be_hex32_to_fr_le(&ct.c1.y)?,
+                            c2x: be_hex32_to_fr_le(&ct.c2.x)?,
+                            c2y: be_hex32_to_fr_le(&ct.c2.y)?,
+                        })
+                    };
                 let mut original_arr = Vec::with_capacity(NUM_FIELDS);
                 for (j, ct) in e.original.iter().enumerate() {
-                    original_arr.push(parse_ct(ct).with_context(|| format!("reenc original[{}]", j))?);
+                    original_arr
+                        .push(parse_ct(ct).with_context(|| format!("reenc original[{}]", j))?);
                 }
-                let original: [BjjCiphertextData; NUM_FIELDS] = original_arr.try_into()
+                let original: [BjjCiphertextData; NUM_FIELDS] = original_arr
+                    .try_into()
                     .map_err(|_| anyhow::anyhow!("expected {} original ciphertexts", NUM_FIELDS))?;
                 let mut reenc_arr = Vec::with_capacity(NUM_FIELDS);
                 for (j, ct) in e.reencrypted.iter().enumerate() {
-                    reenc_arr.push(parse_ct(ct).with_context(|| format!("reenc reencrypted[{}]", j))?);
+                    reenc_arr
+                        .push(parse_ct(ct).with_context(|| format!("reenc reencrypted[{}]", j))?);
                 }
-                let reencrypted: [BjjCiphertextData; NUM_FIELDS] = reenc_arr.try_into()
-                    .map_err(|_| anyhow::anyhow!("expected {} reencrypted ciphertexts", NUM_FIELDS))?;
-                entries.push(ReencEntryData { original, reencrypted });
+                let reencrypted: [BjjCiphertextData; NUM_FIELDS] =
+                    reenc_arr.try_into().map_err(|_| {
+                        anyhow::anyhow!("expected {} reencrypted ciphertexts", NUM_FIELDS)
+                    })?;
+                entries.push(ReencEntryData {
+                    original,
+                    reencrypted,
+                });
             }
             bytes.extend(write_reenc_block(pub_key_x, pub_key_y, seed, &entries)?);
         }
@@ -208,14 +246,16 @@ pub async fn submit_prove(
                 commitments.push(arr);
             }
             bytes.extend(write_kzg_block(&KzgData {
-                process_id:       be_hex32_to_fr_le(&k.process_id)?,
+                process_id: be_hex32_to_fr_le(&k.process_id)?,
                 root_hash_before: be_hex32_to_fr_le(&k.root_hash_before)?,
                 commitments,
             })?);
         }
 
         anyhow::Ok(bytes)
-    }).await {
+    })
+    .await
+    {
         Ok(Ok(bytes)) => {
             debug!("Input generation succeeded: {} bytes", bytes.len());
             bytes
@@ -225,34 +265,57 @@ pub async fn submit_prove(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": format!("input generation failed: {}", e)})),
-            ).into_response();
+            )
+                .into_response();
         }
         Err(e) => {
             error!("Task panic: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "internal error"}))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response();
         }
     };
 
     // Submit to prover queue
     let proof_output_dir = state.config.proof_output_dir.clone();
     let elf = state.config.circuit_elf_path.clone();
-    match state.prover.submit(input_bytes, &proof_output_dir, kind, elf, Vec::new(), num_proofs).await {
+    match state
+        .prover
+        .submit(
+            input_bytes,
+            &proof_output_dir,
+            kind,
+            elf,
+            Vec::new(),
+            num_proofs,
+        )
+        .await
+    {
         Ok(job_id) => {
-            info!("Job {} queued: {} ballot proof(s), queue_position={}", job_id, num_proofs, state.prover.queue_len());
+            info!(
+                "Job {} queued: {} ballot proof(s), queue_position={}",
+                job_id,
+                num_proofs,
+                state.prover.queue_len()
+            );
             (
                 StatusCode::ACCEPTED,
                 Json(serde_json::json!({
                     "job_id": job_id,
                     "status": "queued",
                 })),
-            ).into_response()
+            )
+                .into_response()
         }
         Err(e) => {
             error!("Failed to queue job: {}", e);
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({"error": format!("failed to queue job: {}", e)})),
-            ).into_response()
+            )
+                .into_response()
         }
     }
 }
@@ -265,26 +328,40 @@ fn ballot_proof_data_from_json(
     };
     Ok(davinci_zkvm_input_gen::BallotProofData {
         old_results: frs(&bp.old_results)?,
-        voter_ballots: bp.voter_ballots.iter().map(|b| frs(b)).collect::<anyhow::Result<_>>()?,
-        overwritten_ballots: bp.overwritten_ballots.iter().map(|b| frs(b)).collect::<anyhow::Result<_>>()?,
-        refreshed_ballots: bp.refreshed_ballots.iter().map(|b| frs(b)).collect::<anyhow::Result<_>>()?,
+        voter_ballots: bp
+            .voter_ballots
+            .iter()
+            .map(|b| frs(b))
+            .collect::<anyhow::Result<_>>()?,
+        overwritten_ballots: bp
+            .overwritten_ballots
+            .iter()
+            .map(|b| frs(b))
+            .collect::<anyhow::Result<_>>()?,
+        refreshed_ballots: bp
+            .refreshed_ballots
+            .iter()
+            .map(|b| frs(b))
+            .collect::<anyhow::Result<_>>()?,
     })
 }
 
 fn smt_entry_from_json(e: &SmtEntryJson) -> anyhow::Result<SmtEntry> {
-    let siblings = e.siblings.iter()
+    let siblings = e
+        .siblings
+        .iter()
         .map(|s| davinci_zkvm_input_gen::hex32_to_smt_fr(s))
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(SmtEntry {
-        old_root:  davinci_zkvm_input_gen::hex32_to_smt_fr(&e.old_root)?,
-        new_root:  davinci_zkvm_input_gen::hex32_to_smt_fr(&e.new_root)?,
-        old_key:   davinci_zkvm_input_gen::hex32_to_smt_fr(&e.old_key)?,
+        old_root: davinci_zkvm_input_gen::hex32_to_smt_fr(&e.old_root)?,
+        new_root: davinci_zkvm_input_gen::hex32_to_smt_fr(&e.new_root)?,
+        old_key: davinci_zkvm_input_gen::hex32_to_smt_fr(&e.old_key)?,
         old_value: davinci_zkvm_input_gen::hex32_to_smt_fr(&e.old_value)?,
-        is_old0:   e.is_old0 != 0,
-        new_key:   davinci_zkvm_input_gen::hex32_to_smt_fr(&e.new_key)?,
+        is_old0: e.is_old0 != 0,
+        new_key: davinci_zkvm_input_gen::hex32_to_smt_fr(&e.new_key)?,
         new_value: davinci_zkvm_input_gen::hex32_to_smt_fr(&e.new_value)?,
-        fnc0:      e.fnc0 != 0,
-        fnc1:      e.fnc1 != 0,
+        fnc0: e.fnc0 != 0,
+        fnc1: e.fnc1 != 0,
         siblings,
     })
 }

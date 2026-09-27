@@ -9,7 +9,9 @@
 //!   ...
 
 use anyhow::Result;
-use davinci_zkvm_input_gen::{generate_input, load_proofs_from_dir, load_signatures_from_dir, SnarkJsVk};
+use davinci_zkvm_input_gen::{
+    generate_input, load_proofs_from_dir, load_signatures_from_dir, SnarkJsVk,
+};
 use std::path::PathBuf;
 
 fn main() -> Result<()> {
@@ -21,9 +23,18 @@ fn main() -> Result<()> {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--proofs-dir" => { i += 1; proofs_dir = Some(PathBuf::from(&args[i])); }
-            "--output" => { i += 1; output = Some(PathBuf::from(&args[i])); }
-            "--nproofs" => { i += 1; nproofs = args[i].parse()?; }
+            "--proofs-dir" => {
+                i += 1;
+                proofs_dir = Some(PathBuf::from(&args[i]));
+            }
+            "--output" => {
+                i += 1;
+                output = Some(PathBuf::from(&args[i]));
+            }
+            "--nproofs" => {
+                i += 1;
+                nproofs = args[i].parse()?;
+            }
             _ => anyhow::bail!("unknown argument: {}", args[i]),
         }
         i += 1;
@@ -34,8 +45,10 @@ fn main() -> Result<()> {
 
     // Load VK from verification_key.json in the proofs directory
     let vk_path = proofs_dir.join("verification_key.json");
-    let vk: SnarkJsVk = serde_json::from_str(&std::fs::read_to_string(&vk_path)
-        .map_err(|e| anyhow::anyhow!("reading {:?}: {}", vk_path, e))?)?;
+    let vk: SnarkJsVk = serde_json::from_str(
+        &std::fs::read_to_string(&vk_path)
+            .map_err(|e| anyhow::anyhow!("reading {:?}: {}", vk_path, e))?,
+    )?;
 
     eprintln!("Loading {} proofs from {:?}", nproofs, proofs_dir);
     let (proofs, public_inputs) = load_proofs_from_dir(&proofs_dir, nproofs)?;

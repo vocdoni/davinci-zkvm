@@ -33,10 +33,8 @@ pub fn parse_vk_hex(s: &str) -> Result<[u64; 4]> {
 /// `output: stark`).
 pub fn load_job_blob(job_dir: &Path) -> Result<VadcopBlob> {
     let path = job_dir.join("proof.bin");
-    let bytes =
-        std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-    vadcop_blob_from_proof_bin(&bytes)
-        .with_context(|| format!("decode {}", path.display()))
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    vadcop_blob_from_proof_bin(&bytes).with_context(|| format!("decode {}", path.display()))
 }
 
 /// Post-process a completed STARK job: write `publics.bin` (the guest's

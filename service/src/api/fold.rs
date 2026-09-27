@@ -11,7 +11,9 @@ use crate::api::AppState;
 use crate::prover::recursion;
 use crate::types::{FinalizeRequest, FoldRequest, JobKind, JobStatus};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use davinci_zkvm_input_gen::aggregator::{build_finalize_input, build_fold_input, parse_agg_digest};
+use davinci_zkvm_input_gen::aggregator::{
+    build_finalize_input, build_fold_input, parse_agg_digest,
+};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -216,7 +218,14 @@ pub async fn submit_fold(
     let elf = state.config.aggregator_elf_path.clone();
     match state
         .prover
-        .submit(input_bytes, &proof_output_dir, JobKind::Fold, elf, parents, 0)
+        .submit(
+            input_bytes,
+            &proof_output_dir,
+            JobKind::Fold,
+            elf,
+            parents,
+            0,
+        )
         .await
     {
         Ok(job_id) => {

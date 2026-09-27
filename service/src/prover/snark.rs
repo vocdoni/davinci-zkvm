@@ -87,15 +87,24 @@ struct PlonkVkey {
     power: u32,
     k1: String,
     k2: String,
-    #[serde(rename = "Qm")] qm: [String; 3],
-    #[serde(rename = "Ql")] ql: [String; 3],
-    #[serde(rename = "Qr")] qr: [String; 3],
-    #[serde(rename = "Qo")] qo: [String; 3],
-    #[serde(rename = "Qc")] qc: [String; 3],
-    #[serde(rename = "S1")] s1: [String; 3],
-    #[serde(rename = "S2")] s2: [String; 3],
-    #[serde(rename = "S3")] s3: [String; 3],
-    #[serde(rename = "X_2")] x_2: [[String; 2]; 3],
+    #[serde(rename = "Qm")]
+    qm: [String; 3],
+    #[serde(rename = "Ql")]
+    ql: [String; 3],
+    #[serde(rename = "Qr")]
+    qr: [String; 3],
+    #[serde(rename = "Qo")]
+    qo: [String; 3],
+    #[serde(rename = "Qc")]
+    qc: [String; 3],
+    #[serde(rename = "S1")]
+    s1: [String; 3],
+    #[serde(rename = "S2")]
+    s2: [String; 3],
+    #[serde(rename = "S3")]
+    s3: [String; 3],
+    #[serde(rename = "X_2")]
+    x_2: [[String; 2]; 3],
     w: String,
 }
 
@@ -159,8 +168,8 @@ pub struct SnarkArtifact {
 
 /// Decode `<job_dir>/proof.bin` from disk into a [`SnarkArtifact`].
 pub fn parse_proof_bin(path: &Path) -> Result<SnarkArtifact> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("read proof file at {}", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("read proof file at {}", path.display()))?;
     parse_proof_bytes(&bytes)
 }
 
@@ -175,9 +184,13 @@ pub fn parse_proof_bytes(bytes: &[u8]) -> Result<SnarkArtifact> {
     // an aggregated one). Use it rather than plonk_vk.vadcop_vk, which is only
     // the same value in the plain case.
     let (proof_bytes, vadcop_vk, publics, publics_full) = match proof.body {
-        ProofBody::Plonk { proof_bytes, publics, rootc, publics_full, .. } => {
-            (proof_bytes, rootc, publics, publics_full)
-        }
+        ProofBody::Plonk {
+            proof_bytes,
+            publics,
+            rootc,
+            publics_full,
+            ..
+        } => (proof_bytes, rootc, publics, publics_full),
         ProofBody::Vadcop { .. } => bail!(
             "proof.bin is a Vadcop STARK proof, not a PLONK SNARK; the service must run \
              cargo-zisk prove with --plonk"

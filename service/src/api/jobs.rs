@@ -151,10 +151,7 @@ async fn stream_file(path: PathBuf, download_name: String) -> axum::response::Re
 /// blob simply fails to fold. We still decode it here to reject garbage early
 /// and to surface the same `stark.json` / `publics.bin` artifacts a natively
 /// proved STARK job exposes.
-pub async fn import_stark(
-    State(state): State<AppState>,
-    body: Bytes,
-) -> impl IntoResponse {
+pub async fn import_stark(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
     if body.is_empty() {
         return (
             StatusCode::BAD_REQUEST,

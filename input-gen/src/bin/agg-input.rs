@@ -49,8 +49,10 @@ fn print_digest(path: &str) -> Result<()> {
     }
     let d = parse_agg_digest(&bytes)?;
     println!("program_vk: {}", vk_hex(&blob.program_vk));
-    println!("mode: {}  step_count: {}  voters: {}  overwrites: {}",
-        d.mode, d.step_count, d.total_voters, d.total_overwrites);
+    println!(
+        "mode: {}  step_count: {}  voters: {}  overwrites: {}",
+        d.mode, d.step_count, d.total_voters, d.total_overwrites
+    );
     let hex32 = |w: &[u32; 8]| {
         let mut b = Vec::with_capacity(32);
         for x in w {
@@ -80,11 +82,26 @@ fn main() -> Result<()> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--config" => { config_path = Some(args[i + 1].clone()); i += 2; }
-            "--output" => { output_path = Some(args[i + 1].clone()); i += 2; }
-            "--prev" => { prev_path = Some(args[i + 1].clone()); i += 2; }
-            "--fold-vk" => { fold_vk_arg = Some(args[i + 1].clone()); i += 2; }
-            p => { batch_paths.push(p.to_string()); i += 1; }
+            "--config" => {
+                config_path = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--output" => {
+                output_path = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--prev" => {
+                prev_path = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--fold-vk" => {
+                fold_vk_arg = Some(args[i + 1].clone());
+                i += 2;
+            }
+            p => {
+                batch_paths.push(p.to_string());
+                i += 1;
+            }
         }
     }
 
@@ -95,8 +112,7 @@ fn main() -> Result<()> {
     }
 
     let config: ChainConfig = serde_json::from_str(
-        &std::fs::read_to_string(&config_path)
-            .with_context(|| format!("read {}", config_path))?,
+        &std::fs::read_to_string(&config_path).with_context(|| format!("read {}", config_path))?,
     )
     .context("parse chain config json")?;
 
@@ -133,7 +149,12 @@ fn main() -> Result<()> {
     if let Some(p) = &batches[0].publics.get(..2) {
         println!("batch0 publics: ok={} fail_mask={:#x}", p[0], p[1]);
     }
-    println!("{} bytes ({} batches, prev={}) -> {}",
-        input.len(), batches.len(), prev.is_some(), output_path);
+    println!(
+        "{} bytes ({} batches, prev={}) -> {}",
+        input.len(),
+        batches.len(),
+        prev.is_some(),
+        output_path
+    );
     Ok(())
 }
