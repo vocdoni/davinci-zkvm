@@ -11,6 +11,9 @@
 //! - `ROOT_C_VADCOP_FINAL`: after a ZisK release or snark setup change, copy
 //!   `root_c_vadcop_final` from any PLONK job's `snark.json`
 //!   (`GET /jobs/{id}/snark`); every job kind serves the same value.
+//! - `ZISK_VERIFIER_CODEHASH`: after a ZisK snark setup change, `forge build`
+//!   in davinci-contracts and take the keccak256 of `ZiskVerifier`'s
+//!   `deployedBytecode` (it has no immutables, so it equals `eth_getCode`).
 //!
 //! A host that accepts a snark should compare its `program_vk` and
 //! `root_c_vadcop_final` against these pins rather than trust the values the
@@ -35,6 +38,14 @@ pub const RESULTS_PROGRAM_VK: [u8; 32] = [
 pub const ROOT_C_VADCOP_FINAL: [u8; 32] = [
     0x05, 0x00, 0x65, 0x17, 0xb6, 0xcc, 0xde, 0x5d, 0xa4, 0xd8, 0x90, 0x58, 0x7b, 0xa6, 0x28, 0x45,
     0xb5, 0xaf, 0x8a, 0x30, 0x7c, 0x00, 0xe8, 0x7d, 0x4b, 0x9d, 0x05, 0x09, 0x9b, 0x16, 0xdc, 0x80,
+];
+
+/// keccak256 of the runtime code of davinci-contracts' `ZiskVerifier`, built
+/// with its foundry.toml (solc 0.8.28, via-ir). Same bytes as the Gnosis
+/// deployment `0x78CD792CB3754aF5Fd371732a7a73D713bf23961`.
+pub const ZISK_VERIFIER_CODEHASH: [u8; 32] = [
+    0x82, 0x38, 0x5a, 0x40, 0x5b, 0x73, 0x01, 0x34, 0x5d, 0x7e, 0x24, 0x60, 0x17, 0x84, 0x6c, 0xa3,
+    0x22, 0x8a, 0xae, 0xa3, 0x49, 0xcb, 0x68, 0xb1, 0x16, 0xd7, 0x6e, 0x0e, 0x77, 0x05, 0x65, 0x66,
 ];
 
 /// The davinci-circom ballot proof verification key the sequencer accepts

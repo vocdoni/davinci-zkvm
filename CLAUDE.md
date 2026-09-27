@@ -280,7 +280,12 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   `BATCH_PROGRAM_VK` and `RESULTS_PROGRAM_VK` (equal to `CircuitRelease`,
   checked by `wire::release_pins`) and `ROOT_C_VADCOP_FINAL`. Refreeze them
   with the guests; the root moves only with the ZisK snark setup (read it
-  from any PLONK job's `snark.json`).
+  from any PLONK job's `snark.json`). `ZISK_VERIFIER_CODEHASH` is the
+  keccak256 of the deployed `ZiskVerifier` runtime code; the sequencer refuses
+  to boot against a registry whose `ziskVerifier()` has other code. Refreeze it
+  with the snark setup: `forge build` in davinci-contracts and hash
+  `ZiskVerifier`'s `deployedBytecode` (no immutables, so it equals
+  `eth_getCode`).
 - **The Rust SDK's ballot VK is not go-sdk's.** `rust-sdk/assets/ballot_proof_vkey.json`
   is davinci-circom's current `artifacts/` VK, the one the Rust sequencer
   accepts. go-sdk and the Go integration tests pin davinci-circom v1.0.0,

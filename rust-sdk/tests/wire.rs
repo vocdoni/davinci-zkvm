@@ -345,6 +345,10 @@ fn release_pins() {
         hex::encode(ROOT_C_VADCOP_FINAL),
         "05006517b6ccde5da4d890587ba62845b5af8a307c00e87d4b9d05099b16dc80"
     );
+    assert_eq!(
+        hex::encode(ZISK_VERIFIER_CODEHASH),
+        "82385a405b7301345d7e246017846ca3228aaea349cb68b116d76e0e77056566"
+    );
     let embedded = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/assets/ballot_proof_vkey.json"
