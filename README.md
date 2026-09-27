@@ -141,16 +141,21 @@ davinci-zkvm/
 ├── circuit-aggregator/  ZisK RISC-V guest: recursive aggregator (chained mode)
 │   ├── elf/             Pre-built aggregator ELF (tracked in git)
 │   └── src/             in-guest STARK verification, genesis, fold, finalize
-├── circuit-primitives/  no_std crate shared by both guests
+├── circuit-results/     ZisK RISC-V guest: single-key tally (per-batch mode)
+│   ├── elf/             Pre-built results ELF (tracked in git)
+│   └── RESULTS.md       Frame, checks, registers and fail bits
+├── circuit-primitives/  no_std crate shared by the guests
 │   └── src/             smt, babyjubjub, poseidon, chaum_pedersen, hash, …
 ├── input-gen/           Typed protocol blocks → ZisK binary input
+├── rust-sdk/            Rust SDK (crate davinci-zkvm-sdk): client, wire types, protocol primitives
 ├── service/             HTTP API (axum + tokio)
 │   └── src/
-│       ├── api/         POST /prove, /fold, /finalize, GET /jobs/*, /health
+│       ├── api/         POST /prove, /fold, /finalize, /results, GET /jobs/*, /health
 │       └── prover/      Background queue, worker, snark/recursion extractors
 ├── solidity/            Vendored Solidity verifier (PlonkVerifier + ZiskVerifier)
 └── go-sdk/              Go client library, with an on-chain verification helper
     ├── chain/           Chained-mode sequencer: state tree, folds, finalize
+    ├── cmd/sdk-vectors/ Golden vectors for the Rust SDK tests
     ├── solidity/        simulated.NewBackend verification helper
     └── tests/           Integration tests
 ```
@@ -264,6 +269,7 @@ included, and settles every transition this way.
 | `POST` | `/prove` | Submit a state-transition batch. `output: "plonk"` (default) or `"stark"` (foldable). Returns a job ID. |
 | `POST` | `/fold` | Chained mode: fold batch STARKs into the chain (genesis when `prev_fold_job` is absent). |
 | `POST` | `/finalize` | Chained mode: verify the decrypted results and wrap the chain in the final PLONK. |
+| `POST` | `/results` | Per-batch mode: prove the single-key tally (key and accumulator inclusion under the final state root, 16 Chaum–Pedersen decryption proofs) with `circuit-results`, PLONK-wrapped. See [circuit-results/RESULTS.md](circuit-results/RESULTS.md). |
 | `POST` | `/jobs/import` | Chained mode: import a raw STARK `proof.bin` proven on another worker as a local `BatchStark` job (scatter/gather). Body is the raw blob; returns a job ID. |
 | `GET` | `/jobs/{id}` | Job status (queued / running / done / failed) and timing. |
 | `GET` | `/jobs/{id}/snark` | The Solidity-ready PLONK payload as JSON. |
@@ -296,6 +302,7 @@ These four fields map straight onto the arguments of
 | `PROVING_KEY_PLONK_PATH` | `/proving-key-plonk` | ZisK PLONK proving key directory. |
 | `CIRCUIT_ELF_PATH` | `/app/circuit.elf` | Pre-built vote-batch circuit ELF. |
 | `AGGREGATOR_ELF_PATH` | `/app/aggregator.elf` | Pre-built aggregator ELF (chained mode). |
+| `RESULTS_ELF_PATH` | `circuit-results/elf/results.elf` | Pre-built results ELF (`/results`); the image sets `/app/results.elf`. Required at startup. |
 | `CARGO_ZISK_BIN` | `cargo-zisk` | `cargo-zisk` binary to invoke. |
 | `PROOF_OUTPUT_DIR` | `/tmp/proofs` | Per-job artifact directory. |
 | `ZISK_MINIMAL_MEMORY` | `0` | Force `cargo-zisk prove --minimal-memory` on every attempt (it is auto-enabled on retries). |
@@ -334,6 +341,28 @@ point-evaluation check per blob included. Proof size stays at
 768 B of proof plus 512 B of public values regardless of batch. See
 [`BENCHMARK.md`](BENCHMARK.md) for the chained mode and the full tables.
 
+## Rust SDK
+
+`rust-sdk/` is the crate `davinci-zkvm-sdk`, a member of the root Cargo
+workspace. It is what a Rust host (the davinci-sequencer) needs to drive this
+service: an HTTP client for the job routes, typed `/prove` and `/results`
+bodies, parsers for the batch and results publics, the DA blob layout with its
+KZG commitments and a decoder, the pinned release vks, and the protocol
+primitives to build inputs byte-exactly (BabyJubJub, ElGamal, Poseidon,
+Chaum–Pedersen, ballots, census proofs, the re-encryption chain).
+
+Its tests check every byte against vectors produced by the Go reference code
+and run offline:
+
+```bash
+cargo test -p davinci-zkvm-sdk
+# regenerate rust-sdk/testdata (add -proofs to also redo the Groth16 fixtures)
+cd go-sdk && go run ./cmd/sdk-vectors -out ../rust-sdk/testdata
+```
+
+The embedded ballot VK (`rust-sdk/assets/ballot_proof_vkey.json`) is the
+current davinci-circom one, not the v1.0.0 VK the Go SDK tests use.
+
 ## Development
 
 ```bash
@@ -348,6 +377,12 @@ cp circuit/target/elf/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-circuit \
 cd circuit-aggregator && cargo-zisk build --release
 cp circuit-aggregator/target/elf/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-aggregator \
    circuit-aggregator/elf/aggregator.elf
+
+# Rebuild the results ELF, then refreeze CircuitRelease.ResultsVK from
+# `cargo-zisk setup -e circuit-results/elf/results.elf -k <proving-key>`
+cd circuit-results && cargo-zisk build --release
+cp circuit-results/target/elf/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-results \
+   circuit-results/elf/results.elf
 
 # Build the service binary
 cargo build --release -p davinci-zkvm-service

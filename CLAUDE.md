@@ -20,13 +20,15 @@ There are two modes:
   full design; orchestration lives in `go-sdk/chain`.
 
 Both `PROVING_KEY_PATH` and `PROVING_KEY_PLONK_PATH` are required at
-startup; chained mode additionally needs `AGGREGATOR_ELF_PATH`.
+startup, and so is the results ELF (`RESULTS_ELF_PATH`, default
+`circuit-results/elf/results.elf`, served by `POST /results`); chained mode
+additionally needs `AGGREGATOR_ELF_PATH`.
 
 ## Conventions
 
-- **Plain, human voice in comments and docs.** Terse and direct. Skip the
-  "stands as a testament" / "vital role" / "evolving landscape" register.
-  No em-dash overuse, no rule-of-three, no marketing flourish.
+- **Plain, human voice in comments and docs.** Terse and direct, no
+  marketing flourish. Use em-dashes sparingly and don't default to lists
+  of three.
 - **Match the project's existing terse style** when writing Rust/Go
   comments. One short line on top of a function is usually enough.
 
@@ -39,18 +41,21 @@ startup; chained mode additionally needs `AGGREGATOR_ELF_PATH`.
 | `circuit/src/groth16.rs`, `circuit/src/kzg.rs` | In-guest batched Groth16 (BN254) verification of the per-ballot circom proofs, and the KZG/BLS12-381 checks. See the Groth16 gotcha below before touching the batch check. |
 | `circuit-primitives/` | no_std lib shared by both guests: SMT, Poseidon, BabyJubJub, BN254/BLS12-381 field arithmetic (`bn254.rs`, `bn254_fr.rs`, `bls_fr.rs`), hashing, field types, io framing. |
 | `circuit-aggregator/` | Recursive aggregator guest: genesis+fold / fold / finalize modes, in-guest STARK verification via `ziskos::zisklib::verify_zisk_proof_c`. ELF at `circuit-aggregator/elf/aggregator.elf`. Same `cd`-first build rule. |
-| `input-gen/` | Typed protocol blocks → ZisK binary input. Wire format owner (incl. `aggregator.rs` for fold/finalize input frames). |
+| `circuit-results/` | Single-key tally guest behind `POST /results`: key leaf `0x03` and accumulator leaf `0x04` inclusion under a final state root plus 16 Chaum–Pedersen decryption proofs. Spec in `circuit-results/RESULTS.md` (frame, checks, 43 output registers, fail bits); ELF at `circuit-results/elf/results.elf`. Same `cd`-first build rule. |
+| `input-gen/` | Typed protocol blocks → ZisK binary input. Wire format owner (incl. `aggregator.rs` for fold/finalize input frames and `results.rs` + `gen-results-input` for the results frame). |
 | `service/src/prover/recursion.rs` | proof.bin → vadcop blob conversion for feeding proofs back into the aggregator guest. |
-| `service/` | Axum HTTP API. Always emits PLONK. |
+| `service/` | Axum HTTP API. PLONK by default; `"output": "stark"` batches and `/fold` steps stay STARK (chained mode). |
 | `service/src/prover/worker.rs` | Runs `cargo-zisk prove --plonk …`, with retry logic for transient ZisK flakes. |
 | `service/src/prover/snark.rs` | Bincode-decodes `proof.bin` into the four Solidity-ready byte strings (`programVK`, `rootCVadcopFinal`, `publicValues`, `proofBytes`). |
 | `solidity/` | Vendored upstream PLONK verifier, byte-identical to `~/.zisk/provingKeySnark/final/*.sol` (the 1.3 snark setup; the vkey constants and `rootCVadcopFinal` change with every setup). **Don't edit these in-tree** — the Go helper patches them on a temp copy at compile time, so re-copying after a new ZisK release just works. |
-| `go-sdk/` | Go client. Exposes `PlonkSnark` (the 4-tuple) and `client.Prove(ctx, batch) -> ProveResult.Snark`. Never exposes STARK/VADCOP internals (chained mode only sees job IDs + the final PLONK). |
+| `go-sdk/` | Go client. Exposes `PlonkSnark` (the 4-tuple) and `client.Prove(ctx, batch) -> ProveResult.Snark`. STARK helpers (`FetchStarkInfo`, `FetchStarkProof`, `FetchStarkRaw`, `ImportStark`) serve chained mode and the `davinci-fold` orchestrator. |
 | `go-sdk/chain/` | Chained-mode orchestrator: `Sequencer` (fold cadence, finalize), `State` (process SMT owner, reencryption, results accumulators), `Digest` (53×u32 "DAG1" publics parser + external vk-binding checks). `snapshot.go` serializes/restores `State` for crash recovery (each batch draws a random re-encryption seed, so replay isn't reproducible). `commitment.go`+`release.go` recompute the guest's `config_commitment` host-side and pin the canonical circuit-release vks (`CircuitRelease`) for independent end-to-end verification. Self-contained — must NOT import test code. |
 | `go-sdk/solidity/solidity.go` | `VerifyOnSimulated(dir, snark)` — compiles the verifier (local `solc` or `docker run ethereum/solc:stable`) and runs it on `go-ethereum/ethclient/simulated.NewBackend`. |
 | `solidity/DavinciSettlement.sol`, `go-sdk/solidity/settlement.go` | Reference per-batch settlement contract (paper's on-chain logic: PLONK verify, root continuity, census root, `occupied_before`, one point-evaluation check per blob) and its simulated-chain helper (`DeploySettlement`, `SubmitTransition` with a real blob transaction). |
 | `go-sdk/blob.go` | `BuildTransitionBlobs`: the DA cell layout, blob split, KZG commitments, bound evaluation points, openings and the digest the guest publishes. Must stay byte-identical to `circuit/src/kzg.rs`. |
 | `go-sdk/vocdoni/` | Vendored davinci-node light crypto (ElGamal, hashing, ballot spec types) so `go-sdk` doesn't depend on the full davinci-node module. Exported so external consumers (davinci-fold) can build chain.Config/chain.Vote values; don't import davinci-node directly from go-sdk. |
+| `rust-sdk/` | Rust SDK, crate `davinci-zkvm-sdk` (root workspace member, `#![forbid(unsafe_code)]`): HTTP client, `/prove` and `/results` wire types, batch/results publics parsers, DA blob build and decode (c-kzg), release pins, and the host-side protocol primitives (BabyJubJub, ElGamal, Poseidon, Chaum–Pedersen, ballots, census, re-encryption chain, Groth16 VK hash). Tests replay Go vectors from `rust-sdk/testdata/`. |
+| `go-sdk/cmd/sdk-vectors/` | Writes `rust-sdk/testdata/*.json` and `rust-sdk/assets/poseidon_constants.bin` from the Go reference code. Deterministic except the rapidsnark proof fixtures, which only `-proofs` regenerates. |
 | `davinci-node/`, `recursion-experiment/` | Untracked reference checkouts (gitignored, not part of this repo). Read for context; never edit or stage. |
 
 ## Build & test commands
@@ -88,6 +93,11 @@ cd circuit-aggregator && cargo-zisk build --release
 cp circuit-aggregator/target/elf/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-aggregator \
    circuit-aggregator/elf/aggregator.elf
 
+# Results ELF (same rules; rebuilding changes CircuitRelease.ResultsVK)
+cd circuit-results && cargo-zisk build --release
+cp circuit-results/target/elf/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-results \
+   circuit-results/elf/results.elf
+
 # Docker image (what `make build` runs)
 docker compose --profile cuda build
 
@@ -116,6 +126,22 @@ touching `circuit/src/` or `input-gen/`. Needs `ziskemu` (ships in
 ```bash
 cd go-sdk/tests
 go test ./integration -run TestCheat -v -timeout 30m
+```
+
+The results guest has its own suite, `TestResultsCheat` (seconds). It needs
+`gen-results-input` (same cargo build; `target/release` is preferred over
+PATH) and `RESULTS_ELF_PATH` or the default `circuit-results/elf/results.elf`.
+Each case asserts the exact `fail_mask`.
+
+The Rust SDK tests run offline in seconds (the one live-service test is
+`#[ignore]`d). Regenerate the vectors after changing the Go reference code; a
+default run leaves the proof fixtures alone, `-proofs` redoes them from the
+davinci-circom artifacts (`-circom`) and so also changes `wire_prove.json`:
+
+```bash
+cargo test -p davinci-zkvm-sdk
+cargo clippy -p davinci-zkvm-sdk -p davinci-zkvm-input-gen --all-targets -- -D warnings
+cd go-sdk && go run ./cmd/sdk-vectors -out ../rust-sdk/testdata
 ```
 
 Run a single proving test directly:
@@ -163,6 +189,10 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   assembled server-side from on-disk `proof.bin` — Go never ships them.
 - `POST /finalize` — last fold + results payload (CP decryption proofs,
   plaintext results, SMT inclusion siblings) → the final PLONK.
+- `POST /results` — per-batch mode tally: `ResultsRequest` JSON (state root,
+  TE key + `0x03` siblings, accumulator + `0x04` siblings, 16 plaintexts,
+  16 CP proofs; 32-byte values arbo-LE hex) → a `results` PLONK job on the
+  results ELF. Artifacts through the usual job routes.
 - `POST /jobs/import` — accept a raw `proof.bin` body, register it as a
   local `Done` `BatchStark` job (returns `{job_id}`), and write the same
   `stark.json`/`publics.bin` artifacts a natively proved job exposes — so a
@@ -243,7 +273,29 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   `Root hash: [w0, w1, w2, w3]`; the pinned string is those four u64 words
   rendered big-endian and concatenated. (A finalize digest's
   `fold_vk`/`batch_vk`, or `FetchStarkInfo`, gives the same values but needs a
-  working prover and a GPU.)
+  working prover and a GPU.) `ResultsVK` pins the `circuit-results` vk the
+  same way; it is not part of `config_commitment` (`IsSet` ignores it, check
+  `ResultsSet`).
+- **The Rust SDK pins the same release.** `rust-sdk/src/release.rs` carries
+  `BATCH_PROGRAM_VK` and `RESULTS_PROGRAM_VK` (equal to `CircuitRelease`,
+  checked by `wire::release_pins`) and `ROOT_C_VADCOP_FINAL`. Refreeze them
+  with the guests; the root moves only with the ZisK snark setup (read it
+  from any PLONK job's `snark.json`).
+- **The Rust SDK's ballot VK is not go-sdk's.** `rust-sdk/assets/ballot_proof_vkey.json`
+  is davinci-circom's current `artifacts/` VK, the one the Rust sequencer
+  accepts. go-sdk and the Go integration tests pin davinci-circom v1.0.0,
+  whose `IC` differs: the `0x07` VK-hash leaf differs and v1.0.0 proofs do not
+  verify under the embedded VK (`real_proof_v1_verifies_only_with_its_vk`).
+  Don't feed Go-generated ballots to a Rust-SDK sequencer.
+- **`BjjFixedBase` is built from the raw key.** `verify_batch_from_parsed`
+  canonicalises the encryption key for the curve and subgroup checks but
+  passes the raw words to `BjjFixedBase::new`
+  (`circuit-primitives/src/babyjubjub.rs:453`). A key committed as `(x + p, y)`
+  would reach the precompile unreduced and abort the guest. Unreachable in
+  practice: the process registry rejects non-canonical keys at `newProcess`
+  (`GenesisLib.isValidEncryptionKey`), and the results guest fails them with
+  `FAIL_RANGE`. The fix (`BjjFixedBase::new(&pk.0, &pk.1, …)`) changes the
+  batch guest's program vk, so it waits for the next planned rebuild.
 - **`verify_zisk_proof_c` + the vadcop blob layout are ZisK internals**, not
   stable API — pin the ZisK version. On 1.3 the call takes six arguments
   (proof, `expected_setup_vk`, `expected_program_vk`), the blob tail is
@@ -337,10 +389,10 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   refresh set from the changed slots. `TestCheatRefresh*` cover every check
   on ziskemu.
 - **The Results transition is pinned** to an UPDATE of key `0x04`
-  (`fnc0=0, fnc1=1, !is_old0`; spec §4.2.12). Before that a NOOP carrying the
-  expected hashes passed and left the tally untouched while the votes landed
-  in the tree; `TestCheatResultsNoop` reproduces it.
-- **The DA blob is built in-guest, not trusted.** The KZG block now carries
+  (`fnc0=0, fnc1=1, !is_old0`; spec §4.2.12). Without the pin, a NOOP carrying
+  the expected hashes would pass and leave the tally untouched while the votes
+  land in the tree; `TestCheatResultsNoop` guards it.
+- **The DA blob is built in-guest, not trusted.** The KZG block carries
   only `process_id`, `root_hash_before` and the blob commitments. The guest
   lays out the cells itself (sorted vote identifiers, one sorted list of slot
   updates for new votes, overwrites and refreshes alike with the active
@@ -360,6 +412,15 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   hint fails closed (`bls_fr::inv` panics on a bad hint) because a zero
   inverse would zero every blob evaluation and let a sequencer publish
   empty blobs.
+- **The results guest trusts nothing it can range-check.** Coordinates must
+  be `< p` and CP scalars `z < l` (`FAIL_RANGE`): leaf hashes and the CP
+  challenge see raw bytes, so `x + p` or `z + l` would be a second encoding of
+  the same point or scalar. The key must be on-curve, non-identity and in the
+  prime subgroup (`BJJ_SUBGROUP_L`). On `ok = 0` registers 2..41 (root and
+  tallies) are zeroed. The guest proves the tally of whatever root it gets;
+  the settlement contract must check `state_root` against the process's last
+  root. `TestResultsCheat` covers every bit; mutating any check out makes a
+  case fail.
 - **`input.bin` is the private witness** (seed, overwrite and refresh sets).
   The worker deletes it after proving and `GET /jobs/{id}/inputs` returns
   404 unless the service runs with `DAVINCI_KEEP_INPUTS=1` (the local dev
@@ -404,9 +465,8 @@ PLONK key ~25 GB.
   `zisk-verifier` -> `proofman-fields` -> `proofman-starks-lib-c`.
   `circuit-primitives/Cargo.toml` declares that crate solely to force its
   `cpu-only` feature through unification; keep its version equal to ziskos'.
-- **1.3 weakened `is_on_curve_bn254`**: it now ends in
-  `eq(lhs, rhs) || eq(p, G1_IDENTITY)` and so accepts the all-zero identity,
-  where v0.18's plain `eq(lhs, rhs)` rejected it. `g1_is_valid` in
+- **`is_on_curve_bn254` accepts the all-zero identity**: it ends in
+  `eq(lhs, rhs) || eq(p, G1_IDENTITY)`. `g1_is_valid` in
   `circuit-primitives/src/bn254.rs` re-asserts non-identity; every G1 point
   that feeds the batch MSM goes through it.
 - **The precompile does not reduce its inputs.** It requires both coordinates
@@ -421,18 +481,7 @@ release snark setup (byte-identical to `~/.zisk/provingKeySnark/final/*.sol`),
 and the on-chain `publicValues` is the 512-byte `snark_inputs_bytes` encoding
 (see the API notes), which `snark.rs` derives from `publics_full`.
 
-### Measured (RTX 5090, num_fields=6, STARK, GPU)
-
-Same input files proved on both stacks (the 1.3 column on the pre-release
-build of the same version), both verified:
-
-| batch | v0.18.0 | 1.3 + precompile | speedup | votes/min |
-|---:|---:|---:|---:|---:|
-|  64 | 61.2 s | 22.6 s | 2.71x | 63 -> 170 |
-| 128 | 94.0 s | 32.8 s | 2.87x | 82 -> 234 |
-
-Two variables move at once there (ZisK version and the precompile), so treat
-the speedup as the combination, not the precompile alone.
+### Measured (RTX 5090, per-batch PLONK)
 
 Per-batch PLONK on the release binaries with silent refreshes and DA binding
 (`TestPlonkBenchmark`, service job time; "steady" = second batch of the
@@ -464,54 +513,22 @@ use `BALLOT_NUM_FIELDS=16` with `TestPlonkBenchmark` (or accept that the
 scaled e2e fails only in its final tally check after every transition has
 been proved and settled).
 
-## Historical baseline (RTX 5090, ZisK v0.18.0)
+## Proof size and `--minimal-memory`
 
-Ballot capacity is 16 fields (`NUM_FIELDS`), but the guest reads the
-election's declared `num_fields` from the committed BallotMode leaf and
-skips the per-field EC work on identity-padded slots `i >= num_fields`
-(see the `NUM_FIELDS` gotcha above). Proving time therefore scales with
-the *declared* field count, not the 16-field maximum. PLONK SNARK time
-(`TestPlonkBenchmark`, sweep the field count with `BALLOT_NUM_FIELDS`):
-
-| batch | num_fields=2 | num_fields=16 | on-chain verify |
-|---:|---:|---:|---:|
-|  64 |   38 s |    83 s | ~0.3–0.5 s |
-| 128 |   73 s |   164 s | ~0.5 s |
-| ~~256~~ |  102 s | 289 s (min-mem) | ~0.3 s |
-
-The cap was 128 from this measurement until ZisK 1.3; it is 1024 now (see
-the gotcha above), and the 256 row is kept as the corner that motivated it. SNARK size is 768 B
-`proofBytes` / 256 B `publicValues` (512 B on 1.3), invariant across batch size and field
-count (the on-chain interface does not change with `num_fields`). On-chain
-verify is field-count independent.
-
-**Why the cap was 128 on v0.18: batch 256 at num_fields=16 sat at the GPU edge.**
-The per-field chained reencryption (a distinct SHA-256-chained offset scalar
-per ciphertext field) means ~16 EC scalar-muls per ballot at full capacity;
-at 256 ballots the default GPU schedule overflows
-32 GB during inner-proof generation (deterministic SIGKILL, not a transient
-flake). `cargo-zisk prove --minimal-memory` reschedules witness storage and
-keeps the footprint under the ceiling (peak ~31.3 GB), proving+verifying in
-~289 s — but that leaves only ~0.7 GB of headroom and no softer knob below it,
-so any future circuit growth would OOM 256 with no recovery path. We therefore
-capped `MAX_BATCH_SIZE` at 128, which proves comfortably. `--minimal-memory`
-stays wired as a backstop: it only reschedules witness storage — it doesn't
-touch the circuit, constraints, or the proven statement, so the result still
-verifies and soundness is unaffected (the proof bytes differ run-to-run anyway:
-the PLONK wrap is zero-knowledge). The speed cost is small: a matched A/B on
-one batch-128 num_fields=16 input measured 138.4 s plain vs 142.1 s with
-`--minimal-memory` (+2.7%); on a lighter input it was +0.7%. The worker
-auto-escalates to it on any retry, `ZISK_MINIMAL_MEMORY=1` forces it from the
-first attempt, and since the cap went to 1024 the worker turns it on from
-`ZISK_MINIMAL_MEMORY_FROM` proofs (default 512) because host RAM, not the
-GPU, is what the flag saves there.
+The PLONK SNARK is 768 B `proofBytes` + 512 B `publicValues` at every batch
+size and field count, so on-chain verify cost does not move with either.
+`--minimal-memory` only reschedules witness storage: the circuit and the
+proven statement are unchanged, and it costs +0.7% to +2.7% proving time.
+The worker turns it on from `ZISK_MINIMAL_MEMORY_FROM` proofs (default 512)
+and on every retry; `ZISK_MINIMAL_MEMORY=1` forces it from the first
+attempt. The v0.18 baseline and the batch-256 OOM behind the old 128 cap
+are in `BENCHMARK.md`.
 
 Chained-mode numbers (STARK batches + folds + one final PLONK) live in
 `BENCHMARK.md`.
 
 ## Workflow tips
 
-- Read the source before editing. The codebase is small enough.
 - After editing Go: `cd go-sdk && go vet ./...`. After editing Rust:
   `cargo check -p davinci-zkvm-service`. Both are subsecond.
 - After editing `service/src/prover/worker.rs` or `snark.rs`, the Docker

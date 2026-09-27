@@ -164,6 +164,17 @@ per-proof cost (recursion + PLONK wrap, ~15 s) now dominates small batches,
 which is why votes/min keeps climbing with batch size: the marginal cost is
 ~0.11 s per vote at 2 fields and ~0.19 s at 16.
 
+STARK only, num_fields=6, same input files on both stacks (the 1.3 column
+on the pre-release build of the same version), both verified:
+
+| batch | v0.18.0 | 1.3 + precompile | speedup | votes/min |
+|---:|---:|---:|---:|---:|
+|  64 | 61.2 s | 22.6 s | 2.71x | 63 -> 170 |
+| 128 | 94.0 s | 32.8 s | 2.87x | 82 -> 234 |
+
+Two variables move at once there (ZisK version and the precompile), so treat
+the speedup as the combination, not the precompile alone.
+
 ## Per-batch mode with silent refreshes and DA binding
 
 Same GPU and release binaries, after the guest gained the silent-refresh
