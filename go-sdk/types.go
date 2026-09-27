@@ -8,7 +8,12 @@
 // verifier consumes. See [PlonkSnark] and [Client.FetchSnark].
 package davinci
 
-import "encoding/json"
+import (
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+)
 
 // MaxBatchSize is the maximum number of voter ballots per ProveBatch call.
 // Must be a power of two. Matches the MAX_BATCH_SIZE constant in the circuit
@@ -29,16 +34,23 @@ const (
 	VoteIDMin = uint64(0x8000_0000_0000_0000)
 )
 
-// SlotKey is the ballot slot of a Merkle-census voter, derived from the
-// position its census proof authenticates: BallotMin + ((1 << depth) |
-// pathBits), where depth is the number of siblings in the (compact) lean-IMT
-// proof. The leading 1 encodes the depth, so distinct leaves get distinct
-// slots even when the census is not a power of two (for a full tree this is
-// BallotMin + 2^depth + leafIndex). The guest recomputes it from the census
-// proof and rejects any other key (FAIL_BALLOT_NS). Mirrors
-// circuit/src/consistency.rs::slot_key.
-func SlotKey(pathBits uint64, depth int) uint64 {
-	return BallotMin + (uint64(1)<<uint(depth) | pathBits)
+// SlotTag domain-separates the Merkle ballot slot hash.
+const SlotTag = "davinci-slot-v1"
+
+// SlotKey is the ballot slot of a Merkle-census voter, derived from its
+// 20-byte address: BallotMin + (be64(sha256(SlotTag ‖ address)[0:8]) mod
+// (2^63 − 16)), always inside [BallotMin, BallotMax]. The census root does
+// not bind a lean-IMT leaf position, so the slot cannot come from the proof.
+// Distinct addresses can collide (a grinder needs about 2^63/N keys to hit
+// one of N members), so the census manager must refuse a census or a
+// registration whose slot is taken; the guest rejects duplicate slots within
+// a batch. Mirrors circuit/src/consistency.rs::slot_key.
+func SlotKey(address [20]byte) uint64 {
+	h := sha256.New()
+	h.Write([]byte(SlotTag))
+	h.Write(address[:])
+	d := h.Sum(nil)
+	return BallotMin + binary.BigEndian.Uint64(d[:8])%(BallotMax-BallotMin+1)
 }
 
 // CSPSlotKey is the ballot slot of a CSP-census voter: BallotMin plus the
@@ -47,9 +59,24 @@ func CSPSlotKey(index uint64) uint64 {
 	return BallotMin + index
 }
 
-// SlotKey returns the ballot slot this census proof authorizes.
-func (p CensusProof) SlotKey() uint64 {
-	return SlotKey(p.Index, len(p.Siblings))
+// LeafAddress is the 20-byte address a Merkle census leaf binds, as the guest
+// reads it: bits 88..247 of PackAddressWeight(address, weight).
+func LeafAddress(leaf [4]uint64) [20]byte {
+	var a [20]byte
+	binary.BigEndian.PutUint32(a[0:4], uint32(leaf[3]>>24))
+	binary.BigEndian.PutUint64(a[4:12], leaf[2]>>24|leaf[3]<<40)
+	binary.BigEndian.PutUint64(a[12:20], leaf[1]>>24|leaf[2]<<40)
+	return a
+}
+
+// SlotKey returns the ballot slot of the address this census proof's leaf
+// binds.
+func (p CensusProof) SlotKey() (uint64, error) {
+	leaf, err := beHexToFrLE(p.Leaf)
+	if err != nil {
+		return 0, fmt.Errorf("census leaf: %w", err)
+	}
+	return SlotKey(LeafAddress(leaf)), nil
 }
 
 // Silent revoting: every batch must re-randomize occupied ballot slots it did

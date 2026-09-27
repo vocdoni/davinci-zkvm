@@ -29,7 +29,7 @@ type Release struct {
 // big-endian and concatenated.
 var CircuitRelease = Release{
 	AggVK:     "0xe77847ad8f876935a593989c0983e3814b4f9f9cb30022b202a9986a6a18604c",
-	BatchVK:   "0xedf235f5e68ebbd9bec31f29f7b97b80e2e0ea209d8f2e82a81d4f3aa2483c6a",
+	BatchVK:   "0x44ccdf5eb9cdf759d9ca784b76c50604cc458b2d7b9861b4bc4941ddf961f8a7",
 	ResultsVK: "0xab98764a015f2685aad112cafee1c4721adac098a6fe5989a4e87b6b9eab71fb",
 }
 

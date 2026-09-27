@@ -1,8 +1,9 @@
 //! Census: the lean-IMT (iden3 Poseidon2) Merkle census, CSP attestations,
-//! vote-id signatures and the ballot slot each census position maps to.
+//! vote-id signatures and the ballot slot of each voter.
 
 use k256::ecdsa::{RecoveryId, Signature, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use sha3::{Digest, Keccak256};
 
 use crate::crypto::field::{fr_from_le, fr_to_be, Fr};
@@ -175,13 +176,30 @@ pub fn census_leaf_weight(leaf: &Fr) -> u128 {
     u128::from_be_bytes(w)
 }
 
-/// Ballot slot of a Merkle voter: `0x10 + ((1 << n_siblings) | path_bits)`.
-pub fn slot_key_merkle(p: &CensusProof) -> Result<u64, Error> {
-    let n = p.siblings.len();
-    if n > MAX_CENSUS_DEPTH || p.path_bits >> n != 0 {
-        return Err(Error::Census("path bits above the proof length"));
-    }
-    Ok(BALLOT_MIN + ((1u64 << n) | p.path_bits))
+/// Address part of a census leaf (bits 88..247), the 20 bytes the guest
+/// binds to the ballot proof and hashes into the slot.
+pub fn census_leaf_address(leaf: &Fr) -> [u8; 20] {
+    let be = fr_to_be(leaf);
+    let mut a = [0u8; 20];
+    a.copy_from_slice(&be[1..21]);
+    a
+}
+
+/// Domain tag of the Merkle ballot slot hash.
+pub const SLOT_TAG: &[u8] = b"davinci-slot-v1";
+
+/// Ballot slot of a Merkle voter:
+/// `0x10 + (be64(sha256("davinci-slot-v1" || address)[0..8]) mod (2^63 - 16))`.
+/// Distinct addresses can collide, so a census must not carry two members
+/// with one slot; the guest rejects a batch that writes a slot twice.
+pub fn slot_key_address(address: &[u8; 20]) -> u64 {
+    let d = Sha256::new()
+        .chain_update(SLOT_TAG)
+        .chain_update(address)
+        .finalize();
+    let mut x = [0u8; 8];
+    x.copy_from_slice(&d[..8]);
+    BALLOT_MIN + u64::from_be_bytes(x) % (BALLOT_MAX - BALLOT_MIN + 1)
 }
 
 /// Ballot slot of a CSP voter: `0x10 + index`, which must stay in the ballot

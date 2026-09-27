@@ -450,7 +450,7 @@ pub fn verify_batch_from_parsed(
         return (false, Vec::new(), refresh_delta);
     }
     let expected_muls = (reenc_entries.len() + refreshed_old.len()) * num_fields;
-    let pk_table = BjjFixedBase::new(pub_key_x, pub_key_y, expected_muls);
+    let pk_table = BjjFixedBase::new(&pk.0, &pk.1, expected_muls);
     let mut chain = reenc_chain_start(reenc_seed, old_root);
 
     for entry in reenc_entries {

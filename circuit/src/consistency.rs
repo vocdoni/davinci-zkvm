@@ -3,7 +3,8 @@
 /// 2. **VoteID–proof binding**: `vote_id_chain[i].new_key[0] == proofs[i].public_inputs[1][0]`
 /// 3. **Ballot namespace**: each `ballot_chain[i].new_key[0] ∈ [BallotMin, BallotMax]`
 /// 4. **Ballot–slot binding**: `ballot_chain[i].new_key[0] == slot(i)`, where the
-///    slot is a function of the authenticated census position (see `slot_key`)
+///    slot is derived from the voter's census address or CSP index (see `slot_key`)
+/// 5. **Distinct slots**: no two `ballot_chain` entries share a key
 /// These checks are only applied when a STATETX block is present.
 /// When no state block is present, returns `true` immediately (absence is not a failure).
 
@@ -17,7 +18,11 @@ const BALLOT_MAX: u64 = 0x7FFF_FFFF_FFFF_FFFF; // VoteIDMin - 1
 // Public input index of the voteID in the BN254 Groth16 ballot proof.
 const PUB_VOTE_ID: usize = 1;
 
-use crate::types::{FAIL_CONSISTENCY, FAIL_BALLOT_NS};
+use crate::hash::sha256_once;
+use crate::types::{FAIL_CONSISTENCY, FAIL_BALLOT_NS, MAX_BATCH_SIZE};
+
+/// Domain tag of the Merkle ballot slot hash.
+const SLOT_TAG: &[u8; 15] = b"davinci-slot-v1";
 
 pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     let state = match &parsed.state {
@@ -111,31 +116,55 @@ pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
                 ok = false;
             }
         }
+
+        // Distinct slots: two leaves for one address, or two addresses whose
+        // slots collide, would write one slot twice in a batch. Upper limbs
+        // are pinned to zero above, so limb 0 is the whole key.
+        let mut keys = [0u64; MAX_BATCH_SIZE];
+        let m = state.ballot_chain.len().min(MAX_BATCH_SIZE);
+        for (k, t) in keys.iter_mut().zip(&state.ballot_chain) {
+            *k = t.new_key[0];
+        }
+        let keys = &mut keys[..m];
+        keys.sort_unstable();
+        if keys.windows(2).any(|w| w[0] == w[1]) {
+            *fail_mask |= FAIL_BALLOT_NS;
+            ok = false;
+        }
     }
 
     ok
 }
 
-/// Ballot slot of voter `i`, derived from its authenticated census position.
+/// Ballot slot of voter `i`.
 ///
-/// Merkle census: `BallotMin + ((1 << n_siblings) | path_bits)`. A lean-IMT
-/// proof identifies a leaf by its compact path bits and their count (the
-/// leading 1 marks the count), so distinct leaves get distinct slots even
-/// when the census is not a power of two. Bits above `n_siblings` are never
-/// consumed by the path walk, so they must be zero. CSP census: the index the
-/// CSP signed. `None` when the derivation is impossible (missing proof, path
-/// too long, index out of the namespace).
+/// Merkle census: `address_slot` of the 20 bytes the census leaf binds (bits
+/// 88..247, the bytes main.rs compares with the ballot proof's address). The
+/// lean-IMT root does not bind a leaf position, so the slot cannot come from
+/// the proof. CSP census: `BallotMin + index`, the index the CSP signed.
+/// `None` when the derivation is impossible (missing proof, index out of the
+/// namespace).
 fn slot_key(parsed: &ParsedInput, census_origin: u64, i: usize) -> Option<u64> {
-    let off = if census_origin == crate::types::CENSUS_ORIGIN_CSP {
-        parsed.csp_block.as_ref()?.entries.get(i)?.index
-    } else {
-        let cp = parsed.census_proofs.get(i)?;
-        let n = cp.siblings.len();
-        if n > 61 || cp.index >> n != 0 {
-            return None;
-        }
-        (1u64 << n) | cp.index
-    };
-    let key = BALLOT_MIN.checked_add(off)?;
-    (key <= BALLOT_MAX).then_some(key)
+    if census_origin == crate::types::CENSUS_ORIGIN_CSP {
+        let off = parsed.csp_block.as_ref()?.entries.get(i)?.index;
+        let key = BALLOT_MIN.checked_add(off)?;
+        return (key <= BALLOT_MAX).then_some(key);
+    }
+    let a = crate::extract_address_from_census_leaf(&parsed.census_proofs.get(i)?.leaf);
+    let mut addr = [0u8; 20];
+    addr[..4].copy_from_slice(&(a[2] as u32).to_be_bytes());
+    addr[4..12].copy_from_slice(&a[1].to_be_bytes());
+    addr[12..].copy_from_slice(&a[0].to_be_bytes());
+    Some(address_slot(&addr))
+}
+
+/// `BallotMin + (be64(sha256("davinci-slot-v1" || addr)[0..8]) mod (2^63 - 16))`,
+/// always in `[BallotMin, BallotMax]`.
+fn address_slot(addr: &[u8; 20]) -> u64 {
+    let mut buf = [0u8; 35];
+    buf[..15].copy_from_slice(SLOT_TAG);
+    buf[15..].copy_from_slice(addr);
+    let h = sha256_once(&buf);
+    let x = u64::from_be_bytes([h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]]);
+    BALLOT_MIN + x % (BALLOT_MAX - BALLOT_MIN + 1)
 }

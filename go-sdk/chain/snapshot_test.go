@@ -170,6 +170,12 @@ func TestApplyBatchValidation(t *testing.T) {
 	_, _, err = st.ApplyBatch([]Vote{{Slot: 0x04, VoteID: 1 | 1<<63, Ballot: b}})
 	c.Assert(err, qt.ErrorMatches, ".*outside the ballot namespace.*")
 
+	_, _, err = st.ApplyBatch([]Vote{
+		{Slot: 0x20, VoteID: 1 | 1<<63, Ballot: b},
+		{Slot: 0x20, VoteID: 2 | 1<<63, Ballot: b},
+	})
+	c.Assert(err, qt.ErrorMatches, ".*already written by vote\\[0\\].*")
+
 	// Rejected batches leave the state untouched.
 	voters, overwrites := st.Voters()
 	c.Assert(voters, qt.Equals, uint64(0))

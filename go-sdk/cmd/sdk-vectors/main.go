@@ -60,6 +60,7 @@ func main() {
 	write("genesis.json", genesisVectors())
 	write("leanimt.json", leanIMTVectors())
 	write("census.json", censusVectors())
+	write("slot.json", slotVectors())
 	write("voteid_sig.json", voteIDSigVectors())
 	write("ballots.json", ballotVectors())
 	if *proofs {

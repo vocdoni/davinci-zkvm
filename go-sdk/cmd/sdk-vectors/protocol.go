@@ -112,7 +112,6 @@ type imtProof struct {
 	Leaf     string   `json:"leaf"`
 	PathBits uint64   `json:"path_bits"`
 	Siblings []string `json:"siblings"`
-	Slot     uint64   `json:"slot"`
 }
 
 type imtTree struct {
@@ -147,7 +146,7 @@ func leanIMTVectors() map[string]any {
 				}
 				tv.Proofs = append(tv.Proofs, imtProof{
 					Index: i, Leaf: dec(p.Leaf), PathBits: p.PathBits,
-					Siblings: decs(p.Siblings), Slot: davinci.SlotKey(p.PathBits, len(p.Siblings)),
+					Siblings: decs(p.Siblings),
 				})
 			}
 		}
@@ -193,6 +192,29 @@ func cspSign(key *ecdsa.PrivateKey, pid *big.Int, addr []byte, weight *big.Int, 
 	}
 }
 
+// Merkle ballot slots: davinci.SlotKey over fixed addresses (no rng, so the
+// other files do not move).
+func slotVectors() map[string]any {
+	type slotVec struct {
+		Address string `json:"address"` // 20 bytes hex
+		Slot    uint64 `json:"slot"`
+	}
+	var addrs [][20]byte
+	var ff [20]byte
+	for i := range ff {
+		ff[i] = 0xff
+	}
+	addrs = append(addrs, [20]byte{}, ff)
+	for i := 0; i < 18; i++ {
+		addrs = append(addrs, [20]byte(ethcrypto.Keccak256([]byte(fmt.Sprintf("davinci-slot-vector-%d", i)))[12:]))
+	}
+	var slots []slotVec
+	for _, a := range addrs {
+		slots = append(slots, slotVec{hex.EncodeToString(a[:]), davinci.SlotKey(a)})
+	}
+	return map[string]any{"tag": davinci.SlotTag, "slots": slots}
+}
+
 func censusVectors() map[string]any {
 	type leafVec struct {
 		Address string `json:"address"`
@@ -211,15 +233,6 @@ func censusVectors() map[string]any {
 		}
 		leaves = append(leaves, leafVec{hex.EncodeToString(addr), dec(w), dec(davinci.PackAddressWeight(new(big.Int).SetBytes(addr), w))})
 	}
-	type slotVec struct {
-		PathBits uint64 `json:"path_bits"`
-		Depth    int    `json:"depth"`
-		Slot     uint64 `json:"slot"`
-	}
-	var slots []slotVec
-	for _, s := range [][2]uint64{{0, 0}, {1, 1}, {5, 3}, {0, 10}, {1<<61 - 1, 61}} {
-		slots = append(slots, slotVec{s[0], int(s[1]), davinci.SlotKey(s[0], int(s[1]))})
-	}
 	key := fixedECDSA("davinci-sdk-vectors-csp")
 	pid := processID(randBytes(20), [4]byte{1, 2, 3, 4}, 77).MathBigInt()
 	var csps []cspVec
@@ -232,7 +245,6 @@ func censusVectors() map[string]any {
 	}
 	return map[string]any{
 		"leaves":      leaves,
-		"slots":       slots,
 		"csp_key":     hex.EncodeToString(ethcrypto.FromECDSA(key)),
 		"csp_address": hex.EncodeToString(ethcrypto.PubkeyToAddress(key.PublicKey).Bytes()),
 		"csp":         csps,

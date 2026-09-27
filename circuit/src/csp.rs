@@ -24,7 +24,8 @@
 //! # Security invariants
 //!
 //! - All entries recover to the same secp256k1 public key (single authorised CSP)
-//! - No duplicate (voter_address, index) pairs
+//! - Every `voter_address` is a canonical uint160 (upper 96 bits zero)
+//! - No duplicate voter_address and no duplicate index
 //! - The recovered CSP address is exported as the census root; the caller binds
 //!   it to the process-config census-root key.
 
@@ -116,6 +117,16 @@ pub fn verify_csp(
     }
 
     let n = csp.entries.len();
+
+    // Invariant 0: canonical uint160 addresses. The message, the ballot-proof
+    // binding and ECDSA read only the low 160 bits, so bits above them would
+    // let one address pass the duplicate check below as two.
+    for e in &csp.entries {
+        if e.voter_address[2] >> 32 != 0 || e.voter_address[3] != 0 {
+            *fail_mask |= FAIL_CSP;
+            return (false, ZERO_FR);
+        }
+    }
 
     // Invariant 1: no duplicate voter address and no duplicate index. The
     // index is the voter's ballot slot (consistency.rs::slot_key), so two

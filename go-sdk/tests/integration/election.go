@@ -93,9 +93,16 @@ type Election struct {
 	// Results is the net Fr-wise accumulator: Σ(all ballots) − Σ(overwritten ballots).
 	// Uses coordinate-wise Fr add/sub to match the circuit's net accumulator.
 	Results frAccumBallot
-	// VotedBallots maps voter CensusIdx → their last re-encrypted ballot stored in the
-	// state tree. Used to detect overwrites and to subtract replaced ballots.
-	VotedBallots map[int]wideBallot
+	// VotedBallots maps a ballot slot key → the last re-encrypted ballot stored
+	// there. Used to detect overwrites and to subtract replaced ballots.
+	VotedBallots map[uint64]wideBallot
+	// SlotOverride replaces the slot the harness writes for a voter
+	// (CensusIdx → key), for cheat tests that need a consistent state block
+	// on a slot the guest must reject.
+	SlotOverride map[int]uint64
+	// RefreshExtra keys are appended to the silent-refresh selection, even
+	// when the batch writes them, for cheat tests of the disjointness rule.
+	RefreshExtra []uint64
 	// CspKey is the CSP's secp256k1 private key (nil for Merkle census mode).
 	CspKey *ecdsa.PrivateKey
 	// CensusOrigin is the census type: 1 = lean-IMT, 4 = CSP ECDSA.
@@ -261,7 +268,7 @@ func NewElection(nVoters int) (*Election, error) {
 		OldRoot:      oldRoot,
 		configVals:   configValsBI,
 		Results:      newZeroFrAccum(),
-		VotedBallots: make(map[int]wideBallot),
+		VotedBallots: make(map[uint64]wideBallot),
 		CensusOrigin: 1,
 		NumFields:    numFields,
 	}, nil
@@ -373,7 +380,7 @@ func NewCSPElection(nVoters int) (*Election, error) {
 		OldRoot:      oldRoot,
 		configVals:   configValsBI,
 		Results:      newZeroFrAccum(),
-		VotedBallots: make(map[int]wideBallot),
+		VotedBallots: make(map[uint64]wideBallot),
 		CspKey:       cspKey,
 		CensusOrigin: 4,
 		NumFields:    numFields,
@@ -471,12 +478,12 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 	}
 
 	// Snapshot occupied-slot count and the pre-batch VotedBallots keys before the
-	// ballot chain mutates the map. Refresh candidates = pre-batch entries not
+	// ballot chain mutates the map. Refresh candidates = pre-batch slots not
 	// touched by this batch.
 	occupiedBefore := len(e.VotedBallots)
-	preBatchIndices := make([]int, 0, occupiedBefore)
-	for idx := range e.VotedBallots {
-		preBatchIndices = append(preBatchIndices, idx)
+	preBatchSlots := make([]uint64, 0, occupiedBefore)
+	for key := range e.VotedBallots {
+		preBatchSlots = append(preBatchSlots, key)
 	}
 
 	// Insert voteID keys for each voter (always a fresh INSERT => even for overwrites,
@@ -508,7 +515,7 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 		}
 		newLeafVal := ballotLeafHash(reencBallots[i])
 
-		if oldBallot, isOverwrite := e.VotedBallots[v.CensusIdx]; isOverwrite {
+		if oldBallot, isOverwrite := e.VotedBallots[key]; isOverwrite {
 			// Voter is replacing a prior ballot: UPDATE the existing arbo leaf.
 			entry, err := buildArboUpdateEntry(
 				e.ProcTree,
@@ -534,8 +541,8 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 			}
 			ballotChain = append(ballotChain, entry)
 		}
-		// Record this voter's latest re-encrypted ballot for future overwrite detection.
-		e.VotedBallots[v.CensusIdx] = reencBallots[i]
+		// Record the slot's latest re-encrypted ballot for future overwrite detection.
+		e.VotedBallots[key] = reencBallots[i]
 	}
 
 	// Snapshot old accumulator for BallotProofData before mutation.
@@ -554,14 +561,18 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 	// Silent-refresh chain: re-randomize a target number of untouched occupied
 	// slots so overwrites don't stand out. Sits between the ballot chain and the
 	// Results transition; scalars continue the batch's re-encryption chain.
-	batchIdx := make(map[int]bool, n)
+	batchSlots := make(map[uint64]bool, n)
 	for _, v := range batchVoters {
-		batchIdx[v.CensusIdx] = true
+		key, err := e.slotKey(v)
+		if err != nil {
+			return nil, nil, err
+		}
+		batchSlots[key] = true
 	}
-	candidates := make([]int, 0, len(preBatchIndices))
-	for _, idx := range preBatchIndices {
-		if !batchIdx[idx] {
-			candidates = append(candidates, idx)
+	candidates := make([]uint64, 0, len(preBatchSlots))
+	for _, key := range preBatchSlots {
+		if !batchSlots[key] {
+			candidates = append(candidates, key)
 		}
 	}
 	w := len(overwrittenBallots)
@@ -570,20 +581,10 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 	if err != nil {
 		return nil, nil, fmt.Errorf("refresh sample: %w", err)
 	}
+	selected = append(selected, e.RefreshExtra...)
 	// Sort by ballot key ascending; the guest enforces strictly increasing keys.
-	type refreshItem struct {
-		idx int
-		key uint64
-	}
-	items := make([]refreshItem, len(selected))
-	for i, idx := range selected {
-		key, err := e.slotKey(e.Voters[idx])
-		if err != nil {
-			return nil, nil, err
-		}
-		items[i] = refreshItem{idx: idx, key: key}
-	}
-	sort.Slice(items, func(i, j int) bool { return items[i].key < items[j].key })
+	items := selected
+	sort.Slice(items, func(i, j int) bool { return items[i] < items[j] })
 
 	if len(items) > 0 && e.reencChain == nil {
 		return nil, nil, fmt.Errorf("refresh needs seeded reencChain; call BuildReencBlock first")
@@ -591,12 +592,12 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 
 	var refreshChain []davinci.SmtEntry
 	var refreshedBallots []wideBallot
-	for _, it := range items {
-		oldWide := e.VotedBallots[it.idx]
+	for _, key := range items {
+		oldWide := e.VotedBallots[key]
 		oldBallot := wideBallotToElgamalBallot(oldWide)
 		newBallot, err := oldBallot.ReencryptChained(e.EncKey, e.reencChain, e.NumFields)
 		if err != nil {
-			return nil, nil, fmt.Errorf("refresh reencrypt[%d]: %w", it.idx, err)
+			return nil, nil, fmt.Errorf("refresh reencrypt[%#x]: %w", key, err)
 		}
 		newWide := make(wideBallot, NumFields)
 		for i := 0; i < NumFields; i++ {
@@ -609,12 +610,12 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 		newLeafVal := ballotLeafHash(newWide)
 		entry, err := buildArboUpdateEntry(
 			e.ProcTree,
-			new(big.Int).SetUint64(it.key),
+			new(big.Int).SetUint64(key),
 			newLeafVal,
 			procLevels,
 		)
 		if err != nil {
-			return nil, nil, fmt.Errorf("refresh update[%d] (voter %d): %w", it.idx, it.idx, err)
+			return nil, nil, fmt.Errorf("refresh update[%#x]: %w", key, err)
 		}
 		refreshChain = append(refreshChain, entry)
 		refreshedBallots = append(refreshedBallots, oldWide)
@@ -625,7 +626,7 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 		newResults = frAccumSub(newResults, frAccumFromBallot(oldWide))
 
 		// Advance the stored ballot to its refreshed value.
-		e.VotedBallots[it.idx] = newWide
+		e.VotedBallots[key] = newWide
 	}
 
 	newResultsLeaf := frAccumLeafHash(newResults)
@@ -693,10 +694,10 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 			Ballot: voterBallotStrs[i],
 		})
 	}
-	for _, it := range items {
+	for _, key := range items {
 		da.Updates = append(da.Updates, davinci.SlotUpdate{
-			Key:    it.key,
-			Ballot: ballotToFrStrings(e.VotedBallots[it.idx]), // refreshed value
+			Key:    key,
+			Ballot: ballotToFrStrings(e.VotedBallots[key]), // refreshed value
 		})
 	}
 	e.lastDA = da
@@ -718,17 +719,18 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 }
 
 // slotKey is the ballot slot the guest will derive for v: from the census
-// index the CSP signed, or from the lean-IMT path its census proof
-// authenticates (davinci.SlotKey).
+// index the CSP signed, or from the voter's address (davinci.SlotKey).
 func (e *Election) slotKey(v *Voter) (uint64, error) {
+	if key, ok := e.SlotOverride[v.CensusIdx]; ok {
+		return key, nil
+	}
 	if e.CspKey != nil {
 		return davinci.CSPSlotKey(uint64(v.CensusIdx)), nil
 	}
-	proof, err := e.Census.GenerateProof(v.CensusIdx)
-	if err != nil {
-		return 0, fmt.Errorf("slot of voter %d: %w", v.CensusIdx, err)
+	if len(v.AddressBytes) != 20 {
+		return 0, fmt.Errorf("slot of voter %d: address has %d bytes", v.CensusIdx, len(v.AddressBytes))
 	}
-	return davinci.SlotKey(proof.PathBits, len(proof.Siblings)), nil
+	return davinci.SlotKey([20]byte(v.AddressBytes)), nil
 }
 
 // BuildCensusProofs builds lean-IMT Poseidon membership proofs for batchVoters.
@@ -1147,16 +1149,16 @@ func wideBallotToElgamalBallot(wb wideBallot) *elgamal.Ballot {
 // sampleN picks k distinct entries from cand uniformly at random using
 // crypto/rand. Returns all of cand when k >= len(cand). The returned slice is
 // a permutation prefix and is safe to sort by the caller.
-func sampleN(cand []int, k int) ([]int, error) {
+func sampleN[T any](cand []T, k int) ([]T, error) {
 	if k <= 0 {
 		return nil, nil
 	}
 	if k >= len(cand) {
-		out := make([]int, len(cand))
+		out := make([]T, len(cand))
 		copy(out, cand)
 		return out, nil
 	}
-	pool := make([]int, len(cand))
+	pool := make([]T, len(cand))
 	copy(pool, cand)
 	for i := 0; i < k; i++ {
 		max := big.NewInt(int64(len(pool) - i))

@@ -308,7 +308,8 @@ weight (up to 88 bits). The leaf is stored as a BN254 Fr element.
 | 3A.1 | Census block is present (non-empty) | FAIL_MISSING_BLOCK |
 | 3A.2 | All proofs reference the **same census root** | FAIL_CENSUS |
 | 3A.3 | No duplicate leaves across all proofs in the batch | FAIL_CENSUS |
-| 3A.4 | Each proof's Merkle path is valid: recomputed root matches declared root | FAIL_CENSUS |
+| 3A.4 | Each proof has a canonical shape: `siblings.len() <= 61` and `index >> siblings.len() == 0` (no path bit the walk never reads) | FAIL_CENSUS |
+| 3A.5 | Each proof's Merkle path is valid: recomputed root matches declared root | FAIL_CENSUS |
 
 #### Merkle path verification
 
@@ -326,11 +327,10 @@ assert node == root
 
 The `census_root` output is taken from the first census proof's root field.
 
-The path also fixes the voter's ballot slot (4.1.6): lean-IMT proofs are
-compact (levels where the node has no sibling are omitted), so the pair
-`(index, siblings.len())` identifies the leaf, and the guest requires
-`index >> siblings.len() == 0` (bits the walk never reads must be zero) and
-`siblings.len() <= 61` so the slot stays inside the ballot namespace.
+The path does not fix the voter's ballot slot. A lean-IMT root does not
+commit to the tree size, and path bits are free on the levels a compact proof
+keeps, so one leaf verifies at several positions (and a growing census moves
+every position). The slot comes from the leaf's address instead (4.1.6).
 
 ### 3B. CSP ECDSA Census (censusOrigin 4)
 
@@ -345,26 +345,32 @@ envelope = "\x19Ethereum Signed Message:\n92" ‖ payload                       
 z        = keccak256(envelope)
 ```
 
-- **processID**: read from the state tree (process_proofs[0], key 0x00)
-- **address**: voter's 20-byte Ethereum address
+- **processID**: the STATETX `process_id`, which 4.2 pins to config key 0x00
+- **address**: voter's 20-byte Ethereum address, the low 160 bits of `voter_address`
 - **weight**: voter's voting weight (256-bit big-endian)
 - **index**: CSP-assigned auto-increment index (used as ballot SMT key)
 
 #### CSPBLK binary block format
 
 ```
-Header:  CSP_MAGIC("CSPBLK!!") | n_entries(u64) | csp_pub_key_x(FrRaw) | csp_pub_key_y(FrRaw)
-Entry:   r(FrRaw) | s(FrRaw) | voter_address(FrRaw) | weight(FrRaw) | index(u64)
+Header:  CSP_MAGIC("CSPBLK!!") | n_entries(u64)            (n_entries <= 4096, else FAIL_PARSE)
+Entry:   r(FrRaw) | s(FrRaw) | recid(u64, low byte used) | voter_address(FrRaw) | weight(FrRaw) | index(u64)
 ```
 
-All voters in a batch share the same CSP public key (stored once in the header).
+The block carries no CSP key. The guest recovers it from each entry with
+`ecdsa_recover_secp256k1(r, s, z, recid)` and requires every entry to recover
+the same point as entry 0.
 
 #### CSP address derivation
 
 ```
-csp_address = keccak256(csp_pub_key_x_BE32 ‖ csp_pub_key_y_BE32)[12..32]
+pk_0        = ecdsa_recover_secp256k1(r_0, s_0, z_0, recid_0)
+csp_address = keccak256(pk_0.x_BE32 ‖ pk_0.y_BE32)[12..32]
 census_root = uint160(csp_address) as FrRaw
 ```
+
+Only one keccak runs per batch: entries 1.. compare the recovered point with
+`pk_0` instead of deriving an address.
 
 #### Constraint checks
 
@@ -372,8 +378,9 @@ census_root = uint160(csp_address) as FrRaw
 |---|-------|----------|
 | 3B.1 | CSP block is present when censusOrigin=4 | FAIL_MISSING_BLOCK |
 | 3B.2 | CSP block has at least 1 entry | FAIL_CSP |
+| 3B.2b | Every `voter_address` is a canonical uint160: `voter_address[2] >> 32 == 0` and `voter_address[3] == 0`. The message, the binding (6.6) and ECDSA (2.6) read only the low 160 bits, so without this one address with bit 160 set would pass 3B.3 as a second address | FAIL_CSP |
 | 3B.3 | No duplicate `voter_address` and no duplicate `index` across entries (the index is the ballot slot, 4.1.6; the CSP must assign one index per voter) | FAIL_CSP |
-| 3B.4 | Each CSP signature is valid: `secp256k1_ecdsa_verify(csp_pk, z, r, s)` | FAIL_CSP |
+| 3B.4 | Each entry recovers a key (`ecdsa_recover_secp256k1(r, s, z, recid)` succeeds), and every recovered key equals `pk_0` | FAIL_CSP |
 
 ### Extensibility
 
@@ -404,27 +411,49 @@ the ballot/voteID data is bound to the corresponding ballot proof.
 | 4.1.4 | VoteID public input upper limbs zero: `pubs[1][1..3] == 0` | FAIL_CONSISTENCY |
 | 4.1.4b | `vote_id_chain[i].new_key[1..3] == 0` and `ballot_chain[i].new_key[1..3] == 0`: slot keys are u64, and the DA blob publishes limb 0 only, so a leaf at `key + 2^64` would be unreconstructible | FAIL_CONSISTENCY / FAIL_BALLOT_NS |
 | 4.1.5 | Each `ballot_chain[i].new_key[0] ∈ [0x10, 0x7FFF_FFFF_FFFF_FFFF]` (Ballot namespace) | FAIL_BALLOT_NS |
-| 4.1.6 | `ballot_chain[i].new_key[0] == slot(i)` (slot binding): Merkle census `slot = BallotMin + ((1 << n_siblings) \| index)` from census proof `i` (with `index >> n_siblings == 0`, `n_siblings <= 61`); CSP census `slot = BallotMin + entries[i].index` (the index the CSP signed) | FAIL_BALLOT_NS |
+| 4.1.6 | `ballot_chain[i].new_key[0] == slot(i)` (slot binding): Merkle census `slot = address_slot(addr_i)` with `addr_i` the address of census leaf `i` (below); CSP census `slot = BallotMin + entries[i].index` (the index the CSP signed) | FAIL_BALLOT_NS |
+| 4.1.7 | The keys `ballot_chain[*].new_key[0]` are pairwise distinct (both census modes). It shares `FAIL_BALLOT_NS` with the slot binding and has no bit of its own | FAIL_BALLOT_NS |
 
-The slot is a function of the census position the guest verified (3A.4 /
-3B.4), and that leaf's address is bound to ballot proof `i` (§6), so a ballot
-can only be written to its owner's slot. Two census leaves never share a slot:
-the leading 1 encodes the path length, so distinct compact paths map to
-distinct keys even when the census is not a power of two (for a full tree of
-depth `d` the slot is `BallotMin + 2^d + leaf_index`).
+Merkle slot rule:
+
+```
+addr_i          = 20 bytes, big-endian, of (census_proofs[i].leaf >> 88) mod 2^160
+address_slot(a) = BallotMin + (be64(SHA-256("davinci-slot-v1" ‖ a)[0..8]) mod (2^63 − 16))
+```
+
+`addr_i` is exactly the value 6.6 compares with ballot proof `i`'s address,
+which 2.6 binds to the ECDSA signer, so a ballot can only be written to its
+signer's slot. Leaf bits above 247 are not part of `addr_i`: a leaf carrying
+them either fails 6.6 or maps to its signer's slot, never to a second one. The
+result is always inside `[BallotMin, BallotMax]`. The tag is 15 ASCII bytes and
+the preimage 35 bytes, hashed on the `sha256f` precompile.
+
+Distinct addresses can share a slot. Finding an address whose slot collides
+with one of N members takes about 2^63/N key generations (hours of GPU time
+at N = 10^6), and the colliding voter would overwrite that member's ballot;
+the guest cannot tell, because it sees the slot's old ballot and not its
+owner. Slot uniqueness is therefore part of the census manager's contract:
+an on-chain census must reject a registration whose slot is taken, and the
+sequencer must refuse a census with colliding slots. Within one batch the guest
+enforces it itself (4.1.7): a crafted census with two leaves for one address,
+or a collision, would otherwise write one slot twice. The CSP rule already
+has distinct indexes (3B.3); 4.1.7 applies there too.
 
 **Key namespace layout:**
 
 ```
 0x00 .. 0x0F    Process config keys (reserved)
-0x10 .. 0x7FFF...  Ballot keys:  BallotMin + ((1 << n_siblings) | path_bits)   (Merkle)
-                                 BallotMin + csp_index                          (CSP)
+0x10 .. 0x7FFF...  Ballot keys:  address_slot(address)   (Merkle)
+                                 BallotMin + csp_index    (CSP)
 0x8000... .. 0xFFFF...  VoteID keys: unique per ballot proof
 ```
 
-Keys are u64 in a 64-level tree, so distinct keys never share a leaf. The
-only collisions possible are between vote-id keys (63-bit truncated hashes),
-which make the INSERT fail and that voter resubmit with a fresh `k`.
+Keys are u64 in a 64-level tree, so distinct keys never share a leaf. Two
+kinds of key collide. Vote-id keys are 63-bit truncated hashes: a collision
+makes the INSERT fail and that voter resubmits with a fresh `k`. Merkle ballot
+slots are 63-bit address hashes: two members whose slots collide would share
+one slot, so the census manager must keep slots unique (see the slot rule
+above), and 4.1.7 rejects a batch that writes one slot twice.
 
 ### 4.2 SMT Chain Verification
 
@@ -574,7 +603,7 @@ For each entry in block order:
 |---|-------|----------|
 | 4.3.1 | Re-encryption block is present (public key exists) | FAIL_MISSING_BLOCK |
 | 4.3.2 | Public key `(x, y)` satisfies BabyJubJub curve equation: `a·x² + y² = 1 + d·x²·y²` | FAIL_REENC |
-| 4.3.2b | Public key is in the prime-order subgroup: `pk ≠ identity` and `l · pk == identity`, with `l = 2736030358979909402780800718157159386076813972158567259200215660948447373041` (BabyJubJub subgroup order). Rejects small-order points; a co-factor-8 point would let a malicious key extract residues of the ballot scalars | FAIL_REENC |
+| 4.3.2b | Public key is in the prime-order subgroup: `pk ≠ identity` and `l · pk == identity`, with `l = 2736030358979909402780800718157159386076813972158567259200215660948447373041` (BabyJubJub subgroup order). Rejects small-order points; a co-factor-8 point would let a malicious key extract residues of the ballot scalars. The check and the fixed-base table for `r · pk` both use the key reduced mod p, so a key committed as `(x + p, y)` is the same point and never reaches the precompile unreduced | FAIL_REENC |
 | 4.3.3 | `original.len() == reencrypted.len()` per entry | FAIL_REENC |
 | 4.3.4 | Padded slots (`i ≥ num_fields`) carry the TE identity `(0,1)` on both sides | FAIL_REENC |
 | 4.3.5 | For every active ciphertext, in block order then field order: `newC1 == origC1 + r_t·B8` and `newC2 == origC2 + r_t·pubKey`, where `r_t` is the next unused chain element derived from `(seed, old_root)` | FAIL_REENC |
@@ -931,7 +960,7 @@ must be rejected by the verifier.
 | 12 | `FAIL_SMT_RESULTS` | smt.rs | Net Results SMT transition invalid |
 | 13 | `FAIL_SMT_PROCESS` | smt.rs | Process config read-proof invalid or missing |
 | 14 | `FAIL_CONSISTENCY` | consistency.rs | VoteID namespace or proof binding mismatch |
-| 15 | `FAIL_BALLOT_NS` | consistency.rs | Ballot namespace or address binding mismatch |
+| 15 | `FAIL_BALLOT_NS` | consistency.rs | Ballot namespace, slot binding (4.1.6) or duplicate slot in the batch (4.1.7) |
 | 16 | `FAIL_CENSUS` | census.rs | Census membership proof invalid |
 | 17 | `FAIL_REENC` | babyjubjub.rs | Re-encryption verification failed |
 | 18 | `FAIL_KZG` | kzg.rs | KZG barycentric evaluation mismatch |
@@ -939,7 +968,7 @@ must be rejected by the verifier.
 | 20 | `FAIL_RESULT_ACCUM` | results.rs | Homomorphic ballot sum doesn't match results |
 | 21 | `FAIL_LEAF_HASH` | results.rs | Ballot SMT leaf hash mismatch |
 | 22 | `FAIL_BINDING` | main.rs | Cross-block binding mismatch |
-| 23 | `FAIL_CSP` | csp.rs | CSP ECDSA signature verification failed |
+| 23 | `FAIL_CSP` | csp.rs | CSP entry non-canonical, duplicated, or its key recovery failed or disagreed (3B.2–3B.4) |
 | 24 | `FAIL_REFRESH` | smt.rs / babyjubjub.rs / results.rs / main.rs | Silent-refresh chain violated the count rule (§4.5.2), per-entry format / disjointness (§4.5.3), root chaining (§4.5.4), leaf-hash pin (§4.5.5–§4.5.6), padded-slot identity (§4.5.7), or `occupied_before` overflowed the 32-bit output register (§4.5.8) |
 | 31 | `FAIL_PARSE` | io.rs | Binary format / parse error |
 
@@ -970,7 +999,8 @@ Every voter has a valid eligibility proof:
 The eligibility address is bound to the ballot proof address (Phase 6.6),
 preventing reuse of eligibility proofs across voters. In Merkle mode, no
 duplicate census leaves exist within a batch. In CSP mode, no duplicate
-`(voter_address, index)` pairs are allowed.
+`(voter_address, index)` pairs are allowed. In both modes a batch writes each
+ballot slot at most once (4.1.7).
 
 ### 12.4 State Integrity
 

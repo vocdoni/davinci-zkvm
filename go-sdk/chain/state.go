@@ -61,9 +61,9 @@ type Config struct {
 // and census/signature material travel separately in the ProveRequest;
 // the state tree only needs the key parts and the ciphertexts.
 type Vote struct {
-	// Slot is the voter's ballot slot key: davinci.CensusProof.SlotKey() for a
-	// Merkle census, davinci.CSPSlotKey(index) for a CSP census. The guest
-	// derives the same key from the census proof and rejects any other.
+	// Slot is the voter's ballot slot key: davinci.SlotKey(address) (or
+	// CensusProof.SlotKey()) for a Merkle census, davinci.CSPSlotKey(index)
+	// for a CSP census. The guest derives the same key and rejects any other.
 	Slot uint64
 	// VoteID is the unique vote identifier key (bit 63 set).
 	VoteID uint64
@@ -185,10 +185,16 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 	// touches the map. Equivalent to s.voters - s.overwrites, but the map
 	// size is the ground truth (both counters are derived from it).
 	occupiedBefore := len(s.votedBallots)
+	seen := make(map[uint64]int, n)
 	for i, v := range votes {
 		if v.Slot < davinci.BallotMin || v.Slot > davinci.BallotMax {
 			return nil, nil, fmt.Errorf("vote[%d]: slot %#x outside the ballot namespace", i, v.Slot)
 		}
+		// The guest rejects a batch that writes one slot twice.
+		if j, dup := seen[v.Slot]; dup {
+			return nil, nil, fmt.Errorf("vote[%d]: slot %#x already written by vote[%d]", i, v.Slot, j)
+		}
+		seen[v.Slot] = i
 	}
 	bLen := arbo.HashFunctionSha256.Len()
 

@@ -188,9 +188,9 @@ fn batch_publics_from_recorded_job() {
     assert_eq!(p.fail_mask, 0);
     assert_eq!(
         (p.voters, p.overwrites, p.n_blobs, p.occupied_before),
-        (1024, 0, 17, 1024)
+        (3, 3, 1, 24)
     );
-    assert_eq!((p.nproofs, p.n_public, p.log_n), (1024, 3, 10));
+    assert_eq!((p.nproofs, p.n_public, p.log_n), (3, 3, 1));
     let reg = |i: usize| u32::from_le_bytes(regs[4 * i..4 * i + 4].try_into().unwrap());
     assert_eq!(
         (p.nproofs, p.n_public, p.log_n),
@@ -335,7 +335,7 @@ fn build_results_request_roundtrip() {
 fn release_pins() {
     assert_eq!(
         hex::encode(BATCH_PROGRAM_VK),
-        "edf235f5e68ebbd9bec31f29f7b97b80e2e0ea209d8f2e82a81d4f3aa2483c6a"
+        "44ccdf5eb9cdf759d9ca784b76c50604cc458b2d7b9861b4bc4941ddf961f8a7"
     );
     assert_eq!(
         hex::encode(RESULTS_PROGRAM_VK),

@@ -11,13 +11,21 @@
 use crate::poseidon::poseidon2;
 use crate::types::{FrRaw, FAIL_CENSUS};
 
+/// Longest compact lean-IMT path accepted (rust-sdk `MAX_CENSUS_DEPTH`).
+const MAX_CENSUS_DEPTH: usize = 61;
+
 /// Verify a lean-IMT Poseidon membership proof.
 /// Compatible with `leanimt.VerifyProofWith` from lean-imt-go with `PoseidonHasher`.
 /// - `root`:     expected tree root
 /// - `leaf`:     `PackAddressWeight(address, weight)` as BN254 Fr LE
 /// - `index`:    packed path bits (bit i = `(index >> i) & 1`)
-/// - `siblings`: merkle path (only non-empty levels included)
+/// - `siblings`: merkle path (only non-empty levels included), at most 61
 pub fn verify_census_proof(root: &FrRaw, leaf: &FrRaw, index: u64, siblings: &[FrRaw]) -> bool {
+    // Canonical shape: bounded depth, and no path bit the walk never reads.
+    let n = siblings.len();
+    if n > MAX_CENSUS_DEPTH || index >> n != 0 {
+        return false;
+    }
     let mut node = *leaf;
 
     for (i, sibling) in siblings.iter().enumerate() {
@@ -40,7 +48,8 @@ pub fn verify_census_proof(root: &FrRaw, leaf: &FrRaw, index: u64, siblings: &[F
 /// Security invariants enforced:
 /// 1. All proofs use the **same census root** => prevents mixing proofs from different snapshots.
 /// 2. No duplicate leaves => prevents the same voter from voting twice in one batch.
-/// 3. Each proof's Merkle path is valid against the declared root.
+/// 3. Each proof's Merkle path is valid against the declared root, with at
+///    most 61 siblings and no path bit above the sibling count.
 pub fn verify_batch(parsed: &crate::io::ParsedInput, fail_mask: &mut u32) -> bool {
     if parsed.census_proofs.is_empty() {
         *fail_mask |= crate::types::FAIL_MISSING_BLOCK;

@@ -38,7 +38,6 @@ fn lean_imt_roots_and_proofs_match_go() {
             };
             assert_eq!(got, want, "size {size} index {idx}");
             assert!(verify_census_proof(&got));
-            assert_eq!(slot_key_merkle(&got).unwrap(), u64v(&p["slot"]));
             checked += 1;
         }
         assert!(tree.proof(size).is_err());
@@ -94,7 +93,6 @@ fn census_proof_guest_rules() {
         ..p.clone()
     };
     assert!(!verify_census_proof(&high));
-    assert!(slot_key_merkle(&high).is_err());
     // Wrong leaf, sibling or root.
     assert!(!verify_census_proof(&CensusProof {
         leaf: p.leaf + Fr::from(1u64),
@@ -118,7 +116,6 @@ fn census_proof_guest_rules() {
         siblings,
     };
     assert!(!verify_census_proof(&deep));
-    assert!(slot_key_merkle(&deep).is_err());
     let mut ok61 = deep.clone();
     ok61.siblings.pop();
     ok61.root = {
@@ -129,7 +126,6 @@ fn census_proof_guest_rules() {
         n
     };
     assert!(verify_census_proof(&ok61));
-    assert_eq!(slot_key_merkle(&ok61).unwrap(), 0x10 + (1u64 << 61));
 }
 
 #[test]
@@ -140,19 +136,13 @@ fn census_leaves_and_slots_match_go() {
         let leaf = census_leaf(&hex20(&l["address"]), w).unwrap();
         assert_eq!(leaf, fr(&l["leaf"]));
         assert_eq!(census_leaf_weight(&leaf), w);
+        assert_eq!(census_leaf_address(&leaf), hex20(&l["address"]));
+        // Bits above 247 are not part of the address the guest binds.
+        let junk = leaf + Fr::from(num_bigint::BigUint::from(1u8) << 248u32);
+        assert_eq!(census_leaf_address(&junk), hex20(&l["address"]));
     }
     assert!(census_leaf(&[0xff; 20], 1u128 << 88).is_err());
     assert!(census_leaf(&[0; 20], u128::MAX).is_err());
-    for sv in v["slots"].as_array().unwrap() {
-        let depth = u64v(&sv["depth"]) as usize;
-        let p = CensusProof {
-            root: Fr::from(0u64),
-            leaf: Fr::from(0u64),
-            path_bits: u64v(&sv["path_bits"]),
-            siblings: vec![Fr::from(0u64); depth],
-        };
-        assert_eq!(slot_key_merkle(&p).unwrap(), u64v(&sv["slot"]));
-    }
     assert_eq!(slot_key_csp(0).unwrap(), 0x10);
     assert_eq!(
         slot_key_csp(0x7fff_ffff_ffff_ffef).unwrap(),
@@ -160,6 +150,19 @@ fn census_leaves_and_slots_match_go() {
     );
     assert!(slot_key_csp(0x7fff_ffff_ffff_fff0).is_err());
     assert!(slot_key_csp(u64::MAX).is_err());
+}
+
+#[test]
+fn address_slots_match_go() {
+    let v = load("slot.json");
+    assert_eq!(s(&v["tag"]).as_bytes(), SLOT_TAG);
+    let slots = v["slots"].as_array().unwrap();
+    assert_eq!(slots.len(), 20);
+    for c in slots {
+        let slot = slot_key_address(&hex20(&c["address"]));
+        assert_eq!(slot, u64v(&c["slot"]), "{}", s(&c["address"]));
+        assert!((0x10..=0x7fff_ffff_ffff_ffff).contains(&slot));
+    }
 }
 
 #[test]

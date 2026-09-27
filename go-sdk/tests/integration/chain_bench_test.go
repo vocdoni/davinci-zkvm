@@ -164,7 +164,8 @@ func loadOrGenerateBallots(t *testing.T, totalVotes int) (*ballotCache, bool) {
 
 // batchRequest assembles the prove request and sequencer votes for
 // voters [a, b) out of the cache.
-func (c *ballotCache) batchRequest(a, b int) (*davinci.ProveRequest, []chain.Vote) {
+func (c *ballotCache) batchRequest(t *testing.T, a, b int) (*davinci.ProveRequest, []chain.Vote) {
+	t.Helper()
 	n := b - a
 	req := &davinci.ProveRequest{
 		VK:           json.RawMessage(c.VK),
@@ -187,8 +188,12 @@ func (c *ballotCache) batchRequest(a, b int) (*davinci.ProveRequest, []chain.Vot
 				C2: bjjgnark.New().SetPoint(v.C2X[j], v.C2Y[j]),
 			}
 		}
+		slot, err := v.CensusProof.SlotKey()
+		if err != nil {
+			t.Fatalf("voter %d slot: %v", a+i, err)
+		}
 		votes[i] = chain.Vote{
-			Slot:   v.CensusProof.SlotKey(),
+			Slot:   slot,
 			VoteID: v.VoteID,
 			Ballot: ballot,
 		}
@@ -244,7 +249,7 @@ func TestChainBenchmark(t *testing.T) {
 		proveTimes, foldTimes []time.Duration
 	)
 	for b := 0; b < nBatches; b++ {
-		req, votes := cache.batchRequest(b*batchSize, (b+1)*batchSize)
+		req, votes := cache.batchRequest(t, b*batchSize, (b+1)*batchSize)
 
 		start := time.Now()
 		if _, err := seq.ProveBatch(votes, req); err != nil {

@@ -15,6 +15,7 @@
 package integration
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -29,6 +30,8 @@ import (
 	arbo "github.com/vocdoni/arbo"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/circuits/ballotproof"
+	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/format"
+	leanimt "github.com/vocdoni/lean-imt-go"
 )
 
 // Fail-mask bit constants => must match circuit/src/types.rs.
@@ -107,11 +110,18 @@ func buildCheatInput(t *testing.T) (*cheatElectionInput, *Election, []*BallotRes
 // voting in one batch.
 func buildCheatInputN(t *testing.T, n int) (*cheatElectionInput, *Election, []*BallotResult) {
 	t.Helper()
-
 	election, err := NewElection(n)
 	if err != nil {
 		t.Fatalf("NewElection: %v", err)
 	}
+	return buildCheatInputElection(t, election)
+}
+
+// buildCheatInputElection builds one batch in which every voter of election
+// votes, so a test can adjust the election (census, slot overrides) first.
+func buildCheatInputElection(t *testing.T, election *Election) (*cheatElectionInput, *Election, []*BallotResult) {
+	t.Helper()
+	n := len(election.Voters)
 
 	// Generate the ballot proofs.
 	batch, err := GenerateBallotBatch(election.ProcessID, election.EncKey, election.Voters, 42)
@@ -328,6 +338,22 @@ func assertCircuitFails(t *testing.T, input []byte, wantBits uint32, label strin
 	}
 }
 
+// assertCircuitFailsExactly is assertCircuitFails with fail_mask == wantBits,
+// for inputs built to trip one check and nothing else.
+func assertCircuitFailsExactly(t *testing.T, input []byte, wantBits uint32, label string) {
+	t.Helper()
+	outputs, err := runZiskEmu(input)
+	if err != nil {
+		t.Fatalf("[%s] ziskemu failed: %v", label, err)
+	}
+	if len(outputs) < 2 {
+		t.Fatalf("[%s] too few outputs: %d", label, len(outputs))
+	}
+	if ok, mask := outputs[davinci.OutputOverallOk], outputs[davinci.OutputFailMask]; ok != 0 || mask != wantBits {
+		t.Errorf("[%s] expected overall_ok=0 fail_mask=0x%08x, got overall_ok=%d fail_mask=0x%08x", label, wantBits, ok, mask)
+	}
+}
+
 // Cheat Tests
 
 // TestCheatSanity verifies that the self-generated input is accepted by the circuit.
@@ -441,8 +467,8 @@ func TestCheatSingleVote(t *testing.T) {
 }
 
 // TestCheatSlotMismatch writes voter 0's ballot to a slot other than the one
-// its census proof authenticates (spec 4.1.6). The key is still inside the
-// ballot namespace, so only the slot binding can catch it.
+// its address derives (spec 4.1.6). The key is still inside the ballot
+// namespace, so only the slot binding can catch it.
 func TestCheatSlotMismatch(t *testing.T) {
 	base, _, _ := buildCheatInput(t)
 	keyBI, err := davinci.LeHexToBigInt(base.stateData.BallotSmt[0].NewKey)
@@ -464,11 +490,10 @@ func smtKeyHex(key uint64) string {
 }
 
 // TestCheatSlotHighPathBits sets the path bit just above the proof's sibling
-// count. The census walk never reads it, so the proof still verifies, and
-// because that bit is exactly the slot formula's leading 1, the derived slot
-// is unchanged: the state block stays valid and only the explicit
-// `index >> n_siblings == 0` rule can reject the input. Without it one leaf
-// could claim 2^(64-depth) different slots.
+// count. The census walk never reads it and the slot comes from the address,
+// so the proof still verifies and the state block stays valid: only the
+// explicit `index >> n_siblings == 0` rule (spec 3A.4) can reject the input.
+// It keeps census proofs canonical.
 func TestCheatSlotHighPathBits(t *testing.T) {
 	base, election, _ := buildCheatInput(t)
 	censusProofs, err := election.BuildCensusProofs(election.Voters)
@@ -483,7 +508,127 @@ func TestCheatSlotHighPathBits(t *testing.T) {
 	tampered := append(append(base.baseBin, base.stateBlock...), tamperedCensus...)
 	tampered = append(tampered, base.reencBlock...)
 	tampered = append(tampered, base.kzgBlock...)
-	assertCircuitFails(t, tampered, failBallotNS, "slot_high_path_bits")
+	assertCircuitFailsExactly(t, tampered, failCensus, "slot_high_path_bits")
+}
+
+// legacySlotKey is the old compact-path slot, BallotMin + ((1 << n) |
+// path_bits). The census root does not bind a leaf position, so the guest
+// must no longer accept it.
+func legacySlotKey(t *testing.T, e *Election, idx int) uint64 {
+	t.Helper()
+	p, err := e.Census.GenerateProof(idx)
+	if err != nil {
+		t.Fatalf("GenerateProof(%d): %v", idx, err)
+	}
+	return davinci.BallotMin + (uint64(1)<<uint(len(p.Siblings)) | p.PathBits)
+}
+
+// TestCheatSlotPathDerived builds an otherwise honest batch whose ballots sit
+// at the old path-derived slots: the state, DA and refresh data are all
+// consistent, so only the address slot binding (spec 4.1.6) can reject it.
+func TestCheatSlotPathDerived(t *testing.T) {
+	election, err := NewElection(2)
+	if err != nil {
+		t.Fatalf("NewElection: %v", err)
+	}
+	election.SlotOverride = map[int]uint64{}
+	for i := range election.Voters {
+		key := legacySlotKey(t, election, i)
+		if want, _ := election.slotKey(election.Voters[i]); want == key {
+			t.Fatalf("voter %d: legacy slot equals the address slot", i)
+		}
+		election.SlotOverride[i] = key
+	}
+	base, _, _ := buildCheatInputElection(t, election)
+	assertCircuitFailsExactly(t, base.fullInput(), failBallotNS, "slot_path_derived")
+}
+
+// shareAddress makes voter b a second census member for voter a's address:
+// same signer and weight, leaf PackAddressWeight(addr, w) + 2^248. The guest
+// reads the address as bits 88..247 and the weight as bits 0..87, so both
+// leaves bind the same voter and slot, yet they are distinct tree leaves.
+// That is the crafted census of spec 4.1.7.
+func shareAddress(t *testing.T, e *Election, a, b int) {
+	t.Helper()
+	va, vb := e.Voters[a], e.Voters[b]
+	vb.Signer, vb.AddressBytes, vb.AddressBigInt, vb.Weight = va.Signer, va.AddressBytes, va.AddressBigInt, va.Weight
+	e.censusLeaves[b] = new(big.Int).Add(packAddressWeight(vb.AddressBigInt, vb.Weight), new(big.Int).Lsh(big.NewInt(1), 248))
+	imt, err := leanimt.New(poseidonHasher, bigIntEq, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("leanimt.New: %v", err)
+	}
+	for _, l := range e.censusLeaves {
+		imt.Insert(l)
+	}
+	e.Census = imt
+}
+
+// TestCheatDuplicateSlot votes twice for one address in one batch through a
+// census that carries two leaves for it. Census, signatures, state chain
+// (INSERT then UPDATE of the same slot), accounting and DA are all
+// consistent; only the pairwise-distinct slot check (spec 4.1.7) rejects it.
+// Batch 1 seeds one ballot so occupied_before covers the in-batch overwrite.
+func TestCheatDuplicateSlot(t *testing.T) {
+	election, err := NewElection(3)
+	if err != nil {
+		t.Fatalf("NewElection: %v", err)
+	}
+	shareAddress(t, election, 1, 2)
+	k1, _ := election.slotKey(election.Voters[1])
+	k2, _ := election.slotKey(election.Voters[2])
+	if k1 != k2 {
+		t.Fatalf("shared address gave slots %#x and %#x", k1, k2)
+	}
+	base, _, _ := buildCheatInputBatches(t, election, election.Voters[:1], election.Voters[1:3])
+	if base.stateData.OverwrittenCount != 1 {
+		t.Fatalf("expected one in-batch overwrite, got %d", base.stateData.OverwrittenCount)
+	}
+	assertCircuitFailsExactly(t, base.fullInput(), failBallotNS, "duplicate_slot")
+}
+
+// TestCheatReencKeyNonCanonical commits the encryption key as (x + p, y), the
+// same point in a second encoding. The registry rejects that key at genesis,
+// but the guest must still not abort on it: the subgroup check and the
+// fixed-base table both use the reduced key, and Poseidon reduces it in the
+// ballot inputs hash, so the batch proves the same statement as with (x, y).
+// A guest that feeds the raw key to the precompile exits instead.
+func TestCheatReencKeyNonCanonical(t *testing.T) {
+	election, err := NewElection(2)
+	if err != nil {
+		t.Fatalf("NewElection: %v", err)
+	}
+	fieldP, _ := new(big.Int).SetString("21888242871839275222246405745257275088548364400416034343698204186575808495617", 10)
+	rx, ry := election.EncKey.Point()
+	tx, ty := format.FromRTEtoTE(rx, ry)
+	txp := new(big.Int).Add(tx, fieldP)
+	var buf [64]byte
+	txp.FillBytes(buf[:32])
+	ty.FillBytes(buf[32:])
+	digest := sha256.Sum256(buf[:])
+	leaf := new(big.Int).SetBytes(digest[:])
+	bLen := arbo.HashFunctionSha256.Len()
+	if err := election.ProcTree.Update(
+		arbo.BigIntToBytes(keyLen, big.NewInt(0x03)),
+		arbo.BigIntToBytes(bLen, leaf),
+	); err != nil {
+		t.Fatalf("update key leaf: %v", err)
+	}
+	election.configVals[2] = leaf
+	root, err := election.ProcTree.Root()
+	if err != nil {
+		t.Fatalf("root: %v", err)
+	}
+	election.OldRoot = "0x" + hex.EncodeToString(pad32(root))
+
+	base, _, _ := buildCheatInputElection(t, election)
+	// REENCBLK: magic(8) n(8) pub_key_x as 4 LE limbs.
+	var le [32]byte
+	txp.FillBytes(le[:])
+	for i, j := 0, 31; i < j; i, j = i+1, j-1 {
+		le[i], le[j] = le[j], le[i]
+	}
+	copy(base.reencBlock[16:48], le[:])
+	assertCircuitValid(t, base.fullInput(), "reenc_key_non_canonical")
 }
 
 // TestCheatWrongReencKey verifies that a wrong re-encryption public key causes FAIL_REENC.
@@ -878,24 +1023,48 @@ func buildCheatInputTwoBatches(t *testing.T) (*cheatElectionInput, *Election, []
 	if err != nil {
 		t.Fatalf("NewElection: %v", err)
 	}
-
 	// Batch 1: voters 0, 1 (occupied_before=0 → target=0, no refresh).
-	batch1Voters := election.Voters[:2]
-	batch1, err := GenerateBallotBatch(election.ProcessID, election.EncKey, batch1Voters, 41)
-	if err != nil {
-		t.Fatalf("GenerateBallotBatch (batch 1): %v", err)
+	// Batch 2: voters 2, 3.
+	base, election, results := buildCheatInputBatches(t, election, election.Voters[:2], election.Voters[2:4])
+	if len(base.stateData.RefreshSmt) != 2 {
+		t.Fatalf("expected 2 refresh entries for batch 2, got %d", len(base.stateData.RefreshSmt))
 	}
-	oldRoot1 := election.OldRoot
-	_, reenc1, err := election.BuildReencBlock(oldRoot1, batch1.Results)
-	if err != nil {
-		t.Fatalf("BuildReencBlock (batch 1): %v", err)
+	return base, election, results
+}
+
+// buildCheatInputBatches applies batch1Voters to the election state, then
+// returns the full circuit input of the batch2Voters transition.
+func buildCheatInputBatches(t *testing.T, election *Election, batch1Voters, batch2Voters []*Voter) (*cheatElectionInput, *Election, []*BallotResult) {
+	t.Helper()
+	return buildCheatInputBatchesHook(t, election, batch1Voters, batch2Voters, nil)
+}
+
+// buildCheatInputBatchesHook is buildCheatInputBatches with a hook that runs
+// after batch 1 is applied (skipped when batch1Voters is empty) and before
+// batch 2 is built, so a test can change how batch 2 is laid out. The
+// eligibility block follows the election: CSP when it has a CSP key, the
+// lean-IMT census otherwise.
+func buildCheatInputBatchesHook(t *testing.T, election *Election, batch1Voters, batch2Voters []*Voter, between func()) (*cheatElectionInput, *Election, []*BallotResult) {
+	t.Helper()
+
+	if len(batch1Voters) > 0 {
+		batch1, err := GenerateBallotBatch(election.ProcessID, election.EncKey, batch1Voters, 41)
+		if err != nil {
+			t.Fatalf("GenerateBallotBatch (batch 1): %v", err)
+		}
+		oldRoot1 := election.OldRoot
+		_, reenc1, err := election.BuildReencBlock(oldRoot1, batch1.Results)
+		if err != nil {
+			t.Fatalf("BuildReencBlock (batch 1): %v", err)
+		}
+		if _, _, err := election.BuildStateBlock(batch1Voters, batch1.Results, reenc1); err != nil {
+			t.Fatalf("BuildStateBlock (batch 1): %v", err)
+		}
 	}
-	if _, _, err := election.BuildStateBlock(batch1Voters, batch1.Results, reenc1); err != nil {
-		t.Fatalf("BuildStateBlock (batch 1): %v", err)
+	if between != nil {
+		between()
 	}
 
-	// Batch 2: voters 2, 3.
-	batch2Voters := election.Voters[2:4]
 	batch2, err := GenerateBallotBatch(election.ProcessID, election.EncKey, batch2Voters, 42)
 	if err != nil {
 		t.Fatalf("GenerateBallotBatch (batch 2): %v", err)
@@ -923,7 +1092,7 @@ func buildCheatInputTwoBatches(t *testing.T) (*cheatElectionInput, *Election, []
 	}
 	genInputBin := findGenInputBin(t)
 	outBin := filepath.Join(tmpDir, "input.bin")
-	cmd := exec.Command(genInputBin, "--proofs-dir", tmpDir, "--output", outBin, "--nproofs", "2")
+	cmd := exec.Command(genInputBin, "--proofs-dir", tmpDir, "--output", outBin, "--nproofs", strconv.Itoa(len(batch2Voters)))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("gen-input: %v\n%s", err, out)
 	}
@@ -951,22 +1120,12 @@ func buildCheatInputTwoBatches(t *testing.T) (*cheatElectionInput, *Election, []
 	if err != nil {
 		t.Fatalf("BuildKZGBlock (batch 2): %v", err)
 	}
-	if len(stateData.RefreshSmt) != 2 {
-		t.Fatalf("expected 2 refresh entries for batch 2, got %d", len(stateData.RefreshSmt))
-	}
 	stateBlockBytes, err := davinci.EncodeStateBlock(stateData)
 	if err != nil {
 		t.Fatalf("EncodeStateBlock: %v", err)
 	}
 
-	censusProofs, err := election.BuildCensusProofs(batch2Voters)
-	if err != nil {
-		t.Fatalf("BuildCensusProofs: %v", err)
-	}
-	censusBlockBytes, err := davinci.EncodeCensusBlock(censusProofs)
-	if err != nil {
-		t.Fatalf("EncodeCensusBlock: %v", err)
-	}
+	censusBlockBytes := eligibilityBlock(t, election, batch2Voters)
 	reencBlockBytes, err := davinci.EncodeReencBlock(reencData)
 	if err != nil {
 		t.Fatalf("EncodeReencBlock: %v", err)
@@ -988,6 +1147,33 @@ func buildCheatInputTwoBatches(t *testing.T) (*cheatElectionInput, *Election, []
 		batchReencBallots:       reencBallots,
 		batchOverwrittenBallots: overwrittenBallots,
 	}, election, batch2.Results
+}
+
+// eligibilityBlock encodes the eligibility block for voters: the CSPBLK when
+// the election has a CSP key, the CENSUS block otherwise. Both sit between
+// STATETX and REENCBLK, so the bytes go in cheatElectionInput.censusBlock.
+func eligibilityBlock(t *testing.T, e *Election, voters []*Voter) []byte {
+	t.Helper()
+	if e.CspKey != nil {
+		csp, err := e.BuildCspData(voters)
+		if err != nil {
+			t.Fatalf("BuildCspData: %v", err)
+		}
+		b, err := davinci.EncodeCspBlock(csp)
+		if err != nil {
+			t.Fatalf("EncodeCspBlock: %v", err)
+		}
+		return b
+	}
+	proofs, err := e.BuildCensusProofs(voters)
+	if err != nil {
+		t.Fatalf("BuildCensusProofs: %v", err)
+	}
+	b, err := davinci.EncodeCensusBlock(proofs)
+	if err != nil {
+		t.Fatalf("EncodeCensusBlock: %v", err)
+	}
+	return b
 }
 
 // reencodeState re-encodes base.stateData and reassembles the full circuit

@@ -287,15 +287,6 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   whose `IC` differs: the `0x07` VK-hash leaf differs and v1.0.0 proofs do not
   verify under the embedded VK (`real_proof_v1_verifies_only_with_its_vk`).
   Don't feed Go-generated ballots to a Rust-SDK sequencer.
-- **`BjjFixedBase` is built from the raw key.** `verify_batch_from_parsed`
-  canonicalises the encryption key for the curve and subgroup checks but
-  passes the raw words to `BjjFixedBase::new`
-  (`circuit-primitives/src/babyjubjub.rs:453`). A key committed as `(x + p, y)`
-  would reach the precompile unreduced and abort the guest. Unreachable in
-  practice: the process registry rejects non-canonical keys at `newProcess`
-  (`GenesisLib.isValidEncryptionKey`), and the results guest fails them with
-  `FAIL_RANGE`. The fix (`BjjFixedBase::new(&pk.0, &pk.1, …)`) changes the
-  batch guest's program vk, so it waits for the next planned rebuild.
 - **`verify_zisk_proof_c` + the vadcop blob layout are ZisK internals**, not
   stable API — pin the ZisK version. On 1.3 the call takes six arguments
   (proof, `expected_setup_vk`, `expected_program_vk`), the blob tail is
@@ -325,17 +316,21 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   proofs or more, and still escalates to it on any retry. Run the service
   under a memory-capped unit (`systemd-run --user -p MemoryMax=56G`) when
   probing larger sizes so an overflow kills only the prover.
-- **Ballot slots are derived from the census proof, not chosen by the
-  sequencer.** Merkle census: `slot = BallotMin + ((1 << n_siblings) | path_bits)`
-  (`davinci.SlotKey`, `consistency.rs::slot_key`); the leading 1 encodes the
-  compact lean-IMT path length, so distinct leaves get distinct slots even
-  for a non-power-of-two census, and the guest rejects path bits above
-  `n_siblings`. CSP census: `BallotMin + signed index`. davinci-node's gnark
-  circuit binds `BallotMin + LeafIndex` but its lean-IMT verifier never
-  constrains `LeafIndex` (only `PathBits`), so it does not actually
-  authenticate the slot in Merkle mode; do not copy that. `chain.Vote.Slot`
-  carries the key (`CensusProof.SlotKey()` / `davinci.CSPSlotKey`).
-  `TestCheatSlotMismatch` / `TestCheatSlotHighPathBits` guard it.
+- **Ballot slots are derived from the voter address (Merkle) or the CSP-signed
+  index (CSP), not from the lean-IMT path.** Merkle census: `slot =
+  0x10 + (be64(sha256("davinci-slot-v1" ‖ address20)[0..8]) mod (2^63 − 16))`
+  (`consistency.rs::address_slot`, Go `SlotKey(address)`, Rust `slot_key_address`).
+  The hash inputs are the same 20 bytes the census binding check compares.
+  CSP census: `BallotMin + signed index`. `voter_address` bits above 159 fail
+  `FAIL_CSP`. The lean-IMT compact proof binds neither the leaf index nor the
+  tree size, so a proof of leaf 4 in a 6-leaf tree verifies as any index 0..5
+  (davinci-node's lean-imt-go gnark circuit); using `BallotMin + LeafIndex` as
+  the slot is therefore unsound. The guest rejects duplicate slots within a
+  batch (`FAIL_BALLOT_NS`, bit 15, §4.1.7). Uniqueness across the full census
+  is the census manager's responsibility: the census contract reverts with
+  `SlotTaken` on collision, and the sequencer refuses any census (any Merkle
+  origin) with colliding slots. Guard tests: `TestCheatDuplicateSlot`,
+  `TestCheatSlotPathDerived`, `TestCheatSlotMismatch`, `TestCheatCSPDoubleCredential`.
 - **The state tree has 64 levels** (`SMT_LEVELS`, davinci-node
   `StateTreeMaxLevels`), keys are u64 and arbo hashes 8 key bytes in the leaf
   (`sha256(key_le8 ‖ value_le32 ‖ 0x01)`). The host must build trees with

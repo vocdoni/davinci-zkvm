@@ -149,7 +149,8 @@ fn main() {
     //     - VoteID keys fall in [0x8000000000000000, 0xFFFFFFFFFFFFFFFF]
     //     - VoteID keys match the voteID from the ballot proofs
     //     - Ballot keys fall in [0x10, 0x7FFFFFFFFFFFFFFF]
-    //     - Ballot keys encode the voter's address (lower 16 bits)
+    //     - Ballot keys equal the voter's slot (address hash or CSP index)
+    //     - No two ballot keys in the batch are equal
     let consistency_ok = consistency::verify_consistency(&parsed, &mut fail_mask);
 
     // SMT chain verification: the full state-transition integrity check.
