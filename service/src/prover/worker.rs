@@ -10,6 +10,7 @@ use crate::config::Config;
 use crate::types::{Job, JobKind, JobStatus};
 use chrono::Utc;
 use dashmap::DashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -21,6 +22,7 @@ use uuid::Uuid;
 pub struct ProverHandle {
     pub jobs: Arc<DashMap<Uuid, Job>>,
     sender: tokio::sync::mpsc::Sender<ProveTask>,
+    worker: tokio::task::JoinHandle<()>,
 }
 
 struct ProveTask {
@@ -37,13 +39,32 @@ struct ProveTask {
 impl ProverHandle {
     /// Spawn the background prove worker and return a handle to it.
     pub fn new(config: Config) -> Self {
+        Self::spawn(config, |config, task| async move {
+            run_prove_with_retry(&config, &task).await
+        })
+    }
+
+    fn spawn<F, Fut>(config: Config, prove: F) -> Self
+    where
+        F: Fn(Config, ProveTask) -> Fut + Send + 'static,
+        Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
         let jobs: Arc<DashMap<Uuid, Job>> = Arc::new(DashMap::new());
         let (sender, receiver) = tokio::sync::mpsc::channel::<ProveTask>(config.max_queue_size);
 
         let worker_jobs = jobs.clone();
-        tokio::spawn(worker_loop(config, receiver, worker_jobs));
+        let worker = tokio::spawn(worker_loop(config, receiver, worker_jobs, prove));
 
-        Self { jobs, sender }
+        Self {
+            jobs,
+            sender,
+            worker,
+        }
+    }
+
+    /// False once the worker task has ended (returned, panicked or aborted).
+    pub fn worker_running(&self) -> bool {
+        !self.worker.is_finished()
     }
 
     /// Queue a new proof job. The input payload is written to disk under a
@@ -64,8 +85,33 @@ impl ProverHandle {
         self.jobs
             .insert(job_id, Job::new(job_id, kind, parent_job_ids));
 
+        // A rejected job must not stay Queued in the map (it inflates
+        // queue_len forever) nor leave its witness on disk.
         let job_dir = proof_output_dir.join(job_id.to_string());
-        tokio::fs::create_dir_all(&job_dir).await?;
+        let res = self
+            .enqueue(input_bytes, &job_dir, kind, elf_path, job_id, proof_count)
+            .await;
+        if res.is_err() {
+            self.jobs.remove(&job_id);
+            if let Err(e) = tokio::fs::remove_dir_all(&job_dir).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    error!("Job {}: could not remove rejected job dir: {}", job_id, e);
+                }
+            }
+        }
+        res.map(|()| job_id)
+    }
+
+    async fn enqueue(
+        &self,
+        input_bytes: Vec<u8>,
+        job_dir: &Path,
+        kind: JobKind,
+        elf_path: PathBuf,
+        job_id: Uuid,
+        proof_count: usize,
+    ) -> anyhow::Result<()> {
+        tokio::fs::create_dir_all(job_dir).await?;
 
         // The batch and results guests read one read_input_slice frame and
         // need the u64 length prefix; the aggregator guest parses
@@ -82,15 +128,14 @@ impl ProverHandle {
         let task = ProveTask {
             job_id,
             input_path,
-            output_dir: job_dir,
+            output_dir: job_dir.to_path_buf(),
             elf_path,
             plonk: kind.is_plonk(),
             proof_count,
         };
         self.sender
             .try_send(task)
-            .map_err(|e| anyhow::anyhow!("queue is full or closed: {}", e))?;
-        Ok(job_id)
+            .map_err(|e| anyhow::anyhow!("queue is full or closed: {}", e))
     }
 
     /// Number of jobs currently waiting for the worker (not yet started).
@@ -114,11 +159,15 @@ fn encode_zisk_input(payload: &[u8]) -> Vec<u8> {
     out
 }
 
-async fn worker_loop(
+async fn worker_loop<F, Fut>(
     config: Config,
     mut receiver: tokio::sync::mpsc::Receiver<ProveTask>,
     jobs: Arc<DashMap<Uuid, Job>>,
-) {
+    prove: F,
+) where
+    F: Fn(Config, ProveTask) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
+{
     info!("Prover worker started");
     while let Some(task) = receiver.recv().await {
         let job_id = task.job_id;
@@ -130,8 +179,16 @@ async fn worker_loop(
             job.started_at = Some(Utc::now());
         }
 
+        // Each job runs in its own task so a panic fails that job only
+        // instead of taking the worker, and with it the queue, down.
         let start = Instant::now();
-        let result = run_prove_with_retry(&config, &task).await;
+        let result = match tokio::spawn(prove(config.clone(), task)).await {
+            Ok(r) => r,
+            Err(e) => Err(anyhow::anyhow!(
+                "prover panicked: {}",
+                join_error_message(e)
+            )),
+        };
         let elapsed_ms = start.elapsed().as_millis() as u64;
 
         // The input is the private witness (seed, overwrite and refresh sets);
@@ -165,6 +222,20 @@ async fn worker_loop(
         }
     }
     info!("Prover worker stopped");
+}
+
+fn join_error_message(e: tokio::task::JoinError) -> String {
+    if !e.is_panic() {
+        return e.to_string();
+    }
+    let p = e.into_panic();
+    if let Some(s) = p.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = p.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
 }
 
 /// Maximum number of automatic retries when the prover hits a known
@@ -362,4 +433,122 @@ async fn run_prove(config: &Config, task: &ProveTask, minimal_memory: bool) -> a
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    pub(crate) fn test_config(name: &str) -> Config {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/service-tests")
+            .join(format!("{}-{}", name, Uuid::new_v4()));
+        Config {
+            listen_addr: String::new(),
+            proving_key_path: PathBuf::new(),
+            proving_key_plonk_path: PathBuf::new(),
+            circuit_elf_path: PathBuf::new(),
+            aggregator_elf_path: PathBuf::new(),
+            results_elf_path: PathBuf::new(),
+            cargo_zisk_bin: "false".to_string(),
+            proof_output_dir: dir,
+            max_queue_size: 8,
+            zisk_mpi_procs: 1,
+            zisk_mpi_threads: 0,
+            zisk_mpi_bind_to: "none".to_string(),
+            zisk_minimal_memory: false,
+            zisk_minimal_memory_from: 512,
+            keep_inputs: false,
+        }
+    }
+
+    // Handle whose worker loop has already returned (its channel closed), as
+    // after the live incident; submits must be refused.
+    pub(crate) async fn stopped_handle(config: Config) -> ProverHandle {
+        let jobs: Arc<DashMap<Uuid, Job>> = Arc::new(DashMap::new());
+        let (tx, rx) = tokio::sync::mpsc::channel::<ProveTask>(1);
+        let worker = tokio::spawn(worker_loop(config, rx, jobs.clone(), |_, _| async {
+            Ok(())
+        }));
+        drop(tx);
+        let (sender, _) = tokio::sync::mpsc::channel::<ProveTask>(1);
+        let h = ProverHandle {
+            jobs,
+            sender,
+            worker,
+        };
+        for _ in 0..100 {
+            if !h.worker_running() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        h
+    }
+
+    async fn wait_finished(h: &ProverHandle, id: Uuid) -> Job {
+        for _ in 0..500 {
+            let job = h.jobs.get(&id).map(|j| j.clone()).expect("job in map");
+            if matches!(job.status, JobStatus::Done | JobStatus::Failed) {
+                return job;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("job {} did not finish", id);
+    }
+
+    #[tokio::test]
+    async fn panicking_job_fails_alone() {
+        let config = test_config("panic");
+        let dir = config.proof_output_dir.clone();
+        let h = ProverHandle::spawn(config, |_, task| async move {
+            if task.proof_count == 1 {
+                panic!("boom from job");
+            }
+            Ok(())
+        });
+        let elf = PathBuf::from("unused.elf");
+        let a = h
+            .submit(vec![1], &dir, JobKind::Batch, elf.clone(), vec![], 1)
+            .await
+            .unwrap();
+        let b = h
+            .submit(vec![2], &dir, JobKind::Batch, elf, vec![], 2)
+            .await
+            .unwrap();
+
+        let ja = wait_finished(&h, a).await;
+        assert_eq!(ja.status, JobStatus::Failed);
+        let err = ja.error.unwrap();
+        assert!(
+            err.contains("panicked") && err.contains("boom from job"),
+            "{err}"
+        );
+        assert_eq!(wait_finished(&h, b).await.status, JobStatus::Done);
+        assert!(h.worker_running());
+        assert_eq!(h.queue_len(), 0);
+        // The witness is deleted after proving, panic or not.
+        assert!(!dir.join(a.to_string()).join("input.bin").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn rejected_submit_leaves_no_job() {
+        let config = test_config("rejected");
+        let dir = config.proof_output_dir.clone();
+        let h = stopped_handle(config).await;
+        assert!(!h.worker_running());
+        for _ in 0..3 {
+            let err = h
+                .submit(vec![1], &dir, JobKind::Batch, PathBuf::new(), vec![], 1)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("closed"), "{err}");
+        }
+        assert_eq!(h.queue_len(), 0);
+        assert!(h.jobs.is_empty());
+        // No per-job dir (and no witness) survives the rejection.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

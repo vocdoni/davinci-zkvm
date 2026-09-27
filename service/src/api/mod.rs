@@ -9,6 +9,7 @@ use crate::config::Config;
 use crate::prover::ProverHandle;
 use axum::{
     extract::{DefaultBodyLimit, State},
+    http::StatusCode,
     routing::get,
     routing::post,
     Json, Router,
@@ -48,10 +49,49 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "status": "ok",
-        "version": env!("CARGO_PKG_VERSION"),
-        "queue_len": state.prover.queue_len(),
-    }))
+// 503 once the prover worker has died: the API still answers, but no job will run.
+async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    let running = state.prover.worker_running();
+    let (code, status, worker) = if running {
+        (StatusCode::OK, "ok", "running")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "degraded", "stopped")
+    };
+    (
+        code,
+        Json(serde_json::json!({
+            "status": status,
+            "worker": worker,
+            "version": env!("CARGO_PKG_VERSION"),
+            "queue_len": state.prover.queue_len(),
+        })),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prover::worker::tests::{stopped_handle, test_config};
+
+    #[tokio::test]
+    async fn health_reports_worker_state() {
+        let config = test_config("health");
+        let prover = Arc::new(ProverHandle::new(config.clone()));
+        let (code, Json(body)) = health(State(AppState {
+            config: config.clone(),
+            prover,
+        }))
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["worker"], "running");
+        assert_eq!(body["queue_len"], 0);
+
+        let prover = Arc::new(stopped_handle(config.clone()).await);
+        let (code, Json(body)) = health(State(AppState { config, prover })).await;
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["status"], "degraded");
+        assert_eq!(body["worker"], "stopped");
+        assert_eq!(body["queue_len"], 0);
+    }
 }
