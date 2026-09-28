@@ -36,12 +36,12 @@ additionally needs `AGGREGATOR_ELF_PATH`.
 
 | Path | Notes |
 |---|---|
-| `circuit/` | ZisK RISC-V guest (vote-batch circuit). Build with `cd circuit && cargo-zisk build --release` — the `cd` matters; building from the workspace root pulls in tokio/mio which doesn't compile for the zkvm target. Pre-built ELF lives at `circuit/elf/circuit.elf` and is tracked. |
+| `circuit/` | ZisK RISC-V guest (vote-batch circuit). Build with `scripts/build-guests.sh circuit` (see the gotcha on reproducible builds). Pre-built ELF lives at `circuit/elf/circuit.elf` and is tracked. |
 | `circuit/CIRCUIT.md` | Formal spec of the vote-batch guest: input block ordering, wire format, output registers, per-phase constraint checks, `fail_mask` bits. Read it before touching `circuit/src/` or `input-gen/`, and update it in the same change. |
 | `circuit/src/groth16.rs`, `circuit/src/kzg.rs` | In-guest batched Groth16 (BN254) verification of the per-ballot circom proofs, and the KZG/BLS12-381 checks. See the Groth16 gotcha below before touching the batch check. |
 | `circuit-primitives/` | no_std lib shared by both guests: SMT, Poseidon, BabyJubJub, BN254/BLS12-381 field arithmetic (`bn254.rs`, `bn254_fr.rs`, `bls_fr.rs`), hashing, field types, io framing. |
-| `circuit-aggregator/` | Recursive aggregator guest: genesis+fold / fold / finalize modes, in-guest STARK verification via `ziskos::zisklib::verify_zisk_proof_c`. ELF at `circuit-aggregator/elf/aggregator.elf`. Same `cd`-first build rule. |
-| `circuit-results/` | Single-key tally guest behind `POST /results`: key leaf `0x03` and accumulator leaf `0x04` inclusion under a final state root plus 16 Chaum–Pedersen decryption proofs. Spec in `circuit-results/RESULTS.md` (frame, checks, 43 output registers, fail bits); ELF at `circuit-results/elf/results.elf`. Same `cd`-first build rule. |
+| `circuit-aggregator/` | Recursive aggregator guest: genesis+fold / fold / finalize modes, in-guest STARK verification via `ziskos::zisklib::verify_zisk_proof_c`. ELF at `circuit-aggregator/elf/aggregator.elf`. Built with `scripts/build-guests.sh`. |
+| `circuit-results/` | Single-key tally guest behind `POST /results`: key leaf `0x03` and accumulator leaf `0x04` inclusion under a final state root plus 16 Chaum–Pedersen decryption proofs. Spec in `circuit-results/RESULTS.md` (frame, checks, 43 output registers, fail bits); ELF at `circuit-results/elf/results.elf`. Built with `scripts/build-guests.sh`. |
 | `input-gen/` | Typed protocol blocks → ZisK binary input. Wire format owner (incl. `aggregator.rs` for fold/finalize input frames and `results.rs` + `gen-results-input` for the results frame). |
 | `service/src/prover/recursion.rs` | proof.bin → vadcop blob conversion for feeding proofs back into the aggregator guest. |
 | `service/` | Axum HTTP API. PLONK by default; `"output": "stark"` batches and `/fold` steps stay STARK (chained mode). |
@@ -54,7 +54,7 @@ additionally needs `AGGREGATOR_ELF_PATH`.
 | `solidity/DavinciSettlement.sol`, `go-sdk/solidity/settlement.go` | Reference per-batch settlement contract (paper's on-chain logic: PLONK verify, root continuity, census root, `occupied_before`, one point-evaluation check per blob) and its simulated-chain helper (`DeploySettlement`, `SubmitTransition` with a real blob transaction). |
 | `go-sdk/blob.go` | `BuildTransitionBlobs`: the DA cell layout, blob split, KZG commitments, bound evaluation points, openings and the digest the guest publishes. Must stay byte-identical to `circuit/src/kzg.rs`. |
 | `go-sdk/vocdoni/` | Vendored davinci-node light crypto (ElGamal, hashing, ballot spec types) so `go-sdk` doesn't depend on the full davinci-node module. Exported so external consumers (davinci-fold) can build chain.Config/chain.Vote values; don't import davinci-node directly from go-sdk. |
-| `rust-sdk/` | Rust SDK, crate `davinci-zkvm-sdk` (root workspace member, `#![forbid(unsafe_code)]`): HTTP client, `/prove` and `/results` wire types, batch/results publics parsers, DA blob build and decode (c-kzg), release pins, and the host-side protocol primitives (BabyJubJub, ElGamal, Poseidon, Chaum–Pedersen, ballots, census, re-encryption chain, Groth16 VK hash). Tests replay Go vectors from `rust-sdk/testdata/`. |
+| `rust-sdk/` | Rust SDK, crate `davinci-zkvm-sdk` (root workspace member, `#![forbid(unsafe_code)]`): HTTP client, `/prove` and `/results` wire types, batch/results publics parsers, DA blob build and decode (c-kzg), release pins, and the host-side protocol primitives (BabyJubJub, ElGamal, Poseidon, Chaum–Pedersen, ballots, census, re-encryption chain, Groth16 VK hash). Also `dkg` module (`rust-sdk/src/dkg.rs`): TE↔reduced BabyJubJub point map (`point_to_rte`/`point_from_rte`) and the organizer Schnorr PoP (`prove_organizer`, keccak challenge over `domain ‖ eid ‖ aid ‖ PK ‖ A`, `z = w + c·sk mod L`). Tested against `rust-sdk/testdata/dkg_schnorr.json` (vectors from davinci-dkg). Tests replay Go vectors from `rust-sdk/testdata/`. |
 | `go-sdk/cmd/sdk-vectors/` | Writes `rust-sdk/testdata/*.json` and `rust-sdk/assets/poseidon_constants.bin` from the Go reference code. Deterministic except the rapidsnark proof fixtures, which only `-proofs` regenerates. |
 | `davinci-node/`, `recursion-experiment/` | Untracked reference checkouts (gitignored, not part of this repo). Read for context; never edit or stage. |
 
@@ -83,20 +83,10 @@ Direct commands when iterating:
 # Rust service
 cargo build --release -p davinci-zkvm-service
 
-# Circuit ELF (needs +zisk toolchain, must run from circuit/)
-cd circuit && cargo-zisk build --release
-cp circuit/target/elf/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-circuit \
-   circuit/elf/circuit.elf
-
-# Aggregator ELF (same rules; rebuilding changes its program_vk)
-cd circuit-aggregator && cargo-zisk build --release
-cp circuit-aggregator/target/elf/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-aggregator \
-   circuit-aggregator/elf/aggregator.elf
-
-# Results ELF (same rules; rebuilding changes CircuitRelease.ResultsVK)
-cd circuit-results && cargo-zisk build --release
-cp circuit-results/target/elf/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-results \
-   circuit-results/elf/results.elf
+# Guest ELFs (needs the zisk toolchain): builds each guest from its own dir
+# with path remapping, copies the ELFs into */elf/ and prints their sha256.
+# The build is path-independent; CI rebuilds and diffs the committed ELFs.
+scripts/build-guests.sh            # or: scripts/build-guests.sh circuit-results
 
 # Docker image (what `make build` runs)
 docker compose --profile cuda build
@@ -236,8 +226,13 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   `scalar_mul_bn254` at the MSB makes the per-proof muls half-cost.
   `TestCheatForgedPubs`, `TestCheatSwappedProofs`, `TestCheatZeroedVKGamma`
   and `TestCheatZeroedProofA` guard it.
-- **`cargo-zisk build` from the workspace root pulls in non-ZisK deps**
-  (tokio, mio). Always `cd circuit/` first.
+- **Build guests with `scripts/build-guests.sh`.** `cargo-zisk build` from
+  the workspace root pulls in non-ZisK deps (tokio, mio), and a plain build
+  embeds absolute paths, so its ELF (and vk) depends on where the checkout
+  lives. The script remaps the repo root and `$CARGO_HOME`, and each guest
+  reaches `circuit-primitives` through a committed in-guest symlink: a `../`
+  path dependency makes cargo hash the absolute path into symbol names. Keep
+  both, or the committed ELFs stop being reproducible.
 - **PLONK proving key `final.so` has an executable-stack flag** that
   modern Linux refuses at dlopen time. The key installers clear the X bit
   on `PT_GNU_STACK` (`make keys` for the Docker path, `scripts/install.sh`
@@ -248,8 +243,9 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
   solc rejects. `go-sdk/solidity/solidity.go::stageAndPatchSources`
   rewrites that on a temp copy before compiling — don't fix it in-tree.
 - **Transient prover flakes** (`context is destroyed`, `Proof
-  contribution challenge does not match`) are auto-retried up to 3× by
-  the worker. Don't widen the matcher to include bare `SIGABRT` — it
+  contribution challenge does not match`, and the `--verify-proof` self-check
+  `SNARK proof verification failed`, 2 in 181 jobs, clean on rerun) are
+  auto-retried up to 3× by the worker. Don't widen the matcher to include bare `SIGABRT` — it
   also fires for deterministic witness-gen assertions which should not
   be retried.
 - **The GPU power cap was 500 W** on this machine; raised persistently
@@ -261,16 +257,19 @@ pays the generation cost. Curated results live in `BENCHMARK.md`.
 - **Digest `step_count` counts fold steps, not batches** — the guest
   increments once per fold regardless of how many batch proofs it folds.
   `Sequencer.FoldCount()` tracks the expected value.
-- **Rebuilding either guest changes its program_vk.** The sequencer
-  learns vks at runtime (`GET /jobs/{id}/stark`), but anything that
-  pins a vk (docs, on-chain expectations) goes stale on rebuild.
+- **A guest source change changes its program_vk.** Rebuilding unchanged
+  source does not (builds are reproducible and CI checks the committed ELFs
+  against the source). The sequencer learns vks at runtime
+  (`GET /jobs/{id}/stark`), but anything that pins a vk (docs, deployed
+  registries, on-chain expectations) goes stale with the source.
 - **`go-sdk/chain/release.go::CircuitRelease` pins the aggregator
   `program_vk` (`AggVK`) + vote-batch `batch_vk` (`BatchVK`)** for the
   external verifiability anchor. The guest's `config_commitment` is
   `sha256(config frame ‖ batch_vk ‖ fold_vk)`, so a stale manifest fails
   the commitment check after a guest rebuild. Refreeze it straight from
   `cargo-zisk setup -e <elf> -k <proving-key>`, which prints the program vk as
-  `Root hash: [w0, w1, w2, w3]`; the pinned string is those four u64 words
+  `Root hash: [w0, w1, w2, w3]` (only with an empty `ZISK_CACHE_DIR`; the
+  aggregator setup needs ~50 GB of RAM); the pinned string is those four u64 words
   rendered big-endian and concatenated. (A finalize digest's
   `fold_vk`/`batch_vk`, or `FetchStarkInfo`, gives the same values but needs a
   working prover and a GPU.) `ResultsVK` pins the `circuit-results` vk the

@@ -32,7 +32,7 @@ import (
 var (
 	outDir       = flag.String("out", "../rust-sdk/testdata", "directory for the JSON vectors")
 	constantsOut = flag.String("constants", "../rust-sdk/assets/poseidon_constants.bin", "poseidon constants output (empty = skip)")
-	circomDir    = flag.String("circom", "../davinci-circom/artifacts", "davinci-circom artifacts matching rust-sdk/assets/ballot_proof_vkey.json")
+	circomDir    = flag.String("circom", "../../davinci-circom/artifacts", "davinci-circom artifacts matching rust-sdk/assets/ballot_proof_vkey.json")
 	vkAsset      = flag.String("vk", "../rust-sdk/assets/ballot_proof_vkey.json", "ballot VK embedded in the Rust SDK")
 	cpVectors    = flag.String("cp", "../circuit-primitives/testdata/cp_vectors.json", "guest Chaum-Pedersen vectors to copy")
 	proofs       = flag.Bool("proofs", false, "regenerate the rapidsnark proof fixtures (non-deterministic)")

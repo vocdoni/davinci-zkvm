@@ -350,6 +350,10 @@ bodies, parsers for the batch and results publics, the DA blob layout with its
 KZG commitments and a decoder, the pinned release vks, and the protocol
 primitives to build inputs byte-exactly (BabyJubJub, ElGamal, Poseidon,
 Chaum–Pedersen, ballots, census proofs, the re-encryption chain).
+Its `dkg` module maps BabyJubJub points between the circomlib form used here
+and the reduced form of the davinci-dkg contracts, and builds the organizer's
+Schnorr proof of possession for DKG-locked processes (checked against the
+davinci-dkg vectors in `testdata/dkg_schnorr.json`).
 
 Its tests check every byte against vectors produced by the Go reference code
 and run offline:
@@ -366,23 +370,12 @@ current davinci-circom one, not the v1.0.0 VK the Go SDK tests use.
 ## Development
 
 ```bash
-# Rebuild the circuit ELF (needs the +zisk Rust toolchain)
-cd circuit && cargo-zisk build --release
-cp circuit/target/elf/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-circuit \
-   circuit/elf/circuit.elf
-
-# Rebuild the aggregator ELF (chained mode). Rebuilding either guest
-# changes its program_vk; clients read vks from the running service,
-# never hardcode them.
-cd circuit-aggregator && cargo-zisk build --release
-cp circuit-aggregator/target/elf/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-aggregator \
-   circuit-aggregator/elf/aggregator.elf
-
-# Rebuild the results ELF, then refreeze CircuitRelease.ResultsVK from
-# `cargo-zisk setup -e circuit-results/elf/results.elf -k <proving-key>`
-cd circuit-results && cargo-zisk build --release
-cp circuit-results/target/elf/riscv64ima-zisk-zkvm-elf/release/davinci-zkvm-results \
-   circuit-results/elf/results.elf
+# Rebuild the guest ELFs into */elf/ (needs the +zisk Rust toolchain).
+# Source paths are remapped, so any checkout builds the same bytes; CI
+# checks the tracked ELFs this way. A guest source change moves its
+# program vk: refreeze CircuitRelease (go-sdk/chain/release.go) and
+# rust-sdk/src/release.rs from `cargo-zisk setup -e <elf> -k <proving-key>`.
+scripts/build-guests.sh                  # or: scripts/build-guests.sh circuit-results
 
 # Build the service binary
 cargo build --release -p davinci-zkvm-service
@@ -404,3 +397,7 @@ it (the Docker image ships it).
 
 [CIRCUIT.md](CIRCUIT.md) has the formal constraint spec, the public-output
 encoding, the fail-mask bits, and the cross-block binding rules.
+
+## License
+
+AGPL-3.0, see [LICENSE](LICENSE).

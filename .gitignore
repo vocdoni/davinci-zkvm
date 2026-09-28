@@ -47,8 +47,7 @@ go-sdk/tests/*.test
 .DS_Store
 Thumbs.db
 
-
-# ── Local editor state ──────────────────────────────────────────────────────
+# ── Local notes and editor/agent state ─────────────────────────────────────
 .claude/
 
 # ── Reference checkouts / prototypes (not part of this repo) ────────────────
