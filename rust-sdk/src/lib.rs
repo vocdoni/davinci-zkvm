@@ -8,6 +8,7 @@ pub mod blob;
 pub mod census;
 pub mod client;
 pub mod crypto;
+pub mod dkg;
 mod error;
 pub mod groth16;
 pub mod limits;
