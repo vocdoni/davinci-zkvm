@@ -87,6 +87,7 @@ runs:
         set -euo pipefail
         echo "$ZISK_DIR/bin" >> "$GITHUB_PATH"
         echo "ZISK_HOME=$ZISK_DIR" >> "$GITHUB_ENV"
+        echo "ZISKEMU_BIN=$ZISK_DIR/bin/ziskemu" >> "$GITHUB_ENV"
         for b in ziskemu cargo-zisk; do
           if ldd "$ZISK_DIR/bin/$b" | grep 'not found'; then
             echo "::error::$b has unresolved shared libraries"
