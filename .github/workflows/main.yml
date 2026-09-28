@@ -8,6 +8,8 @@ on:
     branches:
       - main
       - release**
+    tags:
+      - "v*"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   schedule:
@@ -185,3 +187,17 @@ jobs:
             fi
           done
           exit "$fail"
+
+  docker:
+    name: Docker
+    needs: [rust, go]
+    permissions:
+      contents: read
+      packages: write
+    if: github.event_name != 'schedule' && github.event.pull_request.draft != true
+    uses: ./.github/workflows/docker-build.yml
+    secrets: inherit
+    with:
+      image-tag: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
+      # Images are published on pushes to the branches and tags above.
+      push: ${{ github.event_name == 'push' }}

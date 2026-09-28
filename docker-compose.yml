@@ -35,14 +35,18 @@ services:
 
   davinci-zkvm:
     profiles: [cuda]
-    image: davinci-zkvm-cuda:latest
+    # The published image is ghcr.io/vocdoni/davinci-zkvm:<tag> (set
+    # DAVINCI_ZKVM_IMAGE and `docker compose pull`); by default it is built
+    # from this checkout.
+    image: ${DAVINCI_ZKVM_IMAGE:-davinci-zkvm-cuda:latest}
     build:
       context: .
       dockerfile: Dockerfile.cuda
       args:
         ZISK_VERSION: ${ZISK_TAG:-v1.3.0-alpha}
     ports:
-      - "${LISTEN_PORT:-8080}:8080"
+      # BIND_ADDR limits the API to one interface, e.g. a private network.
+      - "${BIND_ADDR:-0.0.0.0}:${LISTEN_PORT:-8080}:8080"
     volumes:
       - ${ZISK_KEYS_DIR:-./zisk-keys}/provingKey:/proving-key
       - ${ZISK_KEYS_DIR:-./zisk-keys}/provingKeySnark:/proving-key-plonk
