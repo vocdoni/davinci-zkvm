@@ -1,11 +1,12 @@
 //! Pinned release values, like go-sdk `chain/release.go`. The program vks
-//! change with every guest rebuild; `ROOT_C_VADCOP_FINAL` changes with the
-//! ZisK snark setup.
+//! change with the guest source (`scripts/build-guests.sh` builds are path
+//! independent); `ROOT_C_VADCOP_FINAL` changes with the ZisK snark setup.
 //!
 //! Refreezing:
 //! - `BATCH_PROGRAM_VK` / `RESULTS_PROGRAM_VK`: run
-//!   `cargo-zisk setup -e <elf> -k ~/.zisk/provingKey` on the tracked ELF. It
-//!   prints `Root hash: [w0, w1, w2, w3]`; the pin is those four u64 words as
+//!   `cargo-zisk setup -e <elf> -k ~/.zisk/provingKey` on the tracked ELF with
+//!   an empty `ZISK_CACHE_DIR` (a warm cache skips the print). It prints
+//!   `Root hash: [w0, w1, w2, w3]`; the pin is those four u64 words as
 //!   big-endian bytes, concatenated. Update go-sdk `CircuitRelease` in the
 //!   same change.
 //! - `ROOT_C_VADCOP_FINAL`: after a ZisK release or snark setup change, copy
@@ -22,15 +23,15 @@
 /// Vote-batch ELF program vk (`circuit/elf/circuit.elf`), go-sdk
 /// `CircuitRelease.BatchVK`. The `program_vk` of every per-batch PLONK.
 pub const BATCH_PROGRAM_VK: [u8; 32] = [
-    0x44, 0xcc, 0xdf, 0x5e, 0xb9, 0xcd, 0xf7, 0x59, 0xd9, 0xca, 0x78, 0x4b, 0x76, 0xc5, 0x06, 0x04,
-    0xcc, 0x45, 0x8b, 0x2d, 0x7b, 0x98, 0x61, 0xb4, 0xbc, 0x49, 0x41, 0xdd, 0xf9, 0x61, 0xf8, 0xa7,
+    0x6c, 0xfc, 0x89, 0xd5, 0x62, 0xd0, 0xb2, 0x2f, 0x04, 0x47, 0x8a, 0x5c, 0x15, 0xb3, 0x90, 0x43,
+    0x3e, 0xb5, 0x2f, 0x1b, 0x03, 0x14, 0x70, 0x30, 0xb1, 0x83, 0x07, 0x62, 0x60, 0xda, 0x7a, 0x10,
 ];
 
 /// circuit-results ELF program vk (`circuit-results/elf/results.elf`), go-sdk
 /// `CircuitRelease.ResultsVK`. Checked on a GPU `/results` job.
 pub const RESULTS_PROGRAM_VK: [u8; 32] = [
-    0xab, 0x98, 0x76, 0x4a, 0x01, 0x5f, 0x26, 0x85, 0xaa, 0xd1, 0x12, 0xca, 0xfe, 0xe1, 0xc4, 0x72,
-    0x1a, 0xda, 0xc0, 0x98, 0xa6, 0xfe, 0x59, 0x89, 0xa4, 0xe8, 0x7b, 0x6b, 0x9e, 0xab, 0x71, 0xfb,
+    0x7b, 0xc8, 0xc5, 0xe9, 0x23, 0x55, 0x48, 0x38, 0x6a, 0x44, 0xb1, 0x88, 0x57, 0x32, 0xa2, 0xa7,
+    0xff, 0xb1, 0xba, 0xdd, 0xdc, 0x8c, 0x7f, 0xba, 0x59, 0x9d, 0x07, 0xec, 0xe4, 0x7b, 0xe7, 0x94,
 ];
 
 /// VADCOP-final root of the installed ZisK 1.3 snark setup, as served in
@@ -49,7 +50,7 @@ pub const ZISK_VERIFIER_CODEHASH: [u8; 32] = [
 ];
 
 /// The davinci-circom ballot proof verification key the sequencer accepts
-/// (`../davinci-circom/artifacts/ballot_proof_vkey.json`).
+/// (davinci-circom `artifacts/ballot_proof_vkey.json`).
 pub fn ballot_vk_json() -> &'static str {
     include_str!("../assets/ballot_proof_vkey.json")
 }

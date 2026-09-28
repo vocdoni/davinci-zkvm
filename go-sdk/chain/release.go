@@ -24,13 +24,13 @@ type Release struct {
 
 // CircuitRelease is the canonical release for the ELFs committed in this repo
 // (circuit/elf/circuit.elf + circuit-aggregator/elf/aggregator.elf +
-// circuit-results/elf/results.elf). Regenerate after rebuilding any guest with
-// `cargo-zisk setup -e <elf> -k <proving-key>`: its `Root hash` words rendered
-// big-endian and concatenated.
+// circuit-results/elf/results.elf). Regenerate after rebuilding the guests with
+// scripts/build-guests.sh: `cargo-zisk setup -e <elf> -k <proving-key>` prints
+// `Root hash`, whose words rendered big-endian and concatenated are the vk.
 var CircuitRelease = Release{
-	AggVK:     "0xe77847ad8f876935a593989c0983e3814b4f9f9cb30022b202a9986a6a18604c",
-	BatchVK:   "0x44ccdf5eb9cdf759d9ca784b76c50604cc458b2d7b9861b4bc4941ddf961f8a7",
-	ResultsVK: "0xab98764a015f2685aad112cafee1c4721adac098a6fe5989a4e87b6b9eab71fb",
+	AggVK:     "0x8b31cbf414b605e6e447818930542c46d84f1be7ed7b2655dbcc88af8bc1c801",
+	BatchVK:   "0x6cfc89d562d0b22f04478a5c15b390433eb52f1b03147030b183076260da7a10",
+	ResultsVK: "0x7bc8c5e9235548386a44b1885732a2a7ffb1badddc8c7fba599d07ece47be794",
 }
 
 // IsSet reports whether the release has been pinned (both vks present).

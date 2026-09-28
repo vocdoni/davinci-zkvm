@@ -35,7 +35,7 @@ ZISK_MPI_BIND_TO ?=
 
 .PHONY: help \
         keys build up down restart logs status test shell clean install all \
-        local-setup local-run local-test benchmark benchmark-report
+        local-setup local-run local-test benchmark benchmark-report guests
 
 # ──────────────────────────────────────────────────────────────────────────
 # Default
@@ -116,6 +116,9 @@ all: install up test ## Full pipeline: install → up → test
 # ──────────────────────────────────────────────────────────────────────────
 # Local non-Docker workflow (for developers building from source)
 # ──────────────────────────────────────────────────────────────────────────
+
+guests: ## Rebuild the guest ELFs into */elf/ (path-independent builds)
+	./scripts/build-guests.sh
 
 local-setup: ## Install ZisK + build davinci-zkvm on the host (no Docker)
 	LISTEN_HOST=$(LOCAL_LISTEN_HOST) \

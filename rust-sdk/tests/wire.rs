@@ -335,11 +335,11 @@ fn build_results_request_roundtrip() {
 fn release_pins() {
     assert_eq!(
         hex::encode(BATCH_PROGRAM_VK),
-        "44ccdf5eb9cdf759d9ca784b76c50604cc458b2d7b9861b4bc4941ddf961f8a7"
+        "6cfc89d562d0b22f04478a5c15b390433eb52f1b03147030b183076260da7a10"
     );
     assert_eq!(
         hex::encode(RESULTS_PROGRAM_VK),
-        "ab98764a015f2685aad112cafee1c4721adac098a6fe5989a4e87b6b9eab71fb"
+        "7bc8c5e9235548386a44b1885732a2a7ffb1badddc8c7fba599d07ece47be794"
     );
     assert_eq!(
         hex::encode(ROOT_C_VADCOP_FINAL),

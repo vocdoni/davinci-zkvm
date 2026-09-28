@@ -6,4 +6,7 @@ default-run = "davinci-zkvm-results"
 
 [dependencies]
 ziskos = "=1.3.0-alpha"
-circuit-primitives = { path = "../circuit-primitives" }
+# circuit-primitives is a symlink to ../circuit-primitives. A path outside
+# this package makes cargo hash the absolute checkout path into the symbol
+# names, so the ELF (and its vk) would depend on where the repo lives.
+circuit-primitives = { path = "circuit-primitives" }
