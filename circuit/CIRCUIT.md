@@ -879,7 +879,8 @@ REFRESH_KAPPA · n_voters))` and the constants are
 
 The fold guest cross-checks register 42 against its running
 `total_voters − total_overwrites` per batch, and the settlement contract
-against the process's `voteCount − overwrittenCount`, so a batch that lies
+against the process's `votersCount` (distinct slots written so far, overwrites
+already excluded), so a batch that lies
 about its tree size fails there even if it passes here.
 
 ---
@@ -942,8 +943,9 @@ Where:
   refresh-chain entries (in refresh-chain order, ballot = `refreshed_new[j]`
   as re-encrypted in §4.3/§4.5). The combined list is then stable-sorted by
   `key = transition.new_key[0]`, so an on-chain reader sees one uniform
-  sorted list and cannot tell a new vote, an overwrite and a silent refresh
-  apart. `nf = num_fields` from the BallotMode config; padded fields
+  sorted list and cannot tell an overwrite from a silent refresh. A key
+  written for the first time is a new vote: refreshes only touch occupied
+  slots (§4.5). `nf = num_fields` from the BallotMode config; padded fields
   `f ≥ nf` are not emitted (soundness rests on §4.3.4 / §4.5.7 pinning
   them to the TE identity).
 - The accumulator pack cells carry the NEW net Results ballot
@@ -1015,8 +1017,9 @@ point-evaluation result, not as a `FAIL_KZG` bit.
   and refresh checks). A malicious sequencer cannot smuggle extra cells or
   swap contents without breaking one of those.
 - **Uniform update stream.** Overwrites, new votes and silent refreshes go
-  through the same sort key. The public DA layout does not distinguish them,
-  matching the deniability property from §4.5.
+  through the same sort key. The layout does not mark them, so an overwrite
+  looks like a refresh, the deniability property of §4.5; a slot's first
+  appearance still marks a new vote.
 - **Per-blob binding.** `z_b` folds in the commitment and the process
   context, so a commitment for the wrong election / wrong `root_before`
   produces a `y` no honest KZG opening can hit; the digest changes and
