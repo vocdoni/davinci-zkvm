@@ -1,7 +1,9 @@
 name: Set up ZisK (CPU, no keys)
 description: >-
   Installs the ZisK CPU binaries (cargo-zisk, ziskemu) and the guest Rust
-  toolchain with ziskup, without proving keys, and caches ~/.zisk by version.
+  toolchain with ziskup, without proving keys. GitHub-hosted runners cache
+  ~/.zisk by version; self-hosted runners keep one install per version in the
+  runner tool cache. Needs rustup on the PATH.
 
 inputs:
   version:
@@ -17,57 +19,80 @@ runs:
     - name: Install system packages
       shell: bash
       run: |
-        sudo apt-get update
-        sudo apt-get install -y --no-install-recommends \
+        set -euo pipefail
+        SUDO=$(command -v sudo || true)
+        $SUDO apt-get update
+        $SUDO apt-get install -y --no-install-recommends \
           libopenmpi-dev libsodium-dev libgmp-dev libomp-dev \
-          nlohmann-json3-dev libssl-dev nasm libclang-dev
+          nlohmann-json3-dev libssl-dev nasm libclang-dev curl
+
+    - name: Choose the install dir
+      id: dir
+      shell: bash
+      env:
+        ZISK_VERSION: ${{ inputs.version }}
+      run: |
+        if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" ]]; then
+          echo "dir=$RUNNER_TOOL_CACHE/zisk/$ZISK_VERSION" >> "$GITHUB_OUTPUT"
+        else
+          echo "dir=$HOME/.zisk" >> "$GITHUB_OUTPUT"
+        fi
 
     - name: Restore ~/.zisk
-      id: cache
+      if: runner.environment == 'github-hosted'
       uses: actions/cache@v5
       with:
         path: ~/.zisk
         key: zisk-${{ runner.os }}-${{ inputs.version }}-cpu-nokey-v1
 
+    # ziskup installs under $XDG_CONFIG_HOME when it is set, as on hosted
+    # runners, and fetches the proving key when GH_RUNNER is set; ZISK_DIR
+    # pins the location. The lock serializes jobs sharing a self-hosted box.
     - name: Install ZisK with ziskup
-      if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         ZISK_VERSION: ${{ inputs.version }}
-      # ziskup installs under $XDG_CONFIG_HOME when it is set, which it is on
-      # hosted runners; pin ~/.zisk so the cache and the checks find it.
+        ZISK_DIR: ${{ steps.dir.outputs.dir }}
       run: |
         set -euo pipefail
-        unset XDG_CONFIG_HOME
-        export ZISK_DIR="$HOME/.zisk"
-        curl -fsSL "https://raw.githubusercontent.com/0xPolygonHermez/zisk/v${ZISK_VERSION}/ziskup/ziskup" -o ziskup
-        chmod +x ziskup
-        ./ziskup -v "$ZISK_VERSION" --cpu --nokey -y
-        rm -f ziskup
+        unset XDG_CONFIG_HOME GH_RUNNER
+        mkdir -p "$(dirname "$ZISK_DIR")"
+        exec 9>"$(dirname "$ZISK_DIR")/.install.lock"
+        flock 9
+        if [[ ! -x "$ZISK_DIR/bin/cargo-zisk" || ! -d "$ZISK_DIR/toolchains" ]]; then
+          curl -fsSL "https://raw.githubusercontent.com/0xPolygonHermez/zisk/v${ZISK_VERSION}/ziskup/ziskup" -o "$RUNNER_TEMP/ziskup"
+          chmod +x "$RUNNER_TEMP/ziskup"
+          "$RUNNER_TEMP/ziskup" -v "$ZISK_VERSION" --cpu --nokey -y
+        fi
 
-    # ziskup links the guest toolchain into rustup as `zisk`; a cache hit
-    # restores ~/.zisk but not that link.
+    # cargo-zisk builds with the rustup toolchain named `zisk`; a cached or
+    # shared install still needs the link in this job's rustup.
     - name: Link the zisk rustup toolchain
-      if: steps.cache.outputs.cache-hit == 'true'
       shell: bash
+      env:
+        ZISK_DIR: ${{ steps.dir.outputs.dir }}
       run: |
         set -euo pipefail
-        tc=$(find "$HOME/.zisk/toolchains" -mindepth 1 -maxdepth 1 -type d | head -n1)
-        test -x "$tc/bin/rustc"
-        rustup toolchain link zisk "$tc"
+        if ! rustup toolchain list | grep -q '^zisk'; then
+          tc=$(find "$ZISK_DIR/toolchains" -mindepth 1 -maxdepth 1 -type d | head -n1)
+          test -x "$tc/bin/rustc"
+          rustup toolchain link zisk "$tc"
+        fi
 
     - name: Check the install
       shell: bash
+      env:
+        ZISK_DIR: ${{ steps.dir.outputs.dir }}
       run: |
         set -euo pipefail
-        echo "$HOME/.zisk/bin" >> "$GITHUB_PATH"
-        echo "ZISK_HOME=$HOME/.zisk" >> "$GITHUB_ENV"
+        echo "$ZISK_DIR/bin" >> "$GITHUB_PATH"
+        echo "ZISK_HOME=$ZISK_DIR" >> "$GITHUB_ENV"
         for b in ziskemu cargo-zisk; do
-          if ldd "$HOME/.zisk/bin/$b" | grep 'not found'; then
+          if ldd "$ZISK_DIR/bin/$b" | grep 'not found'; then
             echo "::error::$b has unresolved shared libraries"
             exit 1
           fi
         done
-        "$HOME/.zisk/bin/cargo-zisk" --version
-        "$HOME/.zisk/bin/ziskemu" --version
+        "$ZISK_DIR/bin/cargo-zisk" --version
+        "$ZISK_DIR/bin/ziskemu" --version
         rustup toolchain list | grep -q '^zisk'

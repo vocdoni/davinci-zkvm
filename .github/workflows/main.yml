@@ -1,7 +1,7 @@
 name: Build and Test
 
-# No GPU here: every job runs on ubuntu-latest without the prover service or
-# proving keys. Proving tests stay manual on the GPU host.
+# No GPU here: no job needs the prover service or proving keys. Proving
+# tests stay manual on the GPU host.
 
 on:
   push:
@@ -103,18 +103,23 @@ jobs:
             exit 1
           fi
 
+  # The emulator and guest jobs are the heavy ones: they run on the
+  # self-hosted boxes, without GitHub caches (the box keeps its own ZisK).
   emulator:
     name: Cheat suites (ziskemu)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted]
     timeout-minutes: 90
     steps:
+      # Self-hosted runners may export no HOME (they run under systemd); give
+      # each job a fresh one for rustup, cargo and go.
+      - name: Give the run a home
+        run: mkdir -p "$RUNNER_TEMP/home" && echo "HOME=$RUNNER_TEMP/home" >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
           go-version-file: go-sdk/go.mod
-          cache-dependency-path: go-sdk/go.sum
+          cache: false
       - uses: dtolnay/rust-toolchain@1.95
-      - uses: Swatinem/rust-cache@v2
       - uses: ./.github/actions/setup-zisk
 
       - name: Build gen-input and gen-results-input
@@ -138,10 +143,15 @@ jobs:
 
   guests:
     name: Guest ELFs reproducible
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted]
     timeout-minutes: 60
     steps:
+      # Self-hosted runners may export no HOME (they run under systemd); give
+      # each job a fresh one for rustup, cargo and go.
+      - name: Give the run a home
+        run: mkdir -p "$RUNNER_TEMP/home" && echo "HOME=$RUNNER_TEMP/home" >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.95
       - uses: ./.github/actions/setup-zisk
 
       # build-guests.sh remaps the checkout and $CARGO_HOME, so the runner's
