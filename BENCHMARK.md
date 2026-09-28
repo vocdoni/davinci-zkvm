@@ -1,11 +1,88 @@
 # Benchmarks
 
-Measured on a single NVIDIA RTX 5090 (59 GB host RAM). The chained-mode
-and historical per-batch tables are ZisK v0.18.0; the current per-batch
-numbers on ZisK 1.3.0-alpha with the BabyJubJub precompile are in the
-"Per-batch mode on ZisK 1.3" section.
-Reproduce with `make benchmark` (see `benchmark/README.md`); raw logs and
-the auto-generated table land in `benchmark/results/`.
+The first section is the current end-to-end figure: the whole DAVINCI stack,
+ballots in and settled state transitions out, on two GPU provers. The
+per-batch sections below measure the prover alone on one RTX 5090. The
+chained-mode and older per-batch tables are ZisK v0.18.0 and kept as history;
+the numbers on ZisK 1.3.0-alpha with the BabyJubJub precompile are in
+"Per-batch mode on ZisK 1.3" and "Per-batch mode with silent refreshes and DA
+binding". Reproduce the prover sweeps with `make benchmark` (see
+`benchmark/README.md`); raw logs and the generated table land in
+`benchmark/results/`.
+
+## End-to-end throughput with two provers
+
+**12.07 votes/s sustained (724 votes/min), 12.45 votes/s in steady state:
+8192 votes proved and settled on-chain in 678.7 s on two RTX 5090 provers.**
+
+Measured on 2026-09-28 with the davinci-sequencer throughput benchmark
+(`e2e/tests/throughput.rs`, run through `e2e/bench.sh`, which runs everything
+in Docker). The setup:
+
+- **Chain.** A fresh anvil chain (Osaka rules, 1 s blocks) with the
+  `ProcessRegistry` and `ZiskVerifier`.
+- **Provers.** Two provers, each serving one sequencer node. Each node
+  sequences two origin-1 processes of 2048 voters (nf=2, `--batch-max 512`),
+  so its prover always has the next batch queued. The two provers never race
+  on one process's root chain.
+- **Ballots.** All 8192 circom ballot proofs are made before the clock starts:
+  1326 s at about 6.2 proofs/s on one 16-core CPU. On a real network voters
+  make them on their own devices.
+- **The clock.** It runs from the first vote submitted to the last transition
+  settled on-chain. Every vote was accepted within 5 s. Every one settled, and
+  all four processes were then ended and tallied on-chain: [6144, 6144] each,
+  as cast.
+
+| prover | host RAM | batches | first batch (512 votes) | steady batch (512 votes + 512 refreshes) | GPU busy | votes/s |
+|---|---:|---:|---:|---:|---:|---:|
+| z6 (local, also runs anvil, the nodes and the harness) | 64 GB | 8 | 75.5–80.5 s | 84.5–87.1 s | 99% of wall | 6.03 |
+| z7 (over WireGuard, 10.200.0.0/24) | 128 GB | 8 | 71.1–71.7 s | 78.3–83.0 s | 93% of wall | 6.44 |
+| **total** | | **16** | | | | **12.07** |
+
+- The GPUs are the bottleneck: each prover was busy 100% of the span between
+  its first and last job, and the queue held the next batch for about 70 s on
+  average. Throughput therefore scales with the number of provers. One RTX
+  5090 settles about 6 votes/s at nf=2, the same rate the single-prover sweep
+  below measures for 512- and 1024-vote batches.
+- **Batch sizes.** A steady batch carries as many silent refreshes as votes,
+  so a vote costs one ballot write plus one re-randomized slot. Batches of 512
+  prove as fast per vote as 1024, need half the host RAM, and settle twice as
+  often.
+- **Settlement.** It took 16 transactions and 28 blobs: one blob for a first
+  batch, two for a steady one. That is 7.29 M gas in total, about 460 k per
+  steady transition.
+- **z6 vs z7.** z6 is about 7% slower per batch because it shares its CPU with
+  the nodes, anvil and the harness. An earlier run with z6 in
+  `--minimal-memory` mode (the default from 512 proofs) and z7 at its 500 W
+  default gave 11.43 votes/s overall and 12.01 steady. Turning minimal-memory
+  off on z6 and running z7 at 575 W gave the numbers above.
+
+Software, all from the CI images:
+
+| component | version |
+|---|---|
+| prover | `ghcr.io/vocdoni/davinci-zkvm:main`, image `sha256:8983782369e5c5070b2b1fb72442c1ca341ebb8db37b8114a40eaf86bc4a358a`, built from davinci-zkvm `0ccfae9`: ZisK 1.3.0-alpha GPU release binaries, CUDA 12.8 base, snarkjs 0.7.6, the guest ELFs of this repo (batch vk `0x6cfc89d5…7a10`) |
+| sequencer nodes | `ghcr.io/vocdoni/davinci-sequencer:main` at `sha256:5e7e331422bd9ff2e1781d90a56fb8bd9585b2a7a81577538e305c2acf4bb6b6` (davinci-sequencer `8e54dba`) |
+| harness | davinci-sequencer `e2e/Dockerfile.bench`: Rust 1.95, foundry v1.8.3 (anvil, forge) |
+| contracts | davinci-contracts `zkvm` branch, `8dbaa20` |
+| ballot circuit | davinci-circom `a39a9f9` artifacts |
+
+Hardware: two identical hosts, each an AMD Ryzen 9 9950X3D (16 cores, 32
+threads) and one NVIDIA RTX 5090 (32 GB, driver 580.178.04, 575 W power
+limit), Ubuntu 26.04 with kernel 7.0 and Docker 29. They differ only in RAM:
+z6 has 64 GB and z7 128 GB. The z6 prover was capped at 56 GB. Each prover ran
+with `ZISK_MINIMAL_MEMORY_FROM=2048`, so no batch used `--minimal-memory`.
+
+Reproduce:
+
+```bash
+# on each GPU host (see the README's Docker section):
+DAVINCI_ZKVM_IMAGE=ghcr.io/vocdoni/davinci-zkvm:main docker compose --profile cuda up -d
+# on the driver host, from davinci-sequencer:
+DAVINCI_E2E_BENCH_PROVERS=http://127.0.0.1:8080,http://10.200.0.27:8080 \
+DAVINCI_E2E_BENCH_VOTES=2048 DAVINCI_E2E_BENCH_PROCS=2 \
+DAVINCI_E2E_BENCH_BATCH=512 DAVINCI_E2E_BENCH_NF=2 e2e/bench.sh
+```
 
 ## Chained mode — 1024-vote election, one final PLONK
 
@@ -31,22 +108,22 @@ decryption verification + results inclusion + PLONK wrap).
 - Batches and folds serialize on the single GPU; fold overhead is ~5–7%
   of total time. A second service instance would pipeline batching and
   folding.
-- All rows are on the fully-optimized batch circuit: SMT node-hash skip
+- All rows are on the v0.18 batch circuit of the time: SMT node-hash skip
   on padding levels, lazy SMT leaf hashing, and projective re-encryption
   equality (fixed-base windowed scalar mul + projective accumulators, no
-  per-point inversion). See `circuit/CIRCUIT.md` §15. These lifted
+  per-point inversion). The ZisK 1.3 guest replaces the last with the
+  BabyJubJub precompile (`circuit/CIRCUIT.md` §15). These lifted
   throughput ~12–25% over the previous sweep (64: 1.33→1.49, 128:
   1.68→1.95, 256: 1.80→2.25 v/s) even with the added process-config
   inclusion-proof verification now in-circuit.
-- **128 is the maximum batch size** (`MAX_BATCH_SIZE`): the circuit
-  rejects any batch with more than 128 proofs. Pick a batch ≤ 128 and
-  fold more often for larger elections. **Lowered from 256 to 128 for
-  GPU-memory safety** (see the per-batch section below): batch 256 at full
+- **The batch cap was 128 at the time** (`MAX_BATCH_SIZE`); it is 1024
+  on ZisK 1.3, see the per-batch sections below. It had been **lowered
+  from 256 to 128 for GPU-memory safety** (see the per-batch section below): batch 256 at full
   ballot capacity peaks ~31.3 GB even under `--minimal-memory`, leaving no
   headroom on the 32 GB GPU. The chained-mode tables above (and the 5120 /
   20000 rows below) were measured under the previous 256 cap and at the
-  8-field era; they are retained as historical references — production now
-  caps at 128. A current 16-field measurement is below.
+  8-field era; they are retained as historical references. A 16-field
+  measurement is below.
 
 ### 16-field refresh — 1024 votes through the davinci-fold orchestrator
 
@@ -113,11 +190,11 @@ the 16-field max (sweep with `BALLOT_NUM_FIELDS`):
 | 128 |  73 s |   164 s | ~0.5 s |
 | ~~256~~ | 102 s | 289 s (min-mem) | ~0.3 s |
 
-128 is the `MAX_BATCH_SIZE` cap; the 256 row is retained as the corner that
-motivated it. `proofBytes` is 768 B / `publicValues` 256 B (512 B on ZisK 1.3) regardless of
+128 was the `MAX_BATCH_SIZE` cap on v0.18; the 256 row is retained as the
+corner that motivated it. On ZisK 1.3 the cap is 1024. `proofBytes` is 768 B / `publicValues` 256 B (512 B on ZisK 1.3) regardless of
 batch or field count.
 
-**Why the cap is 128.** At num_fields=16 the per-field chained reencryption
+**Why the cap was 128 on v0.18.** At num_fields=16 the per-field chained reencryption
 makes the `ArithEq` trace large enough that batch 256 overflows the 32 GB GPU
 under the default schedule (deterministic SIGKILL during inner-proof
 generation). `cargo-zisk prove --minimal-memory` reschedules witness storage
