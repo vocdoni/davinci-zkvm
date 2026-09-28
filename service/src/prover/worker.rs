@@ -273,6 +273,9 @@ const PROVE_RETRY_DELAY_SECS: u64 = 5;
 /// 5. **OOM kill (`signal: 9`).** Large batches can be reaped by the
 ///    kernel under transient memory pressure; retrying when the pressure
 ///    has passed succeeds.
+/// 6. **SNARK self-check.** `--verify-proof` occasionally rejects the fresh
+///    PLONK wrap (`SNARK proof verification failed`) after a clean STARK. It hit 2
+///    of 181 jobs on 1.3.0-alpha, and the same input.bin verified 3 of 3 on rerun.
 ///
 /// We deliberately do **not** match the bare `SIGABRT` keyword or generic
 /// witness-generation failures — those also fire for deterministic guest
@@ -288,6 +291,7 @@ fn is_transient_prover_error(msg: &str) -> bool {
         || msg.contains("Failed assert in template/function VerifyEvaluations")
         || msg.contains("Counter timeout after")
         || msg.contains("signal: 9")
+        || msg.contains("SNARK proof verification failed")
 }
 
 /// Run `cargo-zisk prove`, transparently retrying [`MAX_PROVE_RETRIES`] times
@@ -550,5 +554,14 @@ pub(crate) mod tests {
         // No per-job dir (and no witness) survives the rejection.
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snark_self_check_is_transient() {
+        assert!(is_transient_prover_error(
+            "cargo-zisk prove failed (exit exit status: 1): Error: snark proof verification \
+             failed: Proof error: SNARK proof verification failed: "
+        ));
+        assert!(!is_transient_prover_error("Error: guest panicked: SIGABRT"));
     }
 }
