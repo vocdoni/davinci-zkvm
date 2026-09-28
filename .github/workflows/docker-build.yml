@@ -40,12 +40,24 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Prepare vars
-        id: vars
+      # A release tag (v0.1.0) also moves `latest`, which is what
+      # Watchtower-managed provers follow. Prereleases (v0.2.0-rc1) don't.
+      - name: Prepare tags
+        id: tags
         shell: bash
         env:
           IMAGE_TAG: ${{ inputs.image-tag }}
-        run: echo "IMAGE_TAG_CLEAN=${IMAGE_TAG//\//-}" >> "$GITHUB_OUTPUT"
+        run: |
+          primary=${IMAGE_TAG//\//-}
+          tags="vocdoni/davinci-zkvm:${primary}"$'\n'"ghcr.io/vocdoni/davinci-zkvm:${primary}"
+          if [[ "$primary" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            tags+=$'\n'"vocdoni/davinci-zkvm:latest"$'\n'"ghcr.io/vocdoni/davinci-zkvm:latest"
+          fi
+          {
+            echo 'list<<EOF'
+            echo "$tags"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       # The CUDA prover image. Proving keys are mounted at run time, never
       # baked in (see docker-compose.yml).
@@ -55,8 +67,6 @@ jobs:
           context: .
           file: Dockerfile.cuda
           push: ${{ inputs.push }}
-          tags: |
-            vocdoni/davinci-zkvm:${{ steps.vars.outputs.IMAGE_TAG_CLEAN }}
-            ghcr.io/vocdoni/davinci-zkvm:${{ steps.vars.outputs.IMAGE_TAG_CLEAN }}
+          tags: ${{ steps.tags.outputs.list }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

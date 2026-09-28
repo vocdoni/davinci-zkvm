@@ -198,6 +198,19 @@ Other Make targets: `make logs`, `make status`, `make shell`,
 `make down`, `make restart`, `make clean`. Run `make help` for the
 full list.
 
+To run the published image instead of a local build and update it on every
+release, point the service at `latest` and start Watchtower with it:
+
+```bash
+DAVINCI_ZKVM_IMAGE=ghcr.io/vocdoni/davinci-zkvm:latest \
+  docker compose --profile cuda --profile watchtower up -d
+```
+
+Release tags (`v0.1.0`) publish `:v0.1.0` and move `:latest`; branches publish
+under their name (`:main`). Watchtower checks every five minutes and restarts
+the prover on a new image, so a job in flight at that moment is lost and has to
+be resubmitted.
+
 To put the proving keys somewhere other than `./zisk-keys`, set
 `ZISK_KEYS_DIR=/path/to/keys` either in `.env` (copy from `.env.example`)
 or on the command line.

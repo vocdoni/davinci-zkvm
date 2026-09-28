@@ -63,6 +63,8 @@ services:
       - ZISK_MINIMAL_MEMORY_FROM=${ZISK_MINIMAL_MEMORY_FROM:-512}
       - DAVINCI_KEEP_INPUTS=${DAVINCI_KEEP_INPUTS:-0}
     restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     ulimits:
       memlock:
         soft: -1
@@ -80,6 +82,16 @@ services:
       timeout: 5s
       retries: 3
       start_period: 60s
+
+  # Pulls a new published image when a release moves the tag the prover runs
+  # (DAVINCI_ZKVM_IMAGE=ghcr.io/vocdoni/davinci-zkvm:latest) and restarts it.
+  watchtower:
+    profiles: [watchtower]
+    image: nickfedor/watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --interval 300 --label-enable --include-stopped --revive-stopped
+    restart: unless-stopped
 
 volumes:
   proofs:
