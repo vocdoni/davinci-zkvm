@@ -124,10 +124,16 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             ca-certificates curl git build-essential pkg-config clang cmake
-          # /github/home is shared between jobs on a runner; keep caches in the
-          # container.
-          echo "HOME=/root" >> "$GITHUB_ENV"
-          HOME=/root git config --global --add safe.directory '*'
+          # /github/home is shared between jobs on a runner: keep the toolchains
+          # and caches in the container (HOME itself must stay, the runner's
+          # docker client reads it).
+          {
+            echo "CARGO_HOME=/root/.cargo"
+            echo "RUSTUP_HOME=/root/.rustup"
+            echo "GOPATH=/root/go"
+            echo "GOCACHE=/root/.cache/go-build"
+          } >> "$GITHUB_ENV"
+          git config --system --add safe.directory '*'
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
@@ -171,10 +177,16 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             ca-certificates curl git build-essential pkg-config clang cmake
-          # /github/home is shared between jobs on a runner; keep caches in the
-          # container.
-          echo "HOME=/root" >> "$GITHUB_ENV"
-          HOME=/root git config --global --add safe.directory '*'
+          # /github/home is shared between jobs on a runner: keep the toolchains
+          # and caches in the container (HOME itself must stay, the runner's
+          # docker client reads it).
+          {
+            echo "CARGO_HOME=/root/.cargo"
+            echo "RUSTUP_HOME=/root/.rustup"
+            echo "GOPATH=/root/go"
+            echo "GOCACHE=/root/.cache/go-build"
+          } >> "$GITHUB_ENV"
+          git config --system --add safe.directory '*'
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.95
       - uses: ./.github/actions/setup-zisk
