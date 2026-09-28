@@ -34,8 +34,12 @@ runs:
       shell: bash
       env:
         ZISK_VERSION: ${{ inputs.version }}
+      # ziskup installs under $XDG_CONFIG_HOME when it is set, which it is on
+      # hosted runners; pin ~/.zisk so the cache and the checks find it.
       run: |
         set -euo pipefail
+        unset XDG_CONFIG_HOME
+        export ZISK_DIR="$HOME/.zisk"
         curl -fsSL "https://raw.githubusercontent.com/0xPolygonHermez/zisk/v${ZISK_VERSION}/ziskup/ziskup" -o ziskup
         chmod +x ziskup
         ./ziskup -v "$ZISK_VERSION" --cpu --nokey -y
@@ -57,6 +61,7 @@ runs:
       run: |
         set -euo pipefail
         echo "$HOME/.zisk/bin" >> "$GITHUB_PATH"
+        echo "ZISK_HOME=$HOME/.zisk" >> "$GITHUB_ENV"
         for b in ziskemu cargo-zisk; do
           if ldd "$HOME/.zisk/bin/$b" | grep 'not found'; then
             echo "::error::$b has unresolved shared libraries"
