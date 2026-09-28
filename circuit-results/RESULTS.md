@@ -102,7 +102,7 @@ with `ballot_leaf_hash = int_be(sha256(64 coords, each BE32))`
 `verify_inclusion` is the circomlib `SMTVerifier` inclusion case over the arbo
 SHA-256 tree (`circuit-primitives/src/smt.rs`): leaf
 `sha256(key_le8 ‖ value_le32 ‖ 0x01)`, node `sha256(l ‖ r)`, path bits
-LSB-first, the leaf level is the last non-zero sibling.
+LSB-first, the leaf sits one level below the last non-zero sibling.
 
 ### 2.5 Decryption proofs (`FAIL_CP`)
 

@@ -998,13 +998,13 @@ func TestCheatMissingKZGBlock(t *testing.T) {
 	}
 }
 
-// TestCheatOversizedNproofs claims nproofs=129 (> MAX_BATCH_SIZE) in the
+// TestCheatOversizedNproofs claims nproofs=1025 (> MAX_BATCH_SIZE) in the
 // header while carrying only 2 proof records. The parser must flag-and-clamp,
 // never trust the declared count.
 func TestCheatOversizedNproofs(t *testing.T) {
 	base, _, _ := buildCheatInput(t)
 	full := base.fullInput()
-	binary.LittleEndian.PutUint64(full[16:], 129)
+	binary.LittleEndian.PutUint64(full[16:], 1025)
 	assertCircuitFails(t, full, failParse, "oversized-nproofs")
 }
 

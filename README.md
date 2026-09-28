@@ -395,7 +395,7 @@ it (the Docker image ships it).
 
 ## Circuit specification
 
-[CIRCUIT.md](CIRCUIT.md) has the formal constraint spec, the public-output
+[circuit/CIRCUIT.md](circuit/CIRCUIT.md) has the formal constraint spec, the public-output
 encoding, the fail-mask bits, and the cross-block binding rules.
 
 ## License
