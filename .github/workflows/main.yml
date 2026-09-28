@@ -104,16 +104,25 @@ jobs:
           fi
 
   # The emulator and guest jobs are the heavy ones: they run on the
-  # self-hosted boxes, without GitHub caches (the box keeps its own ZisK).
+  # self-hosted boxes in a job container, without GitHub caches (the box
+  # keeps its own ZisK).
   emulator:
     name: Cheat suites (ziskemu)
     runs-on: [self-hosted]
+    container: ubuntu:24.04
     timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
     steps:
-      # Self-hosted runners may export no HOME (they run under systemd); give
-      # each job a fresh one for rustup, cargo and go.
-      - name: Give the run a home
-        run: mkdir -p "$RUNNER_TEMP/home" && echo "HOME=$RUNNER_TEMP/home" >> "$GITHUB_ENV"
+      # The self-hosted boxes have no sudo: the job runs in a container, where
+      # the ZisK install still persists in the runner tool cache.
+      - name: Base packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config clang cmake
+          git config --global --add safe.directory '*'
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
@@ -144,12 +153,20 @@ jobs:
   guests:
     name: Guest ELFs reproducible
     runs-on: [self-hosted]
+    container: ubuntu:24.04
     timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
     steps:
-      # Self-hosted runners may export no HOME (they run under systemd); give
-      # each job a fresh one for rustup, cargo and go.
-      - name: Give the run a home
-        run: mkdir -p "$RUNNER_TEMP/home" && echo "HOME=$RUNNER_TEMP/home" >> "$GITHUB_ENV"
+      # The self-hosted boxes have no sudo: the job runs in a container, where
+      # the ZisK install still persists in the runner tool cache.
+      - name: Base packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config clang cmake
+          git config --global --add safe.directory '*'
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.95
       - uses: ./.github/actions/setup-zisk
