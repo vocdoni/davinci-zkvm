@@ -1,0 +1,68 @@
+name: Set up ZisK (CPU, no keys)
+description: >-
+  Installs the ZisK CPU binaries (cargo-zisk, ziskemu) and the guest Rust
+  toolchain with ziskup, without proving keys, and caches ~/.zisk by version.
+
+inputs:
+  version:
+    description: ZisK release, bare semver
+    default: 1.3.0-alpha
+
+runs:
+  using: composite
+  steps:
+    # ziskemu and cargo-zisk link openmpi, libsodium, gmp and libomp. Guest
+    # builds also run host build scripts: proofman's C++ libstarks (nasm,
+    # nlohmann-json, libcrypto) and bindgen for zisk-zkvm-interface (libclang).
+    - name: Install system packages
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          libopenmpi-dev libsodium-dev libgmp-dev libomp-dev \
+          nlohmann-json3-dev libssl-dev nasm libclang-dev
+
+    - name: Restore ~/.zisk
+      id: cache
+      uses: actions/cache@v5
+      with:
+        path: ~/.zisk
+        key: zisk-${{ runner.os }}-${{ inputs.version }}-cpu-nokey-v1
+
+    - name: Install ZisK with ziskup
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        ZISK_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        curl -fsSL "https://raw.githubusercontent.com/0xPolygonHermez/zisk/v${ZISK_VERSION}/ziskup/ziskup" -o ziskup
+        chmod +x ziskup
+        ./ziskup -v "$ZISK_VERSION" --cpu --nokey -y
+        rm -f ziskup
+
+    # ziskup links the guest toolchain into rustup as `zisk`; a cache hit
+    # restores ~/.zisk but not that link.
+    - name: Link the zisk rustup toolchain
+      if: steps.cache.outputs.cache-hit == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        tc=$(find "$HOME/.zisk/toolchains" -mindepth 1 -maxdepth 1 -type d | head -n1)
+        test -x "$tc/bin/rustc"
+        rustup toolchain link zisk "$tc"
+
+    - name: Check the install
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "$HOME/.zisk/bin" >> "$GITHUB_PATH"
+        for b in ziskemu cargo-zisk; do
+          if ldd "$HOME/.zisk/bin/$b" | grep 'not found'; then
+            echo "::error::$b has unresolved shared libraries"
+            exit 1
+          fi
+        done
+        "$HOME/.zisk/bin/cargo-zisk" --version
+        "$HOME/.zisk/bin/ziskemu" --version
+        rustup toolchain list | grep -q '^zisk'

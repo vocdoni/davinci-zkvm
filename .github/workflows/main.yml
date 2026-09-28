@@ -1,0 +1,160 @@
+name: Build and Test
+
+# No GPU here: every job runs on ubuntu-latest without the prover service or
+# proving keys. Proving tests stay manual on the GPU host.
+
+on:
+  push:
+    branches:
+      - main
+      - release**
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: "0 1 * * *" # 02:00 UTC+1
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) || format('{0}-push-{1}-{2}', github.workflow, github.ref, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.95
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy -p davinci-zkvm-service -p davinci-zkvm-sdk -p davinci-zkvm-input-gen --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test -p davinci-zkvm-service -p davinci-zkvm-sdk -p davinci-zkvm-input-gen
+
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: go-sdk
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go-sdk/go.mod
+          cache-dependency-path: go-sdk/go.sum
+
+      - name: gofmt
+        run: |
+          files=$(gofmt -l .)
+          if [[ -n "$files" ]]; then
+            echo "$files"
+            echo "gofmt reports unformatted files, please run 'gofmt -w' on them"
+            exit 1
+          fi
+
+      - name: go mod tidy
+        run: |
+          go mod tidy
+          if [[ $(git status --porcelain -- .) ]]; then
+            git diff
+            echo
+            echo "go mod tidy made these changes, please run 'go mod tidy' in go-sdk and include those changes in a commit"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: |
+          go build ./...
+          go build ./tests/integration/...
+
+      # tests/integration needs ziskemu (emulator job) or a prover service.
+      # ./solidity compiles the contracts with docker ethereum/solc.
+      - name: go test
+        run: |
+          mapfile -t pkgs < <(go list ./... | grep -v /tests/integration)
+          go test "${pkgs[@]}"
+
+      # A default run leaves the rapidsnark proof fixtures alone and is
+      # deterministic, so the checked-in vectors must come out unchanged.
+      - name: sdk-vectors in sync
+        run: |
+          go run ./cmd/sdk-vectors -out ../rust-sdk/testdata
+          if [[ $(git status --porcelain -- ../rust-sdk) ]]; then
+            git status --porcelain -- ../rust-sdk
+            git diff --stat -- ../rust-sdk
+            echo "rust-sdk vectors are stale, please run 'go run ./cmd/sdk-vectors -out ../rust-sdk/testdata' in go-sdk and commit the result"
+            exit 1
+          fi
+
+  emulator:
+    name: Cheat suites (ziskemu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go-sdk/go.mod
+          cache-dependency-path: go-sdk/go.sum
+      - uses: dtolnay/rust-toolchain@1.95
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-zisk
+
+      - name: Build gen-input and gen-results-input
+        run: cargo build --release -p davinci-zkvm-input-gen
+
+      # A missing binary makes the cheat tests skip, so any skip fails the job.
+      - name: TestCheat and TestResultsCheat
+        working-directory: go-sdk/tests
+        env:
+          GEN_INPUT_BIN: ${{ github.workspace }}/target/release/gen-input
+          GEN_RESULTS_INPUT_BIN: ${{ github.workspace }}/target/release/gen-results-input
+          CIRCUIT_ELF_PATH: ${{ github.workspace }}/circuit/elf/circuit.elf
+          RESULTS_ELF_PATH: ${{ github.workspace }}/circuit-results/elf/results.elf
+        run: |
+          set -o pipefail
+          go test ./integration -run 'TestCheat|TestResultsCheat' -v -count=1 -timeout 75m | tee cheat.log
+          if grep -- '--- SKIP' cheat.log; then
+            echo "::error::cheat tests skipped, check that ziskemu and the input generators are found"
+            exit 1
+          fi
+
+  guests:
+    name: Guest ELFs reproducible
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-zisk
+
+      # build-guests.sh remaps the checkout and $CARGO_HOME, so the runner's
+      # paths don't leak into the ELFs.
+      - name: Build the guests and compare with the tracked ELFs
+        run: |
+          set -euo pipefail
+          scripts/build-guests.sh
+          fail=0
+          for elf in circuit/elf/circuit.elf circuit-aggregator/elf/aggregator.elf circuit-results/elf/results.elf; do
+            if ! git diff --quiet -- "$elf"; then
+              echo "::error file=$elf::$elf does not match its source: run scripts/build-guests.sh and refreeze its vk"
+              fail=1
+            fi
+          done
+          exit "$fail"
