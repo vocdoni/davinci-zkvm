@@ -60,6 +60,7 @@ lower-level calls are:
 | `SubmitFold(req)`, `SubmitFinalize(req)` | `POST /fold`, `POST /finalize`. |
 | `FetchStarkInfo(id)` | `GET /jobs/{id}/stark`: `program_vk` and `zisk_vk`. |
 | `FetchStarkRaw(id)`, `ImportStark(blob)` | Move a batch STARK to another prover (`/jobs/{id}/snark/raw`, `POST /jobs/import`). |
+| `ImportStarkAs(blob, kind)` | `POST /jobs/import?kind=`: `ImportBatch` or `ImportFold` (moves a fold chain to another prover). |
 | `FetchStarkProof(id)` | `GET /jobs/{id}/proof/stark`. |
 | `Health()` | `GET /health`. |
 

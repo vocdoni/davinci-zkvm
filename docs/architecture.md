@@ -131,8 +131,9 @@ tree, re-encrypts ballots, picks refresh slots, submits folds every
 `foldEvery` batches and runs the binding checks at finalize. Fold inputs are
 read from the service's own job directory, so a fold and the batches it
 covers must be on the same prover. `POST /jobs/import` registers a STARK
-proved elsewhere so a fold worker can use it; the aggregator re-verifies every
-imported proof in-guest. [davinci-fold](https://github.com/vocdoni/davinci-fold)
+proved elsewhere so a fold worker can use it, a batch by default or, with
+`?kind=fold`, the last fold proof so the chain can continue on another prover;
+the aggregator re-verifies every imported proof in-guest. [davinci-fold](https://github.com/vocdoni/davinci-fold)
 uses this to spread batch proving over several provers.
 
 ## Privacy of the witness

@@ -242,6 +242,33 @@ pub struct FinalizeRequest {
     pub results: davinci_zkvm_input_gen::aggregator::ResultsPayload,
 }
 
+/// Query parameters of POST /jobs/import.
+#[derive(Debug, Default, Deserialize)]
+pub struct ImportParams {
+    #[serde(default)]
+    pub kind: ImportKind,
+}
+
+/// Job kind an imported STARK is registered as.
+#[derive(Debug, Default, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportKind {
+    /// A vote batch STARK, referenced by `/fold` in `batch_jobs`.
+    #[default]
+    Batch,
+    /// A fold STARK, referenced by `/fold` in `prev_fold_job` or by `/finalize`.
+    Fold,
+}
+
+impl ImportKind {
+    pub fn job_kind(self) -> JobKind {
+        match self {
+            ImportKind::Batch => JobKind::BatchStark,
+            ImportKind::Fold => JobKind::Fold,
+        }
+    }
+}
+
 /// HTTP request body for POST /results: the single-key tally of one election
 /// (circuit-results/RESULTS.md). 32-byte values are arbo-LE hex.
 pub type ResultsRequest = davinci_zkvm_input_gen::results::ResultsJson;

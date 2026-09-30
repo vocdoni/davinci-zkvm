@@ -27,7 +27,7 @@ earlier job IDs.
 | `POST` | `/results` | Prove the decrypted tally of an election (results guest), PLONK. |
 | `POST` | `/fold` | Chained mode: fold completed STARK batch jobs into the election chain. |
 | `POST` | `/finalize` | Chained mode: verify the results and wrap the chain in the final PLONK. |
-| `POST` | `/jobs/import` | Chained mode: register a STARK `proof.bin` proved on another prover. |
+| `POST` | `/jobs/import` | Chained mode: register a batch (default) or fold (`?kind=fold`) STARK `proof.bin` proved on another prover. |
 | `GET` | `/jobs/{id}` | Job status and timing. |
 | `GET` | `/jobs/{id}/snark` | The four `verifySnarkProof` arguments of a PLONK job. |
 | `GET` | `/jobs/{id}/snark/raw` | The raw `proof.bin` (bincode), for `cargo-zisk verify` or `/jobs/import`. |
@@ -42,7 +42,7 @@ earlier job IDs.
 | Code | Meaning |
 |---|---|
 | `202` | Job accepted: `{"job_id": "<uuid>", "status": "queued"}`. |
-| `400` | Invalid JSON or request, or a referenced job that is missing, not done or of the wrong kind. Body: `{"error": "..."}`. |
+| `400` | Invalid JSON or request, a referenced job that is missing, not done or of the wrong kind, or an unknown `kind` on `/jobs/import`. Body: `{"error": "..."}`. |
 | `404` | Unknown job or missing artifact. |
 | `415` | JSON body sent without `Content-Type: application/json`. |
 | `422` | JSON that does not match the request schema; on artifact routes, a failed job (the body carries the prover error); on `/jobs/import`, a body that is not a STARK proof. |
@@ -175,9 +175,13 @@ Fold and finalize read the referenced proofs from the service's own job
 directory, so every job they reference must live on the same service.
 `POST /jobs/import` takes a raw `proof.bin` body (as served by
 `/jobs/{id}/snark/raw` on another prover), checks that it decodes as a STARK
-and returns `200` with `{"job_id": "…"}`: a completed `batchstark` job that
-`/fold` can reference. The aggregator verifies every imported proof in-guest,
-so importing does not require trusting the uploader.
+and returns `200` with `{"job_id": "…"}`. The optional query parameter `kind`
+sets the job kind: `batch` (the default) registers a completed `batchstark`
+job for `batch_jobs`; `fold` registers a completed `fold` job for
+`prev_fold_job` or `/finalize`, which moves a fold chain to another prover.
+The aggregator verifies every imported proof in-guest, an imported fold
+against the `fold_vk` bound in the config commitment, so importing does not
+require trusting the uploader.
 
 `GET /jobs/{id}/stark` returns `{"program_vk": "0x…", "zisk_vk": "0x…"}` of a
 STARK job. A fold or finalize job's `publics` are the 53-word aggregator

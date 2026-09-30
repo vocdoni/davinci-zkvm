@@ -244,6 +244,26 @@ func (c *Client) ImportStark(proofBin []byte) (string, error) {
 	return c.postForJobID("/jobs/import", "application/octet-stream", proofBin, http.StatusOK)
 }
 
+// ImportKind selects the job kind of an imported STARK.
+type ImportKind string
+
+// Import kinds accepted by POST /jobs/import.
+const (
+	// ImportBatch registers a vote batch STARK, usable in FoldRequest.BatchJobs.
+	ImportBatch ImportKind = "batch"
+	// ImportFold registers a fold STARK, usable as FoldRequest.PrevFoldJob or
+	// FinalizeRequest.FoldJob. It moves a fold chain to another worker.
+	ImportFold ImportKind = "fold"
+)
+
+// ImportStarkAs is [Client.ImportStark] with an explicit job kind
+// (POST /jobs/import?kind=...). The aggregator re-verifies an imported fold
+// proof in-guest against the bound fold vk, as it does for imported batches.
+func (c *Client) ImportStarkAs(proofBin []byte, kind ImportKind) (string, error) {
+	path := "/jobs/import?kind=" + url.QueryEscape(string(kind))
+	return c.postForJobID(path, "application/octet-stream", proofBin, http.StatusOK)
+}
+
 // FetchPublics downloads the raw committed publics of a completed job
 // (256 bytes: the guest's u32 output registers, little-endian).
 func (c *Client) FetchPublics(jobID string) ([]byte, error) {

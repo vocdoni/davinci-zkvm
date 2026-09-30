@@ -19,10 +19,10 @@
 //! unknown job ID.
 
 use crate::api::AppState;
-use crate::types::{Job, JobKind, JobStatus};
+use crate::types::{ImportParams, Job, JobStatus};
 use axum::{
     body::{Body, Bytes},
-    extract::{Path, State},
+    extract::{rejection::QueryRejection, Path, Query, State},
     http::{header, StatusCode},
     response::IntoResponse,
     Json,
@@ -138,21 +138,39 @@ async fn stream_file(path: PathBuf, download_name: String) -> axum::response::Re
         .into_response()
 }
 
-/// `POST /jobs/import` — import a raw STARK `proof.bin` proven on another
-/// worker, registering it as a completed `BatchStark` job on this instance.
+/// `POST /jobs/import[?kind=batch|fold]` — import a raw STARK `proof.bin`
+/// proven on another worker, registering it as a completed `BatchStark`
+/// (`kind=batch`, the default) or `Fold` (`kind=fold`) job on this instance.
 ///
 /// The chained-fold pipeline pins a fold chain to a single worker (the fold
 /// guest loads each STARK's blob from that worker's local filesystem), but
 /// batch STARKs can be proved anywhere. To scatter batches across a pool and
 /// fold them on one worker, the orchestrator ships each batch's `proof.bin`
-/// here and gets back a local job id usable in `/fold`.
+/// here and gets back a local job id usable in `/fold`. Importing the last
+/// fold proof with `kind=fold` moves a fold chain to another worker: the id
+/// is usable as `prev_fold_job` in `/fold` or `fold_job` in `/finalize`.
 ///
 /// Soundness does not depend on trusting the blob: the fold guest re-verifies
-/// every STARK in-circuit plus continuity/vk binding, so a forged or corrupt
+/// every STARK in-circuit plus continuity/vk binding (a previous fold proof
+/// against the `fold_vk` bound in `config_commitment`), so a forged or corrupt
 /// blob simply fails to fold. We still decode it here to reject garbage early
 /// and to surface the same `stark.json` / `publics.bin` artifacts a natively
 /// proved STARK job exposes.
-pub async fn import_stark(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
+pub async fn import_stark(
+    State(state): State<AppState>,
+    params: Result<Query<ImportParams>, QueryRejection>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let kind = match params {
+        Ok(Query(p)) => p.kind.job_kind(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("kind must be batch or fold: {}", e)})),
+            )
+                .into_response()
+        }
+    };
     if body.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -192,7 +210,7 @@ pub async fn import_stark(State(state): State<AppState>, body: Bytes) -> impl In
     }
 
     let now = Utc::now();
-    let mut job = Job::new(job_id, JobKind::BatchStark, vec![]);
+    let mut job = Job::new(job_id, kind, vec![]);
     job.status = JobStatus::Done;
     job.started_at = Some(now);
     job.finished_at = Some(now);
@@ -350,4 +368,115 @@ pub async fn get_job_proof_stark(
         }
     }
     stream_file(vadcop_path, format!("vadcop_{}.bin", id)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prover::worker::tests::test_config;
+    use crate::prover::ProverHandle;
+    use crate::types::JobKind;
+    use axum::http::Uri;
+    use serde::Serialize;
+    use std::sync::Arc;
+
+    // Mirror of input-gen's private bincode `proof.bin` layout (Vadcop body).
+    #[derive(Serialize)]
+    enum ProofBody {
+        Vadcop {
+            proof: Vec<u64>,
+            zisk_vk: Vec<u64>,
+            kind: VadcopKind,
+            hash: String,
+            publics_full: Vec<u64>,
+        },
+    }
+    #[derive(Serialize)]
+    enum VadcopKind {
+        Final,
+    }
+    #[derive(Serialize)]
+    enum HashMode {
+        Poseidon1,
+    }
+    #[derive(Serialize)]
+    struct ProgramVk {
+        vk: Vec<u64>,
+        hash_mode: HashMode,
+    }
+    #[derive(Serialize)]
+    struct Proof {
+        body: ProofBody,
+        program_vk: ProgramVk,
+    }
+
+    fn stark_proof_bin() -> Vec<u8> {
+        let proof = Proof {
+            body: ProofBody::Vadcop {
+                proof: vec![7; 16],
+                zisk_vk: vec![1, 2, 3, 4],
+                kind: VadcopKind::Final,
+                hash: "Poseidon2".to_string(),
+                publics_full: (0..68).collect(),
+            },
+            program_vk: ProgramVk {
+                vk: vec![0, 1, 2, 3],
+                hash_mode: HashMode::Poseidon1,
+            },
+        };
+        bincode::serde::encode_to_vec(&proof, bincode::config::standard()).unwrap()
+    }
+
+    async fn import(state: &AppState, uri: &str, body: Vec<u8>) -> (StatusCode, serde_json::Value) {
+        let params = Query::try_from_uri(&uri.parse::<Uri>().unwrap());
+        let resp = import_stark(State(state.clone()), params, Bytes::from(body))
+            .await
+            .into_response();
+        let code = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (code, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn import_registers_requested_kind() {
+        let config = test_config("import");
+        let dir = config.proof_output_dir.clone();
+        let prover = Arc::new(ProverHandle::new(config.clone()));
+        let state = AppState { config, prover };
+
+        for (uri, want) in [
+            ("/jobs/import", JobKind::BatchStark),
+            ("/jobs/import?kind=batch", JobKind::BatchStark),
+            ("/jobs/import?kind=fold", JobKind::Fold),
+        ] {
+            let (code, body) = import(&state, uri, stark_proof_bin()).await;
+            assert_eq!(code, StatusCode::OK, "{uri}: {body}");
+            let id: Uuid = body["job_id"].as_str().unwrap().parse().unwrap();
+            let job = state.prover.jobs.get(&id).unwrap().clone();
+            assert_eq!(job.kind, want, "{uri}");
+            assert_eq!(job.status, JobStatus::Done, "{uri}");
+            assert!(dir.join(id.to_string()).join("stark.json").exists());
+        }
+        assert_eq!(state.prover.jobs.len(), 3);
+
+        // An unknown kind is rejected before anything touches the disk.
+        let before = std::fs::read_dir(&dir).unwrap().count();
+        for uri in [
+            "/jobs/import?kind=",
+            "/jobs/import?kind=Fold",
+            "/jobs/import?kind=finalize",
+            "/jobs/import?kind=batchstark",
+        ] {
+            let (code, body) = import(&state, uri, stark_proof_bin()).await;
+            assert_eq!(code, StatusCode::BAD_REQUEST, "{uri}: {body}");
+        }
+        // A body that is not a STARK is rejected whatever the kind.
+        let (code, _) = import(&state, "/jobs/import?kind=fold", vec![1, 2, 3]).await;
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(state.prover.jobs.len(), 3);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
