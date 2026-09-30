@@ -51,8 +51,9 @@ func buildChainConfig(e *Election) (*davinci.ChainConfig, error) {
 
 // buildResultsPayload decrypts the single net Results accumulator with the
 // election private key and assembles the finalize payload: TE ballot
-// coordinates, plaintexts, 8 Chaum-Pedersen proofs and the SMT inclusion
-// siblings of the Results leaf. Returns the payload and the plaintext tally.
+// coordinates, plaintexts, one Chaum-Pedersen proof per ciphertext and the
+// SMT inclusion siblings of the Results leaf. Returns the payload and the
+// plaintext tally.
 func buildResultsPayload(e *Election) (*davinci.ResultsPayload, []uint64, error) {
 	le32 := func(v *big.Int) string {
 		return hex.EncodeToString(arbo.BigIntToBytes(32, v))

@@ -5,9 +5,9 @@ use ziskos::zisklib::{is_on_curve_bn254, is_on_curve_twist_bn254, is_on_subgroup
 
 /// Identity element of G1 (point at infinity, all-zero encoding).
 /// Matches zisklib's `G1_IDENTITY`/`G2_IDENTITY`: the pairing precompile
-/// treats the all-zero encoding as 𝒪 and skips it. (The previous `(0,1)`
-/// encoding was NOT treated as infinity by the precompile — a `(0,1)` point
-/// would have been Miller-looped as an invalid curve point.)
+/// treats the all-zero encoding as 𝒪 and skips it. A `(0,1)` encoding is
+/// not treated as infinity: the precompile would Miller-loop it as an invalid
+/// curve point.
 pub fn g1_identity() -> G1 {
     [0u64; 8]
 }
@@ -39,15 +39,15 @@ pub fn g2_is_valid(p: &G2) -> bool {
 
 /// Returns `true` if `p` is on the BN254 G1 curve and is not the identity.
 ///
-/// The identity check is ours to make: ZisK 1.3 changed `is_on_curve_bn254` to
-/// end in `eq(lhs, rhs) || eq(p, G1_IDENTITY)`, so it now accepts the all-zero
-/// encoding, where v0.18's plain `eq(lhs, rhs)` rejected it (0 != 3). Every G1
-/// point we validate feeds the batch MSM, and `add_bn254` requires on-curve,
-/// non-identity, canonical inputs; an identity term is also skipped outright by
-/// the pairing precompile, which is exactly the degree of freedom the batch
-/// random linear combination exists to remove.
+/// The identity check is ours to make: zisklib's `is_on_curve_bn254` ends in
+/// `eq(lhs, rhs) || eq(p, G1_IDENTITY)`, so it accepts the all-zero encoding.
+/// Every G1 point we validate feeds the batch MSM, and `add_bn254` requires
+/// on-curve, non-identity, canonical inputs. An identity term is also skipped
+/// outright by the pairing precompile, which is exactly the degree of freedom
+/// the batch random linear combination exists to remove.
 ///
-/// No subgroup check: BN254 G1 has prime order, so on-curve implies in-group.
+/// No subgroup check: BN254 G1 has prime order, so on-curve implies
+/// in-group.
 pub fn g1_is_valid(p: &G1) -> bool {
     if *p == g1_identity() {
         return false;

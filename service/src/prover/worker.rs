@@ -274,8 +274,8 @@ const PROVE_RETRY_DELAY_SECS: u64 = 5;
 ///    kernel under transient memory pressure; retrying when the pressure
 ///    has passed succeeds.
 /// 6. **SNARK self-check.** `--verify-proof` occasionally rejects the fresh
-///    PLONK wrap (`SNARK proof verification failed`) after a clean STARK. It hit 2
-///    of 181 jobs on 1.3.0-alpha, and the same input.bin verified 3 of 3 on rerun.
+///    PLONK wrap (`SNARK proof verification failed`) after a clean STARK; the
+///    same input verifies on rerun.
 ///
 /// We deliberately do **not** match the bare `SIGABRT` keyword or generic
 /// witness-generation failures — those also fire for deterministic guest
@@ -301,13 +301,12 @@ fn is_transient_prover_error(msg: &str) -> bool {
 async fn run_prove_with_retry(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
     let mut last_err = anyhow::anyhow!("prove never attempted");
     for attempt in 1..=MAX_PROVE_RETRIES + 1 {
-        // Retries escalate to --minimal-memory: it makes the proof fit on the
-        // GPU for large batches at high num_fields (deterministic OOM otherwise)
-        // and is byte-identical to a normal prove, so it can never weaken a
-        // result. The first attempt stays fast unless the operator forces it.
-        // Large batches go straight to --minimal-memory: without it a 1024-vote
-        // transition with its refreshes needs ~54 GB of host RAM and gets
-        // OOM-killed on a 64 GB machine, with it ~41 GB.
+        // Retries escalate to --minimal-memory: it lowers peak memory and
+        // proves the same statement, so it cannot weaken a result. The first
+        // attempt stays fast unless the operator forces it. Large batches go
+        // straight to --minimal-memory: without it a 1024-vote transition with
+        // its refreshes needs ~54 GB of host RAM and gets OOM-killed on a
+        // 64 GB machine, with it ~41 GB.
         let minimal_memory = config.zisk_minimal_memory
             || attempt > 1
             || task.proof_count >= config.zisk_minimal_memory_from;
@@ -343,8 +342,8 @@ async fn run_prove(config: &Config, task: &ProveTask, minimal_memory: bool) -> a
         config.proving_key_path.display().to_string(),
         "--output".to_string(),
         proof_output_path.display().to_string(),
-        // ZisK 1.3 dropped --emulator (the Rust emulator is the default now;
-        // --asm opts into the assembly one) and renamed --verify-proofs.
+        // The Rust emulator is the default (--asm would select the assembly
+        // one).
         "--gpu".to_string(),
         "--verify-proof".to_string(),
     ];
@@ -466,8 +465,8 @@ pub(crate) mod tests {
         }
     }
 
-    // Handle whose worker loop has already returned (its channel closed), as
-    // after the live incident; submits must be refused.
+    // Handle whose worker loop has already returned (its channel closed);
+    // submits must be refused.
     pub(crate) async fn stopped_handle(config: Config) -> ProverHandle {
         let jobs: Arc<DashMap<Uuid, Job>> = Arc::new(DashMap::new());
         let (tx, rx) = tokio::sync::mpsc::channel::<ProveTask>(1);

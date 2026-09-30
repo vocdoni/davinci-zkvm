@@ -2,7 +2,7 @@
 // davinci-zkvm HTTP service. All tests in this file require the service to be
 // reachable at apiURL (default: http://localhost:8080).
 //
-// Start the service with: docker compose up -d --build
+// Start the service with `make up`.
 package integration
 
 import (

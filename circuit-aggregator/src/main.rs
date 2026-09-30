@@ -16,9 +16,9 @@
 //      finalize: one results frame (see RESULTS FRAME below)
 //
 // RESULTS FRAME (finalize mode, all LE):
-//   ballot     32 x 32B   TE coords of the net Results accumulator (8 ciphertexts)
-//   results     8 x u64   claimed plaintexts of ballot
-//   cp proofs   8 x 160B  A1x A1y A2x A2y Z (32B each), one per ciphertext
+//   ballot     64 x 32B  TE coords of the net Results accumulator (16 ciphertexts)
+//   results    16 x u64   claimed plaintexts of ballot
+//   cp proofs  16 x 160B  A1x A1y A2x A2y Z (32B each), one per ciphertext
 //   n_levels    u64       SMT depth (siblings padded to this length)
 //   siblings    n x 32B   inclusion siblings for the Results leaf (key 0x04)
 //

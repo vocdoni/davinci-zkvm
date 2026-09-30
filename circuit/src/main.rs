@@ -46,12 +46,12 @@ use crate::hash::hash_enc_key;
 // Indices 28-39: DA blob binding
 //   [28..35] BlobsDigest       => SHA-256 over the ordered (commitment, y) pairs
 //                                 (8 × u32, LE). Zero when no KZG block is present.
-//   [36]     NBlobs            => number of blobs (0..=8)
+//   [36]     NBlobs            => number of blobs (0..=MAX_BLOBS)
 //   [37..39] reserved (zero)
 // Indices 40-45: diagnostic / auxiliary outputs
 // [40] batch_ok    => Groth16 batch verification result
 // [41] ecdsa_ok    => ECDSA signature batch result
-//   [42] (reserved)
+// [42] OccupiedBefore => ballot slots occupied before the batch
 // [43] nproofs     => number of Groth16 proofs verified
 // [44] n_public    => number of public inputs per proof
 // [45] log_n       => log₂ of the aggregation tree depth

@@ -1,263 +1,164 @@
 # davinci-zkvm Go SDK
 
-Go client for the [davinci-zkvm](https://github.com/vocdoni/davinci-zkvm)
-proving service. Typed structs for the request side, a one-call `Prove`
-for the happy path, and a helper that hands you a PLONK SNARK ready to
-feed to Ethereum. Built to slot directly into the
-[davinci-node](https://github.com/vocdoni/davinci-node) sequencer.
+Go client and protocol helpers for the [davinci-zkvm](../README.md) prover:
+build and submit vote batches, parse the guest's outputs, lay out the DA
+blobs, run a chained-mode election and verify proofs on a simulated chain.
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/vocdoni/davinci-zkvm/go-sdk.svg)](https://pkg.go.dev/github.com/vocdoni/davinci-zkvm/go-sdk)
+
+## Overview
+
+| Package | Content |
+|---|---|
+| `davinci` (module root) | HTTP client, request types, binary encoders, output parser, DA blob builder, slot keys and protocol limits. |
+| `chain` | Chained-mode orchestrator: process state tree, batch assembly, folds, finalize and the digest and vk-binding checks. |
+| `solidity` | Compiles the verifier and the reference settlement contract and runs them on go-ethereum's simulated backend. |
+| `vocdoni/...` | Parts of davinci-node's crypto (ElGamal, BabyJubJub, Poseidon, ballot types) copied here so the SDK does not depend on the full node. |
 
 ## Install
 
-```sh
+```bash
 go get github.com/vocdoni/davinci-zkvm/go-sdk
 ```
 
-## Quick start
+## Usage
+
+### Prove a batch
 
 ```go
-import (
-    "context"
-    davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
-)
+import davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 
 client := davinci.NewClient("http://localhost:8080")
 
-// Build a batch with all the auxiliary data a state transition needs.
 batch := &davinci.ProveBatch{
-    VerificationKey: vk,       // *VerificationKey — shared Groth16 BN254 VK
-    Voters:          voters,   // []VoterBallot — one per voter
-    State:           state,    // *StateTransitionData — SMT chain transitions
-    EncryptionKey:   encKey,   // *BjjPoint — ElGamal re-encryption key
-    ReencryptionSeed: seed,    // *big.Int — the batch seed the re-encryptions were derived from
-    KZG:             kzgData,  // *KZGRequest — DA blob commitments the guest binds via SHA-256(com||y||…)
+    VerificationKey:  vk,     // Groth16 VK of the ballot circuit
+    Voters:           voters, // []davinci.VoterBallot: proof, signature, census proof, re-encryption
+    State:            state,  // *davinci.StateTransitionData: SMT chains and ballot data
+    EncryptionKey:    encKey, // election key, big-endian hex coordinates
+    ReencryptionSeed: seed,   // fresh secret per batch
+    KZG:              kzg,    // blob commitments (per-batch mode)
 }
 
-// Block until the service returns a ready-to-verify PLONK SNARK.
 result, err := client.Prove(ctx, batch)
 if err != nil {
-    log.Fatal(err)
+    return err
 }
-fmt.Printf("snark ready (job %s, %s)\n", result.JobID, result.Elapsed)
-
-// Send these four arguments to ZiskVerifier.verifySnarkProof on Ethereum.
-snark := result.Snark
-_ = snark.ProgramVK        // bytes32 programVK
-_ = snark.RootCVadcopFinal // bytes32 rootCVadcopFinal
-_ = snark.PublicValues     // bytes publicValues (512 B on ZisK 1.3)
-_ = snark.ProofBytes       // bytes proofBytes   (768 B = uint256[24])
+// result.Snark: ProgramVK, RootCVadcopFinal, PublicValues, ProofBytes,
+// the arguments of ZiskVerifier.verifySnarkProof.
 ```
 
-## Core types
+`Prove` submits the batch, polls the job and downloads the proof. The
+lower-level calls are:
 
-### `ProveBatch`
-
-The thing you assemble for one state-transition proof — voters, the SMT
-chain transitions, the ElGamal re-encryption key, and the DA blob
-commitments the guest binds host-side:
-
-```go
-type ProveBatch struct {
-    VerificationKey     *VerificationKey    // Groth16 BN254 VK (or VerificationKeyJSON)
-    Voters              []VoterBallot       // Per-voter ballot proofs
-    State               *StateTransitionData // SMT state transitions
-    EncryptionKey       *BjjPoint           // ElGamal re-encryption public key
-    ReencryptionSeed    *big.Int            // Batch-wide seed; guest derives every per-field scalar from it
-    KZG                 *KZGRequest         // DA blob commitments (guest recomputes cells, y, digest)
-}
-```
-
-### `KZGRequest`
-
-The DA-blob binding the host hands to the prover. The guest rebuilds
-byte-identical blob cells from the verified vote-id / slot-update /
-accumulator state, computes each `y_b = P_b(z_b)` at
-`z_b = SHA-256(processID_be32 || rootBefore_be32 || commitment_b) mod
-r_bls`, and folds them into a public digest
-`SHA-256(com_0 || y_0 || com_1 || y_1 || …)`. Only the raw 48-byte
-commitments travel over the wire — no blobs, no `y` hints, no openings:
-
-```go
-type KZGRequest struct {
-    ProcessID      string   // 32-byte big-endian hex
-    RootHashBefore string   // 32-byte big-endian hex
-    Commitments    []string // 48-byte hex per blob (up to MaxBlobs)
-}
-```
-
-`BuildTransitionBlobs(nf, pid, rootBefore, voteIDs, updates, accumulator)`
-produces the cells, commitments, evaluation points and openings; call
-`.Request(pid, rootBefore)` to strip everything but the commitments for
-the wire, and keep the returned `*TransitionBlobs` for the on-chain
-point-evaluation submission.
-
-### `VoterBallot`
-
-One voter's ballot with all per-voter protocol data:
-
-```go
-type VoterBallot struct {
-    Proof        *Groth16Proof       // Typed Groth16 proof (or ProofJSON)
-    PublicInputs *PublicInput        // [address, voteID, inputsHash]
-    Signature    *EcdsaSignature     // secp256k1 ECDSA signature
-    Census       CensusProof         // Lean-IMT Poseidon (Merkle census)
-    Csp          *CspProof           // CSP ECDSA attestation (census origin 4)
-    Reencryption *VoterReencryption  // ElGamal re-encryption data
-}
-```
-
-### `StateTransitionData`
-
-Full state-transition data with typed SMT entries:
-
-```go
-type StateTransitionData struct {
-    ProcessID       string      // 31-byte process identifier (hex)
-    OldStateRoot    string      // 256-bit SHA-256 root before batch (hex)
-    NewStateRoot    string      // 256-bit SHA-256 root after batch (hex)
-    VotersCount     int         // Non-dummy votes
-    OverwrittenCount int        // Overwrite (update) votes
-    CensusOrigin    CensusOrigin // 1-3 = Merkle, 4 = CSP
-    CensusRoot      string      // 256-bit census root (hex)
-    VoteIDSmt       []SmtEntry  // VoteID chain SMT transitions
-    BallotSmt       []SmtEntry  // Ballot chain SMT transitions
-    ProcessSmt      []SmtEntry  // Process config read-proofs
-    ResultsSmt      *SmtEntry   // Net Results accumulator (key 0x04)
-    BallotProofs    *BallotProofData // Encrypted ballot data for result verification
-}
-```
-
-### `CensusOrigin`
-
-Census authentication mode matching davinci-node's constants:
-
-| Value | Constant | Description |
-|-------|----------|-------------|
-| 1-3 | `CensusOriginMerkle` | Lean-IMT Poseidon inclusion proof |
-| 4 | `CensusOriginCSP` | ECDSA CSP attestation |
-
-### `PublicOutputs`
-
-Parsed circuit outputs (ABI-compatible with davinci-node's `StateTransitionCircuit`):
-
-```go
-type PublicOutputs struct {
-    OK                    bool
-    FailMask              uint32
-    RootHashBefore        *big.Int
-    RootHashAfter         *big.Int
-    VotersCount           int
-    OverwrittenVotesCount int
-    CensusRoot            *big.Int
-    BlobsDigest           [32]byte // SHA-256(com_0 || y_0 || com_1 || y_1 || …)
-    NBlobs                uint32   // number of DA blobs the guest bound
-}
-```
-
-## Client API
-
-| Method | Description |
+| Method | Endpoint |
 |---|---|
-| `NewClient(url)` | Create a client pointing to the service. |
-| `client.Prove(ctx, batch)` | Submit a batch, wait, and return a ready-to-verify [`*PlonkSnark`](#plonksnark). |
-| `client.Health()` | Service health check. |
-| `client.SubmitProve(req)` | Low-level: submit a `ProveRequest` and get a job ID back. |
-| `client.GetJob(id)` | Low-level: snapshot of a job's status. |
-| `client.WaitForJob(id, timeout)` | Low-level: block until the job is done or failed. |
-| `client.FetchSnark(id)` | Download the Solidity-ready PLONK payload for a completed job. |
-| `client.FetchInputs(id)` | Download the raw `input.bin` for audit or re-proving. |
-| `client.SubmitFold(req)` | Chained mode: fold completed batch jobs into a chain proof. |
-| `client.SubmitFinalize(req)` | Chained mode: results payload → final PLONK. |
-| `client.FetchStarkInfo(id)` | Chained mode: program_vk + publics of a STARK job. |
+| `SubmitProve(req)` | `POST /prove`, returns the job ID. |
+| `GetJob(id)`, `WaitForJob(id, timeout)` | `GET /jobs/{id}`. |
+| `FetchSnark(id)` | `GET /jobs/{id}/snark` as a `*PlonkSnark`. |
+| `FetchPublics(id)` | `GET /jobs/{id}/publics`, 64 `u32` registers. |
+| `FetchInputs(id)` | `GET /jobs/{id}/inputs` (only with `DAVINCI_KEEP_INPUTS=1`). |
+| `SubmitFold(req)`, `SubmitFinalize(req)` | `POST /fold`, `POST /finalize`. |
+| `FetchStarkInfo(id)` | `GET /jobs/{id}/stark`: `program_vk` and `zisk_vk`. |
+| `FetchStarkRaw(id)`, `ImportStark(blob)` | Move a batch STARK to another prover (`/jobs/{id}/snark/raw`, `POST /jobs/import`). |
+| `FetchStarkProof(id)` | `GET /jobs/{id}/proof/stark`. |
+| `Health()` | `GET /health`. |
 
-### `PlonkSnark`
+`NewProveRequestBuilder` builds a `ProveRequest` step by step when you do not
+use `ProveBatch`.
 
-`Client.FetchSnark` returns a typed payload ready to pass to
-[`ZiskVerifier.verifySnarkProof`](../solidity/ZiskVerifier.sol) on Ethereum:
+### Check the result
+
+A finished job can still be a rejected batch. Parse the registers and check
+`OK` before settling:
 
 ```go
-type PlonkSnark struct {
-    ProgramVK        [32]byte // bytes32 programVK
-    RootCVadcopFinal [32]byte // bytes32 rootCVadcopFinal
-    PublicValues     []byte   // bytes publicValues   (512 B on ZisK 1.3)
-    ProofBytes       []byte   // bytes proofBytes     (768 B = uint256[24])
+raw, err := client.FetchPublics(result.JobID)
+if err != nil {
+    return err
+}
+regs := make([]uint32, len(raw)/4)
+for i := range regs {
+    regs[i] = binary.LittleEndian.Uint32(raw[4*i:])
+}
+out, err := davinci.ParseOutputs(regs)
+if err != nil {
+    return err
+}
+if !out.OK {
+    return fmt.Errorf("batch rejected: %s", out.FailString())
 }
 ```
 
-On-chain, the verifier SHA-256s `programVK || publicValues ||
-rootCVadcopFinal`, reduces the digest modulo the BN254 scalar field, and
-hands the result to the bare PLONK verifier together with
-`abi.decode(proofBytes, (uint256[24]))`.
+### Data-availability blobs
 
-### Off-chain verification
+The guest lays out the blob contents itself; the sequencer must publish the
+same bytes. `BuildTransitionBlobs` builds the blobs, KZG commitments,
+evaluation points, openings and the digest the guest publishes, and
+`Request` strips them down to what `/prove` needs:
 
-If you want to verify in a test instead of on a real chain,
-[`go-sdk/solidity`](./solidity/solidity.go) has a one-call helper:
+```go
+blobs, err := davinci.BuildTransitionBlobs(numFields, pid, rootBefore, voteIDs, updates, accumulator)
+batch.KZG = blobs.Request(pidHex, rootBeforeHex)
+```
+
+Ethereum accepts at most six blobs per transaction; `MaxSingleTxBatch(nf)`
+is the largest batch that fits.
+
+### Verify on a simulated chain
 
 ```go
 import davinciSolidity "github.com/vocdoni/davinci-zkvm/go-sdk/solidity"
 
-snark, _ := client.FetchSnark(jobID)
-err := davinciSolidity.VerifyOnSimulated("./solidity", snark)
+err := davinciSolidity.VerifyOnSimulated("./solidity", result.Snark)
+
+s, err := davinciSolidity.DeploySettlement("./solidity", snark.ProgramVK, snark.RootCVadcopFinal)
+err = s.CreateProcess(pid, genesisRoot, censusRoot)
+gas, err := s.SubmitTransition(pid, snark, blobs) // sends a real blob transaction
 ```
 
-It compiles the verifier contracts with local `solc` (or `docker run
-ethereum/solc:stable`) and runs them on
-`go-ethereum/ethclient/simulated.NewBackend`.
+Both compile the contracts in the repository's `solidity/` directory with a
+local `solc`, or with `docker run ethereum/solc:0.8.28` when none is
+installed.
 
-## Chained mode: `go-sdk/chain`
-
-For single-sequencer deployments the `chain` package drives the whole
-election to one final PLONK: batches are proved STARK-only, recursively
-folded server-side, and finalize wraps the last fold (plus the decrypted
-results with Chaum-Pedersen proofs) into a single SNARK.
+### Chained mode
 
 ```go
 import "github.com/vocdoni/davinci-zkvm/go-sdk/chain"
 
 seq, err := chain.NewSequencer(client, chain.Config{
-    ProcessID:    processID,  // *big.Int
-    BallotMode:   ballotMode, // *big.Int
-    EncKey:       encKey,     // *bjj.BJJ ElGamal pubkey from the DKG
-    CensusOrigin: 1,
-    CensusRoot:   censusRoot, // *big.Int
+    ProcessID:    processID,
+    BallotMode:   ballotMode,
+    EncKey:       encKey,       // election public key
+    CensusOrigin: 1,            // 1 = Merkle census, 4 = CSP
+    CensusRoot:   censusRoot,
+    BallotVKHash: ballotVKHash, // davinci.BallotVKLeaf(vkJSON)
 }, 4 /* fold every 4 batches */, 30*time.Minute)
 
-// For each batch of incoming votes:
-//  - votes: []chain.Vote{Slot: davinci.SlotKey(address), VoteID: ..., Ballot: ...}
-//    (Slot is davinci.CSPSlotKey(index) for a CSP census; the guest derives
-//    the same key from the census leaf's address and rejects any other)
-//  - req:   *ProveRequest with the voters' ballot proofs + census proofs
-//    (the sequencer fills in State, Reencryption and Output itself)
+// For every batch: votes carry the slot, vote ID and ballot of each voter,
+// req the ballot proofs, signatures and census proofs. The sequencer fills
+// in the state transition and the re-encryption and proves a STARK.
 jobID, err := seq.ProveBatch(votes, req)
 
-// When the election ends and the DKG releases the private key:
+// When voting ends and the election key is available:
 final, err := seq.Finalize(encPrivKey)
-_ = final.Snark   // the single PLONK for the whole election
-_ = final.Results // plaintext results, also committed in the proof publics
+// final.Snark is the single on-chain proof, final.Results the tally.
 ```
 
-The `Sequencer` owns the process state tree (genesis matches the
-in-circuit genesis), the fold cadence, and the finalize checks: digest
-continuity, results match, and the external vk binding
-(`digest.fold_vk == snark.ProgramVK`, `digest.batch_vk` == the known
-vote-batch vk). See the repository README for the protocol design and
-the raw HTTP flow.
+The sequencer keeps the process state tree in memory; `State().Snapshot()`
+and `chain.RestoreState` persist it across restarts. `Finalize` checks the
+digest against the local state and the vk binding against the pinned
+`chain.CircuitRelease`. An independent verifier runs the same checks with
+`chain.ParseDigest` and `chain.VerifyDigest`.
 
-Every batch also carries a silent-refresh pass: the sequencer
-re-randomizes a target number of occupied ballot slots it did not write,
-so an observer cannot tell an overwrite from routine re-encryption
-traffic. Slots are picked with `crypto/rand` and driven through the same
-scalar chain as the batch's own votes; the seed and the selection stay
-in memory only (they are never snapshotted or logged). The guest
-requires at least `davinci.RefreshTarget(voters, overwrites,
-occupiedBefore)` refresh entries per batch and echoes `OccupiedBefore`
-as a public output — the fold guest checks it against its running
-voters − overwrites.
+## Testing
 
-### Environment variables
+```bash
+go test $(go list ./... | grep -v /tests/integration)
+```
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DAVINCI_API_URL` | `http://localhost:8080` | Service base URL |
-| `DAVINCI_SKIP_PROVING` | `""` | Set to `1` to skip proving tests |
-| `DAVINCI_PROOF_TIMEOUT` | `5m` | Per-proof timeout |
+The emulator and integration suites under `tests/` are described in
+[docs/testing.md](../docs/testing.md).
+
+## License
+
+GNU Affero General Public License v3.0 or later. See [LICENSE](../LICENSE).

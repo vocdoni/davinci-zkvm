@@ -58,19 +58,19 @@ type VoterReencryption struct {
 // ProveBatch is a complete batch of voter ballots with all auxiliary data
 // needed to produce a single DAVINCI ZisK proof.
 //
-// Usage from davinci-node's sequencer:
+// Usage:
 //
 //	batch := &davinci.ProveBatch{
-//	    VerificationKey: vk,
-//	    Voters:          voters,
-//	    State:           stateData,
-//	    EncryptionKey:   &davinci.BjjPoint{X: encKeyXHex, Y: encKeyYHex},
-//	    KZG:             kzgReq,
+//	    VerificationKey:  vk,
+//	    Voters:           voters,
+//	    State:            stateData,
+//	    EncryptionKey:    &davinci.BjjPoint{X: encKeyXHex, Y: encKeyYHex},
+//	    ReencryptionSeed: seed,
+//	    KZG:              kzgReq,
 //	}
 //	result, err := client.Prove(ctx, batch)
 //	if err != nil { ... }
-//	// result.Proof: raw ZisK proof bytes
-//	// result.Outputs: parsed PublicOutputs (roots, counts, etc.)
+//	// result.Snark: the four ZiskVerifier.verifySnarkProof arguments
 type ProveBatch struct {
 	// VerificationKey is the Groth16 BN254 verification key shared by all
 	// ballot proofs. Mutually exclusive with VerificationKeyJSON.
@@ -222,7 +222,7 @@ func (b *ProveBatch) toRequest() (*ProveRequest, error) {
 	}
 
 	// CSP data: only when at least one voter uses CSP. The CSP public key is
-	// recovered inside the circuit, so it is no longer carried in the payload.
+	// recovered inside the guest, so it is not part of the payload.
 	if hasCsp {
 		req.CspData = &CspData{Proofs: cspProofs}
 	}

@@ -3,7 +3,7 @@
 // signs each voter with the CSP key, and submits 4 chained state transitions
 // (with overwrites in the last batch) to the running davinci-zkvm service.
 // Prerequisites:
-//   - docker compose up -d --build (starts davinci-zkvm service)
+//   - a running davinci-zkvm service (`make up`)
 //   - DAVINCI_API_URL (default: http://localhost:8080)
 package integration
 

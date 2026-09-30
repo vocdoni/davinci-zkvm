@@ -5,12 +5,12 @@
 //! that inserting / updating / deleting the key transitions the tree correctly.
 //!
 //! **Hash compatibility**: Arbo `HashFunctionSha256`
-// ! - Leaf hash  : `SHA256(key_le32 || value_le32 || 0x01)` => 65 bytes
-// ! - Node hash  : `SHA256(left_le32 || right_le32)`         => 64 bytes
+//! - Leaf hash  : `SHA256(key_le8 || value_le32 || 0x01)`  => 41 bytes
+//! - Node hash  : `SHA256(left_le32 || right_le32)`         => 64 bytes
 //! All byte arrays are **little-endian** (arbo's `BigIntToBytes` = LE).
 //!
 //! **Sibling ordering**: index 0 = root level, index n-1 = leaf level (same as arbo).
-// ! **Path bits**: LSB-first => `bit[level] = key_u256_le[level/64] >> (level%64) & 1`.
+//! **Path bits**: LSB-first => `bit[level] = key_u256_le[level/64] >> (level%64) & 1`.
 
 use crate::hash::sha256_once;
 use crate::types::{FrRaw, SmtTransition, StateBlock, ZERO_FR,
@@ -183,7 +183,7 @@ fn processor_level(
     // new_proof_hash = node_hash(switcher(left_val, right_val)) is only consumed
     // when stTop|stBot|stNew1.  On the zero-padded levels below the insertion
     // point (na states) it is discarded, so compute it only inside the guard and
-    // skip the SHA-256 otherwise.  With nLevels=256 and real depth ~log2(N), this
+    // skip the SHA-256 otherwise.  With 64 levels and real depth ~log2(N), this
     // elides the large majority of node hashes per transition.
     let new_root = if st_top == 1 || st_bot == 1 || st_new1 == 1 {
         // new_root left arg = newChild*(stTop + stBot) + new1leaf*stNew1
@@ -726,8 +726,8 @@ fn verify_refresh_chain(state: &StateBlock, fail_mask: &mut u32) -> bool {
         *fail_mask |= FAIL_REFRESH;
         ok = false;
     }
-    // O(n*m) compare — n and m are each ≤ MAX_BATCH_SIZE = 128 and
-    // MAX_REFRESH = 256, so worst case is 32k limb compares. Cheap.
+    // O(n*m) compare, bounded by MAX_BATCH_SIZE × MAX_REFRESH limb compares
+    // (about 2M in the worst case).
     for r in &state.refresh_chain {
         for b in &state.ballot_chain {
             if r.new_key == b.new_key {
@@ -795,7 +795,7 @@ mod inclusion_tests {
 
     #[test]
     fn accepts_with_trailing_zero_padding() {
-        // Real process proofs pad siblings to the full tree depth (256).
+        // Zero siblings padded past the leaf level do not change the proof.
         let (root, key_a, val_a, _kb, _vb, _a, b) = two_leaf_tree();
         assert!(verify_inclusion(&root, &key_a, &val_a, &padded(b, 256)));
     }

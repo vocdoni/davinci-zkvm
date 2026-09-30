@@ -7,10 +7,6 @@ package solidity
 // verification via the point-evaluation precompile — is exercised end to
 // end on go-ethereum's simulated backend, including a real EIP-4844 blob
 // transaction so the contract's `blobhash(i)` returns real values.
-//
-// The `TransitionBlobs` struct in `settlement.go` is a local stand-in for
-// the upstream `davinci.TransitionBlobs` the SDK is about to publish; when
-// that type lands, callers should adapt by field copy.
 
 import (
 	"context"
@@ -388,12 +384,9 @@ func TestSettlement(t *testing.T) {
 			t.Error("bad nBlobs vs commitments.length: expected revert")
 		}
 
-		// missing blob: send tx with no sidecar entries. We fake this by
-		// building blobs with 1 entry but declaring nBlobs=1 while providing
-		// zero commitments — actually that fails BlobCountMismatch. To hit
-		// MissingBlob (BLOBHASH returns zero), we would need to disagree
-		// between the tx BlobHashes and the guest publics; the pre-flight
-		// path exercises this via CallContract when BlobHashes is empty.
+		// missing blob: BLOBHASH returns zero when the transaction carries no
+		// blob hashes. submitWithoutBlobHashes runs the pre-flight call with
+		// an empty BlobHashes list to hit MissingBlob.
 		emptyBlobs := &davinci.TransitionBlobs{
 			Blobs:       []kzg4844.Blob{blobs.Blobs[0]},
 			Commitments: []kzg4844.Commitment{blobs.Commitments[0]},

@@ -2,9 +2,9 @@
 //!
 //! Implements the homomorphic ballot tally check from the DAVINCI protocol,
 //! a single net accumulator:
-//!   NewResults = OldResults + Σ(all voter ballots) − Σ(overwritten ballots)
+//!   NewResults = OldResults + Σ(voter ballots) − Σ(overwritten) + refresh delta
 //!
-//! Each ballot is 32 BN254 Fr field elements (8 ElGamal ciphertexts × 4 TE
+//! Each ballot is 64 BN254 Fr field elements (16 ElGamal ciphertexts × 4 TE
 //! coordinates). Both operations are homomorphic: BabyJubJub point addition
 //! and subtraction (group inverse via `bjj_neg`) per ciphertext component,
 //! matching davinci-node's `Ballot.Add` / `Ballot.Neg`, so the accumulator
@@ -454,8 +454,8 @@ pub fn verify_results(
 
     // 4.5.5 / 4.5.6 — refresh leaf hash checks. Each refresh entry is an
     // UPDATE with old_key == new_key; the ballot payload bytes change from
-    // refreshed_old to refreshed_new, but the plaintext plaintext-of-plaintext
-    // does not (the reencryption verify has already tied `new = old + delta`).
+    // refreshed_old to refreshed_new, but the plaintext does not (the
+    // re-encryption check has already tied `new = old + delta`).
     for j in 0..state.refreshed_ballots.len() {
         let old_hash = ballot_leaf_hash(&state.refreshed_ballots[j]);
         if old_hash != state.refresh_chain[j].old_value {

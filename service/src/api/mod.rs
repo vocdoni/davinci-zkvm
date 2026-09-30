@@ -26,8 +26,8 @@ pub struct AppState {
 }
 
 pub fn router(state: AppState) -> Router {
-    // 512 MB body limit to accommodate large batch prove requests
-    // (256 ballot proofs + SMT siblings can exceed the 2 MB axum default).
+    // 512 MB body limit: a full batch with its SMT siblings, refreshes and
+    // ciphertexts is far above the 2 MB axum default.
     const MAX_BODY: usize = 512 * 1024 * 1024;
     Router::new()
         .route("/prove", post(prove::submit_prove))

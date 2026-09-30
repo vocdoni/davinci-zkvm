@@ -38,7 +38,7 @@ const zeroHex64 = "0000000000000000000000000000000000000000000000000000000000000
 // EcdsaSignature holds the secp256k1 ECDSA signature components needed by the
 // ZisK circuit. This matches the Rust EcdsaSig struct in input-gen.
 // R, S are signature components. PubKeyX, PubKeyY are the uncompressed public
-// key coordinates (kept for debugging; not consumed by the circuit anymore).
+// key coordinates (kept for debugging; the guest does not read them).
 // Recid is the y-coordinate parity bit (0 or 1) for `ecdsa_recover_secp256k1`.
 // VoteID is the vote identifier. Address is the Ethereum address as a decimal
 // uint160 string.
@@ -192,7 +192,7 @@ type ArboTransition struct {
 // SmtEntryFromArboTransition converts a native ArboTransition into the
 // SmtEntry format expected by the API.
 // nLevels specifies the Merkle tree depth; siblings are zero-padded to
-// this length. The hex encoding uses big-endian format (arbo convention).
+// this length. Values are written as 32-byte big-endian hex.
 func SmtEntryFromArboTransition(t *ArboTransition, nLevels int) SmtEntry {
 	sibs := make([]string, nLevels)
 	for i := 0; i < nLevels; i++ {

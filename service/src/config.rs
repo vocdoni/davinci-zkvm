@@ -39,10 +39,9 @@ pub struct Config {
     pub zisk_mpi_threads: usize,
     /// MPI bind policy passed to `mpirun --bind-to` (default `none`).
     pub zisk_mpi_bind_to: String,
-    /// Force `cargo-zisk prove --minimal-memory` from the first attempt
-    /// (default false). The worker also auto-enables it on any retry, so this
-    /// is only needed to skip the doomed first attempt for workloads known to
-    /// exceed GPU memory (e.g. batch 256 at high `num_fields`).
+    /// Force `cargo-zisk prove --minimal-memory` from the first attempt for
+    /// every job (default false). The worker already uses it on retries and
+    /// for batches of `zisk_minimal_memory_from` proofs or more.
     pub zisk_minimal_memory: bool,
     /// Batches with at least this many ballot proofs use `--minimal-memory`
     /// from the first attempt (default 512): it caps the prover's host RAM,

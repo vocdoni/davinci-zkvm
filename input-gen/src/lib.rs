@@ -595,8 +595,8 @@ fn write_u64_slice(buf: &mut Vec<u8>, words: &[u64]) {
 }
 
 /// Generate ZisK binary input from a snarkjs VK and an array of proofs + public inputs.
-/// The `proofs` and `public_inputs` arrays must have the same length, which must be a
-/// between 1 and MAX_BATCH_SIZE.
+/// The `proofs` and `public_inputs` arrays must have the same length, between 1 and
+/// MAX_BATCH_SIZE.
 /// Returns raw bytes suitable for writing to disk and passing to `cargo-zisk prove --input`.
 pub fn generate_input(
     vk: &SnarkJsVk,
@@ -684,7 +684,7 @@ pub fn generate_input(
         }
     }
     // ECDSA signatures (one entry per proof): r[4] || s[4] || recid(u64 LE)
-    // The public key is no longer shipped; the circuit recovers it from
+    // The public key is not shipped; the guest recovers it from
     // (r, s, z, recid) via `ecdsa_recover_secp256k1`.
     for sig in sigs {
         write_u64_slice(&mut buf, &hex32_to_u64x4(&sig.signature_r)?);
@@ -1006,7 +1006,7 @@ pub struct CspEntryData {
     pub index: u64,
 }
 
-/// CSP census block data. The CSP public key is no longer carried: the circuit
+/// CSP census block data. The CSP public key is not carried: the guest
 /// recovers it per-entry via `ecdsa_recover_secp256k1` and consistency-checks
 /// across entries.
 #[derive(Debug, Clone)]

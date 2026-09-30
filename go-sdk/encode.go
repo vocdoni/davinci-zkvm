@@ -352,7 +352,7 @@ func EncodeCensusBlock(proofs []CensusProof) ([]byte, error) {
 //	per voter: original    16 × (c1x, c1y, c2x, c2y)
 //	           reencrypted 16 × (c1x, c1y, c2x, c2y)
 //
-// The per-voter k word is gone: every re-encryption scalar is derived in
+// There is no per-voter scalar: every re-encryption scalar is derived in
 // the guest from `seed` and the state root before the batch.
 func EncodeReencBlock(r *ReencryptionData) ([]byte, error) {
 	if r == nil || len(r.Entries) == 0 {
@@ -467,7 +467,7 @@ var cspMagic = [8]byte{'C', 'S', 'P', 'B', 'L', 'K', '!', '!'}
 
 // EncodeCspBlock serializes CSP ECDSA census data into the CSPBLK binary block.
 //
-// The CSP public key is no longer transmitted: the circuit recovers it from
+// The CSP public key is not transmitted: the guest recovers it from
 // each (r, s, recid, z) tuple via `ecdsa_recover_secp256k1` and consistency-
 // checks that all entries recover to the same key.
 //

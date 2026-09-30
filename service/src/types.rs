@@ -16,23 +16,23 @@ where
 
 /// One SMT state-transition entry in JSON format.
 ///
-/// All 32-byte field values are hex-encoded strings (with or without "0x" prefix).
+/// Every 32-byte field is arbo little-endian hex (with or without "0x" prefix).
 /// `siblings` must all be the same length across all entries in a request.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SmtEntryJson {
-    /// 32-byte big-endian hex: old tree root
+    /// Tree root before the transition.
     pub old_root: String,
-    /// 32-byte big-endian hex: new tree root after transition
+    /// Tree root after the transition.
     pub new_root: String,
-    /// 32-byte big-endian hex: key of the old leaf (zero if is_old0=1)
+    /// Key of the old leaf (zero if is_old0=1).
     pub old_key: String,
-    /// 32-byte big-endian hex: value of the old leaf (zero if is_old0=1)
+    /// Value of the old leaf (zero if is_old0=1).
     pub old_value: String,
     /// 1 when old leaf slot was empty (pure insert), 0 otherwise
     pub is_old0: u8,
-    /// 32-byte big-endian hex: new key being inserted/updated
+    /// Key being inserted or updated.
     pub new_key: String,
-    /// 32-byte big-endian hex: new value
+    /// New value.
     pub new_value: String,
     /// 1 for insert (fnc0=1, fnc1=0) or delete (fnc0=1, fnc1=1)
     pub fnc0: u8,
@@ -68,7 +68,7 @@ pub struct StateTransitionJson {
 }
 
 /// Result accumulator ballot data: old results plus per-voter ballots
-/// (32 big-endian hex Fr elements each) for the homomorphic tally check.
+/// (64 big-endian hex Fr elements each) for the homomorphic tally check.
 #[derive(Debug, Deserialize, Clone)]
 pub struct BallotProofsJson {
     pub old_results: Vec<String>,
@@ -160,7 +160,7 @@ pub struct CspProofJson {
 }
 
 /// CSP ECDSA census data for the full batch in JSON format. The CSP public key
-/// is no longer carried in the payload; the circuit recovers it per-entry via
+/// is not part of the payload; the guest recovers it per-entry via
 /// `ecdsa_recover_secp256k1`.
 #[derive(Debug, Deserialize, Clone)]
 pub struct CspDataJson {

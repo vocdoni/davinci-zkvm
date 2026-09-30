@@ -20,8 +20,8 @@ func testEncKey(t *testing.T) *bjjgnark.BJJ {
 	return pub.(*bjjgnark.BJJ)
 }
 
-// testBallot encrypts eight small values under encKey, producing a valid
-// ballot ready for state application.
+// testBallot encrypts one small value per ballot field under encKey,
+// producing a valid ballot ready for state application.
 func testBallot(t *testing.T, encKey *bjjgnark.BJJ, seed int64) *elgamal.Ballot {
 	t.Helper()
 	var msg [params.FieldsPerBallot]*big.Int

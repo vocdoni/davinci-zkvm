@@ -435,11 +435,10 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 // accumulator plaintext.
 const maxTallyMsg = uint64(1) << 20
 
-// ResultsPayload decrypts both accumulators with the election private key
-// and assembles the finalize payload: TE coordinates, plaintexts,
-// Chaum-Pedersen proofs (8 add then 8 sub) and the SMT inclusion siblings
-// of the two Results leaves. Returns the payload and the final tally
-// add[i] - sub[i].
+// ResultsPayload decrypts the net results accumulator with the election
+// private key and assembles the finalize payload: TE coordinates,
+// plaintexts, one Chaum-Pedersen proof per ciphertext and the inclusion
+// siblings of the Results leaf. Returns the payload and the tally.
 func (s *State) ResultsPayload(privKey *big.Int) (*davinci.ResultsPayload, []uint64, error) {
 	le32 := func(v *big.Int) string {
 		return hex.EncodeToString(arbo.BigIntToBytes(32, v))

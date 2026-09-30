@@ -30,9 +30,9 @@
 //! complete twisted-Edwards law, so doubling is `add(P, P)`).  Points are kept in
 //! affine coordinates throughout: no projective Z, no `to_affine` inversion, and
 //! re-encryption equality is a direct coordinate compare against the precompile's
-//! canonical output.  Re-encryption scalar muls use 4-bit fixed-base window
-//! tables (built once per batch for B8 and the election public key), cutting each
-//! 256-bit mul to at most 63 precompile adds with no doublings.  The per-field
+//! canonical output.  Re-encryption scalar muls use fixed-base window tables:
+//! a compile-time 8-bit table for B8 and a 4- or 8-bit table for the election
+//! key built once per batch, so a mul is window adds with no doublings.  The per-field
 //! offset scalar is chained with SHA-256 (`sha256f` precompile), and the curve
 //! membership check still uses the `arith256_mod`-backed `bn254_fr` field ops.
 
@@ -193,7 +193,7 @@ struct BjjFixedBase {
 
 impl BjjFixedBase {
     fn new(x: &FrRaw, y: &FrRaw, expected_muls: usize) -> Self {
-        // ponytail: only 4 and 8 — both divide 64, so windows never straddle limbs.
+        // Only 4 and 8: both divide 64, so windows never straddle limbs.
         let bits: u32 = if expected_muls >= 256 { 8 } else { 4 };
         let vmax = (1usize << bits) - 1;
         let nwin = 256 / bits as usize;
@@ -406,7 +406,7 @@ fn refresh_one(
 /// - `refresh_delta`: per-field sum of the deltas added across all refresh
 ///   entries, in the flat 64-Fr `BallotData` layout. Fed into
 ///   `results::verify_results` so the accumulator picks up the refresh work
-///   (without this the accumulator identifies the overwrite set — §5.1).
+///   (without it the accumulator reveals the overwrite set, CIRCUIT.md §4.5).
 ///
 /// The chain is started ONCE per batch from `(reenc_seed, old_root)` and
 /// threaded through every REENCBLK entry, then continues through every refresh
@@ -850,7 +850,7 @@ mod tests {
     }
 
     /// Any multiple of B8 sits in the prime-order subgroup, so a batch keyed on
-    /// pk = k*B8 must pass the new prime-order check (feed it one all-identity
+    /// pk = k*B8 must pass the prime-order check (feed it one all-identity
     /// entry so the shortcut doesn't skip the check).
     #[test]
     fn reenc_accepts_b8_multiple_pk() {

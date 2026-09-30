@@ -4,9 +4,9 @@
 //! requests, runs ZisK underneath, and returns an on-chain-verifiable PLONK
 //! SNARK ready to feed to the `ZiskVerifier.verifySnarkProof` contract.
 //!
-//! See the package docs for the full HTTP surface; the short version is:
-//! `POST /prove` to queue a job, `GET /jobs/:id` to poll, `GET
-//! /jobs/:id/snark` to download the Solidity-ready payload.
+//! `docs/api.md` documents the HTTP API; the short version is: `POST /prove`
+//! to queue a job, `GET /jobs/:id` to poll, `GET /jobs/:id/snark` to download
+//! the Solidity-ready payload.
 
 mod api;
 mod config;

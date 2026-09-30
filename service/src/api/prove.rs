@@ -1,4 +1,4 @@
-// ! POST /prove => submit a batch of Groth16 proofs for ZisK proving
+//! POST /prove => submit a vote batch for ZisK proving.
 
 use crate::api::AppState;
 use crate::types::{JobKind, ProveRequest, SmtEntryJson};
@@ -165,9 +165,9 @@ pub async fn submit_prove(
             bytes.extend(write_census_block(&proofs)?);
         }
 
-        // Append CSP ECDSA census block.  The CSP public key is no longer
-        // shipped in the request; the circuit recovers it from each entry's
-        // signature via `ecdsa_recover_secp256k1`.
+        // Append CSP ECDSA census block. The CSP public key is not part of
+        // the request; the guest recovers it from each entry's signature via
+        // `ecdsa_recover_secp256k1`.
         if let Some(csp) = csp_json {
             let entries = csp
                 .proofs

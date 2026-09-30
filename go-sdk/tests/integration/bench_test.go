@@ -6,7 +6,7 @@ package integration
 //  1. Generates ballot proofs (CPU; not counted in the benchmark).
 //  2. Submits a state-transition prove request to the davinci-zkvm service.
 //  3. Waits for the service to return a done job; records proof_ms.
-//  4. Fetches the SNARK payload via the new `/jobs/:id/snark` endpoint.
+//  4. Fetches the SNARK payload via `/jobs/:id/snark`.
 //  5. Verifies the PLONK SNARK with the bundled Solidity verifier on a
 //     `go-ethereum/ethclient/simulated.NewBackend` — same code path that
 //     would run on Ethereum.
@@ -19,8 +19,7 @@ package integration
 //
 //	DAVINCI_PROOF_TIMEOUT=30m go test -run TestPlonkBenchmark -v -timeout 60m
 //
-// Requires the davinci-zkvm service to be running with PLONK enabled
-// (`ENABLE_PLONK=1 docker compose --profile cuda up -d`).
+// Requires a running davinci-zkvm service (`make up`).
 
 import (
 	"encoding/binary"

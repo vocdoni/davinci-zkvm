@@ -103,7 +103,7 @@ func accumSub(a, b accumBallot) accumBallot {
 }
 
 // accumLeafHash computes the SHA-256 leaf value of an accumulator:
-// 32 coordinates as 32-byte big-endian words.
+// BallotFields coordinates as 32-byte big-endian words.
 func accumLeafHash(acc accumBallot) *big.Int {
 	h := sha256.New()
 	buf := make([]byte, 32)

@@ -56,8 +56,8 @@ type BallotResult struct {
 	// VoteID is the unique 64-bit vote identifier computed by the ballot circuit.
 	// It is used as the arbo SMT key for the voteID insertion.
 	VoteID uint64
-	// AddressLo16 is the lower 16 bits of the voter's address, used in the
-	// ballot SMT key: key = BallotMin + (censusIdx << 16) + addrLo16.
+	// AddressLo16 is the lower 16 bits of the voter's address, kept in the
+	// cached ballot records. The ballot slot is davinci.SlotKey(address).
 	AddressLo16 uint64
 	// RawBallot stores the ciphertext data for re-encryption and tally.
 	RawBallot *ballotRaw

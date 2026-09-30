@@ -1,7 +1,7 @@
 // Package integration contains two kinds of tests:
-// (1) API service tests (service_test.go, e2e_test.go, smt_service_test.go,
-// integration_test.go) that submit jobs to a running davinci-zkvm service.
-// These require: docker compose up -d --build (starts the davinci-zkvm service).
+// (1) API service tests (service_test.go, e2e_test.go, csp_test.go,
+// integration_test.go and the chain_* tests) that submit jobs to a running
+// davinci-zkvm service (`make up`).
 // (2) Circuit constraint violation tests (cheat_test.go) that use ziskemu
 // directly and do NOT require the API service. These require: ziskemu in PATH.
 // The integration_test.go suite generates real BN254 Groth16 ballot proofs
@@ -325,9 +325,9 @@ type wideBallot []*elgamal.Ciphertext
 // Census (lean-IMT Poseidon) helpers
 
 // ballotLeafHash computes a deterministic 32-byte SHA-256 leaf value for an
-// ElGamal ballot stored in the arbo state tree (keys 0x04 / 0x05).
-// Each of the 32 Twisted Edwards coordinates is encoded as a fixed-size 32-byte
-// big-endian word so the hash is unambiguous. Points are stored internally in
+// ElGamal ballot stored in the arbo state tree. Each of the BallotFields
+// Twisted Edwards coordinates is encoded as a fixed-size 32-byte big-endian
+// word so the hash is unambiguous. Points are stored internally in
 // Reduced Twisted Edwards (RTE) form and must be converted to TE before hashing
 // to match the circuit's expected digest.
 func ballotLeafHash(b wideBallot) *big.Int {
@@ -373,7 +373,8 @@ func bigIntEq(a, b *big.Int) bool { return a.Cmp(b) == 0 }
 // The circuit accumulates a single net Results leaf homomorphically: BabyJubJub
 // point add for cast ballots, point subtract for overwritten ones, like
 // davinci-node's Ballot.Add / Neg.
-// The accumulator holds 32 TE coordinates (8 ciphertexts x [c1x c1y c2x c2y]).
+// The accumulator holds BallotFields TE coordinates (NumFields ciphertexts x
+// [c1x c1y c2x c2y]).
 
 // bn254ScalarField is the BN254 scalar field order (Fr).
 var bn254ScalarField, _ = new(big.Int).SetString(
@@ -461,7 +462,8 @@ func frAccumSub(a, b frAccumBallot) frAccumBallot {
 	return frAccumAdd(a, negB)
 }
 
-// frAccumLeafHash computes SHA-256 of the 32 Fr elements (32-byte BE each).
+// frAccumLeafHash computes SHA-256 of the BallotFields Fr elements (32-byte
+// BE each).
 func frAccumLeafHash(acc frAccumBallot) *big.Int {
 	h := sha256.New()
 	buf := make([]byte, 32)

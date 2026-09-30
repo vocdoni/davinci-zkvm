@@ -14,8 +14,8 @@ package integration
 //   6. KZGBLK EIP-4844 blob barycentric evaluation
 //
 // Batch layout (8 transitions): scale = VOTES_PER_BATCH / 4 (rounded down to power of 2).
-// Default VOTES_PER_BATCH=4 gives the historic layout (max 4 voters per batch).
-// Set VOTES_PER_BATCH=256 for full-scale batches of up to 256 voters.
+// Default VOTES_PER_BATCH=4 gives the base layout (at most 4 voters per batch);
+// VOTES_PER_BATCH=256 gives batches of up to 256 voters.
 //   Batch 1:  2*scale fresh voters   (idx 0 .. 2s-1)
 //   Batch 2:  4*scale fresh voters   (idx 2s .. 6s-1)
 //   Batch 3:  2*scale overwrites     (idx 0 .. 2s-1 => 1st overwrite)
@@ -27,10 +27,10 @@ package integration
 // After all transitions the test decrypts the ElGamal-accumulated tally and
 // verifies that each vote field matches the analytically expected total.
 // Prerequisites:
-//   - docker compose up -d --build (starts davinci-zkvm service)
+//   - a running davinci-zkvm service (`make up`)
 //   - DAVINCI_API_URL (default: http://localhost:8080)
 //   - DAVINCI_PROOF_TIMEOUT (default: 5m per ZisK proof)
-//   - VOTES_PER_BATCH (default: 4, max: 256)
+//   - VOTES_PER_BATCH (default: 4, capped at MaxBatchSize)
 
 import (
 	"crypto/sha256"
@@ -109,7 +109,7 @@ func TestFullE2E(t *testing.T) {
 	tally := NewTallyAccumulator()
 	voterOffset := 0
 	prevRoot := election.OldRoot
-	// On-chain settlement, the paper's per-batch flow: one DavinciSettlement
+	// On-chain settlement, the per-batch flow: one DavinciSettlement
 	// process per election, one blob transaction per transition.
 	genesisRoot := election.OldRoot
 	var settlement *davinciSolidity.Settlement

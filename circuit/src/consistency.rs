@@ -1,12 +1,12 @@
-/// DAVINCI protocol consistency checks:
-/// 1. **VoteID namespace**: each `vote_id_chain[i].new_key[0] ∈ [VoteIDMin, VoteIDMax]`
-/// 2. **VoteID–proof binding**: `vote_id_chain[i].new_key[0] == proofs[i].public_inputs[1][0]`
-/// 3. **Ballot namespace**: each `ballot_chain[i].new_key[0] ∈ [BallotMin, BallotMax]`
-/// 4. **Ballot–slot binding**: `ballot_chain[i].new_key[0] == slot(i)`, where the
-///    slot is derived from the voter's census address or CSP index (see `slot_key`)
-/// 5. **Distinct slots**: no two `ballot_chain` entries share a key
-/// These checks are only applied when a STATETX block is present.
-/// When no state block is present, returns `true` immediately (absence is not a failure).
+//! DAVINCI protocol consistency checks:
+//! 1. **VoteID namespace**: each `vote_id_chain[i].new_key[0] ∈ [VoteIDMin, VoteIDMax]`
+//! 2. **VoteID–proof binding**: `vote_id_chain[i].new_key[0] == proofs[i].public_inputs[1][0]`
+//! 3. **Ballot namespace**: each `ballot_chain[i].new_key[0] ∈ [BallotMin, BallotMax]`
+//! 4. **Ballot–slot binding**: `ballot_chain[i].new_key[0] == slot(i)`, where the
+//!    slot is derived from the voter's census address or CSP index (see `slot_key`)
+//! 5. **Distinct slots**: no two `ballot_chain` entries share a key
+//! A missing STATETX block sets `FAIL_MISSING_BLOCK`; a batch without voters
+//! passes trivially.
 
 use crate::io::ParsedInput;
 

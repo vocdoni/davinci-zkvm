@@ -179,8 +179,8 @@ func TransitionCells(numFields int, voteIDs []uint64, updates []SlotUpdate, accu
 // into EIP-4844 blobs (padding the tail of the last blob with zero cells),
 // commits, and opens each blob at the guest-bound point
 // z_b = SHA-256(processID || rootBefore || commitment_b) mod r_bls.
-// Returns a fully populated TransitionBlobs plus the SHA-256 pair digest
-// that must match publicValues[28..35].
+// The returned TransitionBlobs carries the SHA-256 pair digest that must
+// match publicValues[28..35].
 func BuildTransitionBlobs(
 	numFields int,
 	processIDBE32, rootBeforeBE32 [32]byte,
@@ -352,8 +352,7 @@ func totalCells(nVids, nUpdates, nf int) int {
 	return 2 + nVids + nUpdates*(1+2*nf) + 2*nf
 }
 
-// sortUint64Asc sorts in-place, ascending. Small (<= few hundred) slices,
-// so insertion-sort keeps things dependency-free.
+// sortUint64Asc sorts s in place, ascending (insertion sort).
 func sortUint64Asc(s []uint64) {
 	for i := 1; i < len(s); i++ {
 		v := s[i]

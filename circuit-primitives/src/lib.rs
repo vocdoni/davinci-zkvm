@@ -1,8 +1,8 @@
 //! Shared crypto primitives for the davinci ZisK guests.
 //!
-//! Used by both the vote-batch circuit (`circuit/`) and the chain
-//! aggregator (`circuit-aggregator/`). Everything here is independent of
-//! the guests' input wire formats.
+//! Used by the vote-batch guest (`circuit/`), the chain aggregator
+//! (`circuit-aggregator/`) and the results guest (`circuit-results/`).
+//! Everything here is independent of the guests' input wire formats.
 
 pub mod babyjubjub;
 mod b8_table;

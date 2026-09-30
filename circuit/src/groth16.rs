@@ -32,12 +32,12 @@
 //!
 //! # Why the MSM is done in-guest
 //!
-//! A previous version let the host supply the aggregated points (`scaled_a`,
-//! `neg_alpha_rsum`, `neg_g_ic`, `neg_acc_c`) as hints, on the theory that the
-//! pairing equation "validates them implicitly". That is false: one GT equation
-//! cannot bind n+3 free G1 points. A malicious host could pick `Bᵢ = cᵢ·β` and
+//! The aggregated points (`scaled_a`, `neg_alpha_rsum`, `neg_g_ic`,
+//! `neg_acc_c`) must not come from the host as hints: the pairing equation
+//! does not validate them implicitly, because one GT equation cannot bind n+3
+//! free G1 points. A malicious host could pick `Bᵢ = cᵢ·β` and
 //! `scaled_a[i] = sᵢ·G1`, set `neg_alpha_rsum = -(Σ sᵢ·cᵢ)·G1` and zero out the
-//! γ/δ terms, satisfying the equation for arbitrary forged proofs. The guest now
+//! γ/δ terms, satisfying the equation for arbitrary forged proofs. The guest
 //! computes every scalar multiplication itself, so the equation binds the actual
 //! proof points, public inputs and VK to the in-guest challenge.
 
@@ -87,8 +87,8 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
     // VK G1 points, gamma_abc and the proof A/C points must be strictly
     // on-curve and non-infinity: the in-guest scalar multiplication requires
     // non-zero points. `g1_is_valid` enforces the non-infinity half itself,
-    // because ZisK 1.3 made `is_on_curve_bn254` accept the all-zero identity
-    // (v0.18 rejected it). VK G2 points additionally need the subgroup check.
+    // because zisklib's `is_on_curve_bn254` accepts the all-zero identity.
+    // VK G2 points additionally need the subgroup check.
     // Proof B is on-curve-only: subgroup soundness comes from the randomized
     // batch coefficients (the transcript commits to B before the coefficients
     // exist).

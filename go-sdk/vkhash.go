@@ -15,7 +15,7 @@ import (
 // g1_to_raw / g2_to_raw layout). The digest is read big-endian, matching the
 // guest's hash_vk_bytes.
 //
-// ponytail: assumes snarkjs G2 ordering [[x_c0,x_c1],[y_c0,y_c1],[1,0]] (the
+// Assumes snarkjs G2 ordering [[x_c0,x_c1],[y_c0,y_c1],[1,0]] (the
 // ballot VK is a genuine circom/snarkjs artifact). A VK in another ordering
 // would hash differently and fail the guest's binding check immediately.
 func BallotVKLeaf(vkJSON []byte) (*big.Int, error) {

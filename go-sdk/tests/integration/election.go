@@ -135,13 +135,9 @@ type daBatchState struct {
 	Accumulator []string
 }
 
-// NewElection creates a new test election with nVoters registered voters.
-// It builds the process state tree (with config), the census IMT, and
-// generates random ElGamal and ECDSA keys.
-// voterSeed derives the signer seed of test voter i. It must be injective:
-// the previous byte((i*7+j*3+42)%256) scheme repeated every 256 voters, so
-// batches above 256 carried duplicate census leaves and the guest rejected
-// them (FAIL_CENSUS) without anyone noticing.
+// voterSeed derives the signer seed of test voter i. It must be injective: a
+// repeating seed gives two voters the same census leaf, which the guest
+// rejects (FAIL_CENSUS).
 func voterSeed(i int) []byte {
 	var idx [8]byte
 	binary.BigEndian.PutUint64(idx[:], uint64(i))
@@ -149,6 +145,9 @@ func voterSeed(i int) []byte {
 	return h[:]
 }
 
+// NewElection creates a new test election with nVoters registered voters.
+// It builds the process state tree (with config), the census IMT, and
+// generates random ElGamal and ECDSA keys.
 func NewElection(nVoters int) (*Election, error) {
 	// ProcessID (for ballot proofs and state tree key 0x00)
 	var processID types.ProcessID
@@ -433,7 +432,7 @@ func (e *Election) BuildCspData(batchVoters []*Voter) (*davinci.CspData, error) 
 		}
 	}
 
-	// The CSP public key is recovered per-entry inside the circuit; no longer
+	// The CSP public key is recovered per-entry inside the guest; it is not
 	// transmitted alongside the per-voter proofs.
 	return &davinci.CspData{Proofs: proofs}, nil
 }
@@ -996,6 +995,7 @@ func (ta *TallyAccumulator) Subtract(ballots []wideBallot) {
 	}
 }
 
+// DecryptTally decrypts the accumulated tally with privKey
 // (the election private key) and returns the 8 vote field totals.
 // Uses baby-step giant-step (BSGS) for discrete log recovery.
 // The max value per field is count * maxFieldValue (maxFieldValue ≈ 15).

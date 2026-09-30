@@ -16,11 +16,9 @@ import (
 )
 
 // MaxBatchSize is the maximum number of voter ballots per ProveBatch call.
-// Must be a power of two. Matches the MAX_BATCH_SIZE constant in the circuit
-// and input-gen crate. Change this value in both places when increasing the limit.
-//
-// 1024 is the largest size proved end to end on a 64 GB host (the prover's
-// host RAM, ~41 GB with --minimal-memory, is the limit, not the GPU).
+// Mirrors MAX_BATCH_SIZE in circuit-primitives, input-gen and rust-sdk; change
+// them together (it is part of the guest, so its program vk changes too).
+// The prover's host RAM, not the GPU, is what bounds it.
 const MaxBatchSize = 1024
 
 // State tree key namespaces (davinci-node spec/params). Keys are u64 in a
@@ -182,9 +180,10 @@ const (
 // All 32-byte field values are hex-encoded strings (with "0x" prefix).
 // Siblings must be padded with "0x00..00" entries to n_levels length.
 type SmtEntry struct {
-	// OldRoot is the 32-byte big-endian hex-encoded tree root before the transition.
+	// OldRoot is the tree root before the transition (32-byte arbo LE hex, like
+	// every field of the entry).
 	OldRoot string `json:"old_root"`
-	// NewRoot is the 32-byte big-endian hex-encoded tree root after the transition.
+	// NewRoot is the tree root after the transition.
 	NewRoot string `json:"new_root"`
 	// OldKey is the key of the existing leaf being replaced (zero if IsOld0=1).
 	OldKey string `json:"old_key"`
@@ -246,7 +245,8 @@ type StateTransitionData struct {
 	RefreshSmt []SmtEntry `json:"refresh_smt,omitempty"`
 
 	// ResultsSmt is the net Results transition (key 0x04):
-	// NewResults = OldResults + Σ(VoterBallots) − Σ(OverwrittenBallots).
+	// NewResults = OldResults + Σ(VoterBallots) − Σ(OverwrittenBallots)
+	// + refresh deltas.
 	// Nil if no accumulator update (e.g. all dummy votes).
 	ResultsSmt *SmtEntry `json:"results_smt,omitempty"`
 
@@ -259,6 +259,7 @@ type StateTransitionData struct {
 	// When non-nil, the circuit verifies:
 	//   - Each ballot SMT leaf = SHA-256(serialized_ballot)
 	//   - NewResults = OldResults + Σ(VoterBallots) − Σ(OverwrittenBallots)
+	//     + refresh deltas
 	BallotProofs *BallotProofData `json:"ballot_proofs,omitempty"`
 }
 
@@ -330,7 +331,7 @@ type CspProof struct {
 }
 
 // CspData holds all CSP ECDSA census data for a batch of voters. The CSP public
-// key is no longer transmitted; the circuit recovers it per-entry and binds the
+// key is not transmitted; the guest recovers it per-entry and binds the
 // recovered Ethereum address to the census root.
 type CspData struct {
 	// Proofs holds one CSP attestation per real voter.
@@ -350,10 +351,10 @@ type BjjCiphertext struct {
 	C2 BjjPoint `json:"c2"`
 }
 
-// ReencryptionEntry holds the re-encryption data for one voter.
-// The per-voter scalar has been replaced by a single sequencer-private
-// seed on ReencryptionData; both host and guest derive the per-field
-// scalars from that seed chained to the state root before the batch.
+// ReencryptionEntry holds the re-encryption data for one voter. The
+// per-field scalars come from the sequencer-private seed on
+// ReencryptionData, chained to the state root before the batch, on both
+// host and guest.
 type ReencryptionEntry struct {
 	// Original contains the original ciphertexts from the ballot proof.
 	Original [NumFields]BjjCiphertext `json:"original"`
@@ -389,7 +390,7 @@ type ProveRequest struct {
 	Sigs []json.RawMessage `json:"sigs"`
 	// State contains the full state-transition data for the DAVINCI protocol.
 	// When non-nil, the circuit verifies chained SMT transitions and outputs
-	// the old/new state roots and vote counts (outputs 10-15).
+	// the old/new state roots and vote counts (output registers 2..19).
 	State *StateTransitionData `json:"state,omitempty"`
 	// CensusProofs contains one lean-IMT Poseidon membership proof per voter.
 	// When non-empty, the circuit verifies each proof against the census root.
@@ -400,8 +401,9 @@ type ProveRequest struct {
 	// Reencryption contains the re-encryption verification data.
 	// When non-nil, the circuit verifies ElGamal re-encryption for each voter.
 	Reencryption *ReencryptionData `json:"reencryption,omitempty"`
-	// KZG contains the EIP-4844 blob barycentric evaluation data.
-	// When non-nil, the circuit verifies the KZG commitment and evaluation.
+	// KZG contains the EIP-4844 blob commitments. When non-nil, the guest
+	// rebuilds the blob cells, evaluates them at the bound points and
+	// publishes the digest of the (commitment, evaluation) pairs.
 	KZG *KZGRequest `json:"kzg,omitempty"`
 	// Output selects the proof kind: "plonk" (default, on-chain SNARK) or
 	// "stark" (vadcop-final STARK, foldable by the chained-mode aggregator).

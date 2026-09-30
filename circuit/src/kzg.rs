@@ -1,8 +1,8 @@
 //! KZG EIP-4844 DA blob binding + barycentric evaluation.
 //!
-//! The blob cells are NOT trusted host input any more: the guest rebuilds them
-//! from verified state (`sha256(vote ids)`, `sha256(slot updates covering new
-//! votes, overwrites and silent refreshes alike)` and the NEW net accumulator)
+//! The blob cells are not host input: the guest rebuilds them from verified
+//! state (the sorted vote ids, the sorted slot updates covering new votes,
+//! overwrites and silent refreshes alike, and the NEW net accumulator)
 //! and evaluates each blob polynomial at the point derived from that blob's
 //! commitment. The `(commitment, y)` pairs are hashed into one digest and
 //! emitted in the publics; the settlement contract compares each pair against

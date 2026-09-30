@@ -68,12 +68,12 @@ pub const SMT_LEVELS: usize = 64;
 /// Maximum number of ballot proofs per batch.
 /// Increase here to support larger batches.
 ///
-/// 1024 is the largest size measured end to end on ZisK 1.3 (RTX 5090, 64 GB
-/// host): 1024 votes plus 1024 silent refreshes at num_fields = 16 prove in
-/// ~364 s with the GPU at ~30 GB. Host RAM is the binding limit, not the GPU:
-/// that transition needs ~41 GB with `cargo-zisk prove --minimal-memory` and
-/// ~54 GB without, so the service uses the flag from 512 proofs up. Raise only
-/// after re-measuring both (and bump input-gen + go-sdk to match).
+/// The prover's host RAM bounds it, not the GPU: 1024 votes plus 1024 silent
+/// refreshes need about 41 GB with `cargo-zisk prove --minimal-memory` and
+/// 54 GB without (BENCHMARK.md), so the service uses the flag from 512 proofs
+/// up. Raise it only after measuring again. It is mirrored in input-gen,
+/// go-sdk and rust-sdk, and changing it changes the program vk of every guest
+/// that reads it.
 pub const MAX_BATCH_SIZE: usize = 1024;
 
 // Silent-refresh policy constants (§4.5). The sequencer must include at least

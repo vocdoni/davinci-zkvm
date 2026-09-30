@@ -1,416 +1,218 @@
 # davinci-zkvm
 
-A [ZisK](https://github.com/0xPolygonHermez/zisk) zkVM service for the
-[DAVINCI](https://github.com/vocdoni/davinci-node) voting protocol. Hand it a
-batch of voter ballots and the state-transition data; it runs the whole
-protocol inside one RISC-V circuit and returns a PLONK SNARK you can verify
-on Ethereum with the contracts in [`solidity/`](solidity/).
+Prover service for the [DAVINCI](https://davinci.vote) voting protocol. It
+proves batches of encrypted ballots, the state transitions they cause and the
+final tally inside the [ZisK](https://github.com/0xPolygonHermez/zisk) zkVM,
+and returns PLONK proofs that Ethereum contracts verify. Sequencer operators
+run it on a GPU host; sequencers call it over HTTP or through the Go and Rust
+SDKs.
 
-The pipeline stays zero-knowledge throughout. Voters send Groth16 ballot
-proofs over ElGamal-encrypted votes. The service folds the batch through
-ZisK. The output is around 2.7 KB of proof, and Ethereum verifies it in
-roughly 300 ms.
+[![Build and Test](https://github.com/vocdoni/davinci-zkvm/actions/workflows/main.yml/badge.svg)](https://github.com/vocdoni/davinci-zkvm/actions/workflows/main.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](LICENSE)
 
-The service supports two operating modes:
+## Overview
 
-- **Per-batch mode** — every batch gets its own PLONK SNARK, and an
-  external verifier (e.g. an Ethereum contract following the davinci-node
-  model) checks each state transition.
-- **Chained mode** — batches are proven as STARKs and recursively folded
-  inside ZisK; the whole election (genesis state, every transition, and
-  the decrypted results) collapses into **one final PLONK**. See
-  [Chained mode](#chained-mode-one-proof-per-election).
+A DAVINCI sequencer collects encrypted ballots, groups them into batches and
+settles each batch on Ethereum. Before it can settle, it needs a proof that
+the batch is valid. It sends the batch to this service, which runs the whole
+protocol check as one RISC-V program: every voter's ballot proof, signature
+and census membership, the re-encryption of the ballots, the state-tree
+updates, the encrypted tally and the layout of the EIP-4844 data blobs. ZisK
+proves that execution and wraps it in a PLONK proof of 768 bytes plus 512
+bytes of public values, whatever the batch size.
 
-## What the circuit checks
-
-In a single ZisK execution, the circuit verifies:
-
-| Step | Description |
-|---|---|
-| Groth16 batch verify | BN254 pairing check for every voter ballot proof. |
-| ECDSA batch verify | secp256k1 signature recovery for each voter (and for the CSP, in CSP mode). |
-| Census membership | Lean-IMT Poseidon BN254 inclusion proofs, or ECDSA CSP authentication. |
-| State SMT transitions | Arbo SHA-256 sparse Merkle tree updates for the vote-ID, ballot, results, and process chains. |
-| ElGamal re-encryption | BabyJubJub re-encryption of every written ballot, scalars derived in-guest from one sequencer seed. |
-| Silent refreshes | Re-randomization of occupied slots the batch did not write, so an overwrite is indistinguishable from a routine refresh; count rule, distinctness and accumulator deltas enforced. |
-| Result accumulation | Homomorphic tally with overwrite support, pinned to the Results leaf. |
-| DA blob binding | The guest lays out the EIP-4844 blob cells itself (vote identifiers, one sorted list of slot updates, the new accumulator), evaluates every blob polynomial at its bound point and publishes a digest of the (commitment, evaluation) pairs. |
-| Cross-block binding | Cryptographic glue between the protocol blocks. |
-
-The public outputs are the two state roots, the census root, the voter and
-overwrite counts, the occupied-slot count before the batch, the blob digest
-and blob count, and a diagnostic fail-mask. `solidity/DavinciSettlement.sol`
-consumes them (see "Settle a transition on-chain").
-
-## Chained mode: one proof per election
-
-Chained mode targets single-sequencer deployments that rely entirely on
-ZisK: instead of verifying one PLONK per batch on-chain, the election
-produces **one final PLONK** that attests to everything. A second guest,
-the aggregator (`circuit-aggregator/`), verifies vadcop-final STARK
-proofs *inside* ZisK and runs in three modes:
-
-1. **Genesis + fold** — recomputes the genesis state root in-circuit from
-   the immutable election config (process ID, ballot mode, encryption
-   key, census origin/root) and folds the first batch proofs from it.
-2. **Fold** — verifies the previous fold proof plus K new batch STARKs,
-   enforcing state-root continuity, the census root, and per-batch
-   success flags. Voter counts accumulate in the public digest.
-3. **Finalize** — verifies the last fold, proves the Results leaves'
-   SMT inclusion under the final root, checks the trustees' Chaum-Pedersen
-   decryption proofs, and commits the plaintext results. Only this proof
-   gets the PLONK wrap.
-
-The final PLONK's public digest exposes the plaintext results, the vote
-count, the config commitment, the final state root, and the two program
-verification keys (`batch_vk`, `fold_vk`). KZG blob evaluation is omitted
-in this mode (there is no per-batch on-chain data availability step).
-
-**Silent refreshes.** Every batch also re-randomizes a target number of
-occupied ballot slots it did not write, so an observer cannot tell an
-overwrite from routine re-encryption noise. The sequencer picks the
-slots from OS randomness and drives them through the same scalar chain
-as the batch's own votes; neither the seed nor the selection is ever
-persisted. The guest enforces the count via `RefreshTarget`, that keys
-are distinct and stay inside the ballot namespace, and that each entry
-is a valid re-randomization of the stored ballot. `occupied_before` is
-a public output the fold guest checks against its running voters −
-overwrites.
-
-**Verification key binding.** A guest cannot know its own verification
-key, so the chain commits both vks in every digest and the verifier
-closes the loop externally with two equality checks after verifying the
-PLONK: `digest.fold_vk == proof.program_vk` and `digest.batch_vk ==
-<known vote-batch vk>`. `chain.Digest.VerifyBinding` in the Go SDK
-implements exactly this; on-chain it is two 32-byte comparisons.
-
-The flow over HTTP (the Go `chain.Sequencer` automates all of it):
-
-```
-POST /prove  (output=stark)   per batch → vadcop-final STARK
-POST /fold   (genesis)        config + first batch jobs
-POST /fold   (chained)        prev fold job + next batch jobs
-POST /finalize                last fold + decrypted results + CP proofs → PLONK
+```text
+voters --ballots--> sequencer --batch--> davinci-zkvm (GPU)
+                        |     <--proof--
+                        v
+        Ethereum (settlement tx + blobs)
 ```
 
-The first fold is submitted once without `fold_vk` as a *bootstrap*: its
-own `program_vk` (returned by `GET /jobs/{id}/stark`) is the aggregator
-vk, which the real genesis fold then binds.
+The service has two modes. In **per-batch mode** each batch gets its own
+PLONK that the settlement contract verifies, and `POST /results` proves the
+decrypted tally at the end. In **chained mode** batches are proved as STARKs
+and folded recursively, and one final PLONK covers the whole election. See
+[docs/architecture.md](docs/architecture.md).
 
-### Driving it from Go
+Related repositories:
 
-```go
-import "github.com/vocdoni/davinci-zkvm/go-sdk/chain"
-
-seq, _ := chain.NewSequencer(client, chain.Config{
-    ProcessID:    processID,   // *big.Int
-    BallotMode:   ballotMode,  // *big.Int
-    EncKey:       encKey,      // *bjj_gnark.BJJ ElGamal public key
-    CensusOrigin: 1,           // 1 = lean-IMT, 4 = CSP
-    CensusRoot:   censusRoot,  // *big.Int
-}, foldEvery, timeout)
-
-// Per batch: votes carry the ballot key parts + ciphertexts; req carries
-// the Groth16 proofs, signatures and census material. The sequencer owns
-// the state tree, re-encrypts ballots, proves the batch as a STARK and
-// folds automatically every foldEvery batches.
-jobID, err := seq.ProveBatch(votes, req)
-
-// After the DKG reveals the decryption key: decrypts the accumulators,
-// builds the Chaum-Pedersen proofs, proves the results in-guest, wraps
-// the chain in the final PLONK and runs all consistency + vk-binding
-// checks.
-final, err := seq.Finalize(encPrivKey)
-// final.Snark is the on-chain payload; final.Results the plaintext tally.
-```
-
-The Solidity side is unchanged: the final PLONK verifies with the same
-`ZiskVerifier.verifySnarkProof`, just with the aggregator's `program_vk`
-and the digest as public values.
-
-See [BENCHMARK.md](BENCHMARK.md) for chained-mode throughput numbers;
-`make benchmark` reproduces them (see [benchmark/](benchmark/README.md)).
-
-## Layout
-
-```
-davinci-zkvm/
-├── circuit/             ZisK RISC-V guest: the vote-batch circuit
-│   ├── elf/             Pre-built circuit ELF (tracked in git)
-│   └── src/             groth16, ecdsa, census, csp, kzg, …
-├── circuit-aggregator/  ZisK RISC-V guest: recursive aggregator (chained mode)
-│   ├── elf/             Pre-built aggregator ELF (tracked in git)
-│   └── src/             in-guest STARK verification, genesis, fold, finalize
-├── circuit-results/     ZisK RISC-V guest: single-key tally (per-batch mode)
-│   ├── elf/             Pre-built results ELF (tracked in git)
-│   └── RESULTS.md       Frame, checks, registers and fail bits
-├── circuit-primitives/  no_std crate shared by the guests
-│   └── src/             smt, babyjubjub, poseidon, chaum_pedersen, hash, …
-├── input-gen/           Typed protocol blocks → ZisK binary input
-├── rust-sdk/            Rust SDK (crate davinci-zkvm-sdk): client, wire types, protocol primitives
-├── service/             HTTP API (axum + tokio)
-│   └── src/
-│       ├── api/         POST /prove, /fold, /finalize, /results, GET /jobs/*, /health
-│       └── prover/      Background queue, worker, snark/recursion extractors
-├── solidity/            Vendored Solidity verifier (PlonkVerifier + ZiskVerifier)
-└── go-sdk/              Go client library, with an on-chain verification helper
-    ├── chain/           Chained-mode sequencer: state tree, folds, finalize
-    ├── cmd/sdk-vectors/ Golden vectors for the Rust SDK tests
-    ├── solidity/        simulated.NewBackend verification helper
-    └── tests/           Integration tests
-```
+- [davinci-sequencer](https://github.com/vocdoni/davinci-sequencer): the
+  sequencer node, built on this service and its Rust SDK.
+- [davinci-contracts](https://github.com/vocdoni/davinci-contracts): the
+  process registry and the on-chain verifier.
+- [davinci-circom](https://github.com/vocdoni/davinci-circom): the ballot
+  proof circuit voters run.
+- [davinci-dkg](https://github.com/vocdoni/davinci-dkg): distributed
+  generation of the election key.
+- [davinci-fold](https://github.com/vocdoni/davinci-fold): chained-mode
+  orchestration across several provers.
+- [davinci-node](https://github.com/vocdoni/davinci-node): the Go reference
+  implementation of the protocol.
 
 ## Quick start
 
-### Requirements
-
-- Docker + Docker Compose (nothing else on the host)
-- NVIDIA GPU with **~30 GB VRAM** (RTX 5090 32 GB and A100 40 GB work;
-  RTX 4090 at 24 GB does not). The PLONK aggregation pass is what
-  pushes memory usage; first boot allocates the full working set.
-- NVIDIA driver 570+ and `nvidia-container-toolkit` on the host. The
-  prebuilt `cargo-zisk-gpu` is statically linked against the CUDA
-  runtime, so no CUDA toolkit is needed on the host.
-- About 100 GB of free disk for the two ZisK proving keys (STARK ~73 GB,
-  PLONK ~25 GB).
-
-### Install and run
-
-The Makefile drives Docker Compose end-to-end. A fresh clone goes from
-zero to a healthy service with three commands:
+You need a Linux host with an NVIDIA GPU with about 30 GB of memory (RTX 5090,
+A100 40 GB), driver 570 or newer, Docker with Compose,
+`nvidia-container-toolkit`, 64 GB of RAM and about 100 GB of free disk for the
+proving keys. [docs/deployment.md](docs/deployment.md) has the details.
 
 ```bash
 git clone https://github.com/vocdoni/davinci-zkvm.git
 cd davinci-zkvm
-make install    # downloads both proving keys via ziskup, builds the image
-make up         # starts the prover service
-make test       # runs the Go integration test suite
+make install   # download the ZisK proving keys into ./zisk-keys and build the image
+make up        # start the prover on port 8080
+curl -s localhost:8080/health
 ```
 
-`make install` runs `ziskup` inside a small container and writes both
-keys into `./zisk-keys/` on the host (~100 GB total, 20–60 min depending
-on bandwidth). It also patches the PLONK `final.so` to drop its
-executable-stack flag, which modern Linux refuses to grant at dlopen
-time. The runtime container builds the GPU setup artifacts on first
-boot (about a minute) and skips that step on subsequent starts.
+`make install` downloads about 100 GB and takes 20 to 60 minutes. The first
+start builds GPU setup files for about a minute; follow it with `make logs`.
 
-Other Make targets: `make logs`, `make status`, `make shell`,
-`make down`, `make restart`, `make clean`. Run `make help` for the
-full list.
+To run the published image instead of building it, set
+`DAVINCI_ZKVM_IMAGE=ghcr.io/vocdoni/davinci-zkvm:latest` in `.env`, then run
+`make keys`, `docker compose --profile cuda pull` and `make up`.
+[docs/deployment.md](docs/deployment.md#automatic-updates) explains how to
+follow new releases automatically.
 
-To run the published image instead of a local build and update it on every
-release, point the service at `latest` and start Watchtower with it:
+## Usage
+
+### Operating the service
+
+| Command | Action |
+|---|---|
+| `make install` | Download the proving keys (`make keys`) and build the image (`make build`). |
+| `make up` / `make down` / `make restart` | Start, stop or restart the prover. |
+| `make logs` / `make status` / `make shell` | Follow the logs, show the container, open a shell in it. |
+| `make clean` | Stop and delete the proofs volume. Keeps the proving keys. |
+| `make test` | Run the integration suite against the running prover. |
+
+`make help` lists every target, including a host install without Docker.
+
+### Configuration
+
+Set these in `.env` (start from `.env.example`) or on the command line:
+
+| Variable | Default | Description |
+|---|---|---|
+| `ZISK_KEYS_DIR` | `./zisk-keys` | Directory holding the proving keys. |
+| `LISTEN_PORT` | `8080` | Host port of the API. |
+| `BIND_ADDR` | `0.0.0.0` | Host address the API binds to. |
+| `DAVINCI_ZKVM_IMAGE` | local build | Image to run, for example `ghcr.io/vocdoni/davinci-zkvm:v0.1.0`. |
+| `MAX_QUEUE_SIZE` | `100` | Maximum queued jobs. |
+| `ZISK_MINIMAL_MEMORY_FROM` | `512` | Batch size from which the prover saves host RAM at a small speed cost. |
+| `DAVINCI_KEEP_INPUTS` | `0` | Keep each job's private input for debugging. Leave off in production. |
+
+The API has no authentication. Bind it to a private interface or firewall it
+so that only your sequencer can reach it. The full list of variables is in
+[docs/deployment.md](docs/deployment.md#configuration).
+
+### HTTP API
+
+Proving is asynchronous: submit a job, poll it, download the result.
 
 ```bash
-DAVINCI_ZKVM_IMAGE=ghcr.io/vocdoni/davinci-zkvm:latest \
-  docker compose --profile cuda --profile watchtower up -d
+curl -s -X POST localhost:8080/prove -H 'Content-Type: application/json' -d @batch.json
+# {"job_id":"3f0c…","status":"queued"}
+curl -s localhost:8080/jobs/3f0c…         # queued, running, done or failed
+curl -s localhost:8080/jobs/3f0c…/snark   # the proof, once done
 ```
 
-Release tags (`v0.1.0`) publish `:v0.1.0` and move `:latest`; branches publish
-under their name (`:main`). Watchtower checks every five minutes and restarts
-the prover on a new image, so a job in flight at that moment is lost and has to
-be resubmitted.
+| Endpoint | Purpose |
+|---|---|
+| `POST /prove` | Prove a vote batch. |
+| `POST /results` | Prove the decrypted tally of an election. |
+| `POST /fold`, `POST /finalize`, `POST /jobs/import` | Chained mode. |
+| `GET /jobs/{id}` | Job status. |
+| `GET /jobs/{id}/snark` | `program_vk`, `root_c_vadcop_final`, `public_values`, `proof_bytes`: the arguments of `ZiskVerifier.verifySnarkProof`. |
+| `GET /jobs/{id}/publics` | The guest's public outputs. |
+| `GET /health` | Liveness and queue length. |
 
-To put the proving keys somewhere other than `./zisk-keys`, set
-`ZISK_KEYS_DIR=/path/to/keys` either in `.env` (copy from `.env.example`)
-or on the command line.
+A finished job is not always an accepted batch: the guest proves invalid
+input too, with its `ok` output set to 0. Check the public outputs before
+settling. [docs/api.md](docs/api.md) documents every endpoint, the request
+bodies and their encodings.
 
-### Submit a proof from Go
+### Go SDK
+
+```bash
+go get github.com/vocdoni/davinci-zkvm/go-sdk
+```
 
 ```go
 import davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 
 client := davinci.NewClient("http://localhost:8080")
-
-batch := &davinci.ProveBatch{
-    VerificationKey: vk,       // Groth16 BN254 VK shared by all ballot proofs
-    Voters:          voters,   // []VoterBallot with proofs + ECDSA sigs
-    State:           state,    // SMT chain transitions
-    EncryptionKey:   encKey,   // ElGamal re-encryption key
-    ReencryptionSeed: seed,    // the seed the voters' re-encryptions were derived from
-    KZG:             kzg,      // EIP-4844 blob evaluation
+result, err := client.Prove(ctx, batch) // batch is a *davinci.ProveBatch
+if err != nil {
+    return err
 }
-
-result, err := client.Prove(ctx, batch)
-// result.Snark holds the four byte strings you pass straight into
-// ZiskVerifier.verifySnarkProof on Ethereum.
+// result.Snark holds the four ZiskVerifier.verifySnarkProof arguments.
 ```
 
-See [go-sdk/README.md](go-sdk/README.md) for the full Go API.
+The Go SDK also drives chained mode (`go-sdk/chain`) and verifies proofs on
+a simulated chain. See [go-sdk/README.md](go-sdk/README.md).
 
-### Verify the SNARK in-process
+### Rust SDK
 
-The repo vendors the Solidity verifier under
-[`solidity/`](solidity/README.md). The Go SDK ships a helper that compiles
-it (via local `solc` or `docker run ethereum/solc:stable`) and runs it on
-`go-ethereum/ethclient/simulated.NewBackend`:
+The crate `davinci-zkvm-sdk` has the client, the request types, parsers for
+the public outputs, the DA blob builder, the pinned release values and the
+protocol primitives needed to build a batch. Its `dkg` module converts keys
+to the davinci-dkg point format and builds the organizer's proof of
+possession for DKG-locked processes.
 
-```go
-import davinciSolidity "github.com/vocdoni/davinci-zkvm/go-sdk/solidity"
-
-err := davinciSolidity.VerifyOnSimulated("./solidity", result.Snark)
+```toml
+[dependencies]
+davinci-zkvm-sdk = { git = "https://github.com/vocdoni/davinci-zkvm", tag = "v0.1.0" }
 ```
 
-No Anvil, ganache, or RPC endpoint needed.
+```rust
+use std::time::Duration;
+use davinci_zkvm_sdk::{client::ProverClient, publics::BatchPublics};
 
-### Settle a transition on-chain
-
-`solidity/DavinciSettlement.sol` is the reference per-batch settlement
-contract: it verifies the PLONK through `ZiskVerifier`, checks root
-continuity, the census root and the occupied-slot count against its own
-counters, recomputes the blob digest from the submitted commitments and
-evaluations, and checks every blob with the EIP-4844 point-evaluation
-precompile against the blob transaction's versioned hashes. The Go helper
-deploys it on the simulated backend and submits real blob transactions:
-
-```go
-blobs, _ := davinci.BuildTransitionBlobs(numFields, pid, rootBefore, voteIDs, updates, accumulator)
-req.KZG = blobs.Request(pidHex, rootBeforeHex)   // commitments only; the guest rebuilds the cells
-// ... prove, then:
-s, _ := davinciSolidity.DeploySettlement("./solidity", snark.ProgramVK, snark.RootCVadcopFinal)
-s.CreateProcess(pid, genesisRoot, censusRoot)
-gas, err := s.SubmitTransition(pid, snark, blobs)
-```
-
-`TestFullE2E` runs the whole flow, silent refreshes and overwrites
-included, and settles every transition this way.
-
-## HTTP API
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/prove` | Submit a state-transition batch. `output: "plonk"` (default) or `"stark"` (foldable). Returns a job ID. |
-| `POST` | `/fold` | Chained mode: fold batch STARKs into the chain (genesis when `prev_fold_job` is absent). |
-| `POST` | `/finalize` | Chained mode: verify the decrypted results and wrap the chain in the final PLONK. |
-| `POST` | `/results` | Per-batch mode: prove the single-key tally (key and accumulator inclusion under the final state root, 16 Chaum–Pedersen decryption proofs) with `circuit-results`, PLONK-wrapped. See [circuit-results/RESULTS.md](circuit-results/RESULTS.md). |
-| `POST` | `/jobs/import` | Chained mode: import a raw STARK `proof.bin` proven on another worker as a local `BatchStark` job (scatter/gather). Body is the raw blob; returns a job ID. |
-| `GET` | `/jobs/{id}` | Job status (queued / running / done / failed) and timing. |
-| `GET` | `/jobs/{id}/snark` | The Solidity-ready PLONK payload as JSON. |
-| `GET` | `/jobs/{id}/snark/raw` | The raw `proof.bin` (bincode), for `cargo-zisk verify`. |
-| `GET` | `/jobs/{id}/stark` | The `program_vk` / `zisk_vk` of a STARK job (vk binding). |
-| `GET` | `/jobs/{id}/publics` | Just the `publicValues` blob (the digest, for fold/finalize jobs). |
-| `GET` | `/jobs/{id}/inputs` | The raw `input.bin` (audit / re-proving). |
-| `GET` | `/health` | Service liveness check. |
-
-`/jobs/{id}/snark` payload:
-
-```json
-{
-  "program_vk":           "0x…32 bytes",
-  "root_c_vadcop_final":  "0x…32 bytes",
-  "public_values":        "0x…512 bytes",
-  "proof_bytes":          "0x…768 bytes (ABI-encoded uint256[24])"
+let prover = ProverClient::new("http://localhost:8080");
+let id = prover.prove(&request).await?;
+prover.wait(&id, Duration::from_secs(2), Duration::from_secs(1800)).await?;
+let snark = prover.snark(&id).await?;
+let publics = BatchPublics::from_public_values(&snark.public_values)?;
+if !publics.passed() {
+    // the guest rejected the batch; do not settle it
 }
 ```
 
-These four fields map straight onto the arguments of
-`ZiskVerifier.verifySnarkProof`.
+### On-chain verification
 
-## Configuration
+[`solidity/`](solidity/README.md) holds the ZisK PLONK verifier and a
+reference per-batch settlement contract. Compare `program_vk` and
+`root_c_vadcop_final` against the values pinned in `rust-sdk/src/release.rs`
+rather than trusting the service.
 
-| Variable | Default | Description |
-|---|---|---|
-| `LISTEN_ADDR` | `0.0.0.0:8080` | HTTP listen address. |
-| `PROVING_KEY_PATH` | `/proving-key` | ZisK STARK proving key directory. |
-| `PROVING_KEY_PLONK_PATH` | `/proving-key-plonk` | ZisK PLONK proving key directory. |
-| `CIRCUIT_ELF_PATH` | `/app/circuit.elf` | Pre-built vote-batch circuit ELF. |
-| `AGGREGATOR_ELF_PATH` | `/app/aggregator.elf` | Pre-built aggregator ELF (chained mode). |
-| `RESULTS_ELF_PATH` | `circuit-results/elf/results.elf` | Pre-built results ELF (`/results`); the image sets `/app/results.elf`. Required at startup. |
-| `CARGO_ZISK_BIN` | `cargo-zisk` | `cargo-zisk` binary to invoke. |
-| `PROOF_OUTPUT_DIR` | `/tmp/proofs` | Per-job artifact directory. |
-| `ZISK_MINIMAL_MEMORY` | `0` | Force `cargo-zisk prove --minimal-memory` on every attempt (it is auto-enabled on retries). |
-| `ZISK_MINIMAL_MEMORY_FROM` | `512` | Batches with at least this many ballot proofs use `--minimal-memory` from the first attempt: it caps the prover's host RAM (a 1024-vote transition needs ~54 GB without it, ~41 GB with it) at a few percent of speed. |
-| `DAVINCI_KEEP_INPUTS` | `0` | Keep each job's `input.bin` and serve `GET /jobs/{id}/inputs`. The input is the private witness (re-encryption seed, overwrite and refresh sets); leave it off outside development. |
-| `MAX_QUEUE_SIZE` | `100` | Maximum queued jobs. |
-| `ZISK_MPI_PROCS` | `1` | MPI processes for proving (`>1` runs `mpirun`). |
-| `ZISK_MPI_THREADS` | `0` | Threads per MPI process (`0` = let MPI decide). |
-| `ZISK_MPI_BIND_TO` | `none` | `mpirun --bind-to` policy. |
+## Documentation
 
-## Performance
-
-All numbers below are from an NVIDIA RTX 5090 running the
-[full pipeline](#what-the-circuit-checks) on ZisK v1.3.0-alpha. Ballot
-generation isn't counted; the time column is the service's job time for the
-steady state, i.e. a batch that also silently refreshes as many slots as it
-writes. `nf` is the election's declared field count.
-
-| batch | PLONK (nf=2) | votes/s | PLONK (nf=16) | votes/s | settlement gas |
-|---:|---:|---:|---:|---:|---:|
-|   64 |  22.5 s | 2.8 |  30.3 s | 2.1 | ~500 k |
-|  128 |  30.1 s | 4.3 |  45.7 s | 2.8 | ~500 k (1 blob) / ~612 k (3 blobs) |
-|  256 |  46.2 s | 5.5 |  76.7 s | 3.3 | ~500 k (1) / ~724 k (5) |
-|  512 |  84.3 s | 6.1 | 164.3 s | 3.1 | ~554 k (2) / 9 blobs, above the 6-blob per-tx cap |
-| 1024 | 171.2 s | 6.0 | 363.9 s | 2.8 | ~612 k (3) / 17 blobs, above the 6-blob per-tx cap |
-
-EIP-7594 caps a transaction at 6 blobs, so a sequencer settling on Ethereum
-sizes its batches with `davinci.MaxSingleTxBatch(nf)` (1024 up to 5 fields,
-366 at 16); the fastest configurations fit.
-The fixed cost (recursion, PLONK wrap, verification) is about 16 s; the
-batch cap is 1024, set by the prover's host RAM (~41 GB with
-`--minimal-memory`, which the service enables from 512 proofs). Gas for more
-than one blob is extrapolated at ~56 k per blob. Settlement gas is
-for `DavinciSettlement.submitTransition` on the simulated chain, one
-point-evaluation check per blob included. Proof size stays at
-768 B of proof plus 512 B of public values regardless of batch. See
-[`BENCHMARK.md`](BENCHMARK.md) for the chained mode and the full tables.
-
-## Rust SDK
-
-`rust-sdk/` is the crate `davinci-zkvm-sdk`, a member of the root Cargo
-workspace. It is what a Rust host (the davinci-sequencer) needs to drive this
-service: an HTTP client for the job routes, typed `/prove` and `/results`
-bodies, parsers for the batch and results publics, the DA blob layout with its
-KZG commitments and a decoder, the pinned release vks, and the protocol
-primitives to build inputs byte-exactly (BabyJubJub, ElGamal, Poseidon,
-Chaum–Pedersen, ballots, census proofs, the re-encryption chain).
-Its `dkg` module maps BabyJubJub points between the circomlib form used here
-and the reduced form of the davinci-dkg contracts, and builds the organizer's
-Schnorr proof of possession for DKG-locked processes (checked against the
-davinci-dkg vectors in `testdata/dkg_schnorr.json`).
-
-Its tests check every byte against vectors produced by the Go reference code
-and run offline:
-
-```bash
-cargo test -p davinci-zkvm-sdk
-# regenerate rust-sdk/testdata (add -proofs to also redo the Groth16 fixtures)
-cd go-sdk && go run ./cmd/sdk-vectors -out ../rust-sdk/testdata
-```
-
-The embedded ballot VK (`rust-sdk/assets/ballot_proof_vkey.json`) is the
-current davinci-circom one, not the v1.0.0 VK the Go SDK tests use.
+- [docs/architecture.md](docs/architecture.md): the guests, the two modes and
+  what a verifier must check.
+- [docs/api.md](docs/api.md): HTTP API reference.
+- [docs/deployment.md](docs/deployment.md): hardware, configuration,
+  operation and troubleshooting.
+- [docs/testing.md](docs/testing.md): unit, emulator, integration and
+  benchmark suites.
+- [circuit/CIRCUIT.md](circuit/CIRCUIT.md): specification of the vote-batch
+  guest.
+- [circuit-results/RESULTS.md](circuit-results/RESULTS.md): specification of
+  the results guest.
+- [BENCHMARK.md](BENCHMARK.md): measured proving times.
+- [go-sdk/README.md](go-sdk/README.md) and
+  [solidity/README.md](solidity/README.md).
 
 ## Development
 
 ```bash
-# Rebuild the guest ELFs into */elf/ (needs the +zisk Rust toolchain).
-# Source paths are remapped, so any checkout builds the same bytes; CI
-# checks the tracked ELFs this way. A guest source change moves its
-# program vk: refreeze CircuitRelease (go-sdk/chain/release.go) and
-# rust-sdk/src/release.rs from `cargo-zisk setup -e <elf> -k <proving-key>`.
-scripts/build-guests.sh                  # or: scripts/build-guests.sh circuit-results
-
-# Build the service binary
 cargo build --release -p davinci-zkvm-service
-
-# Rebuild the runtime Docker image
-make build
-
-# Run the integration tests against a running service
-make test
+cargo test -p davinci-zkvm-service -p davinci-zkvm-sdk -p davinci-zkvm-input-gen
+scripts/build-guests.sh   # rebuild the guest ELFs (needs the ZisK toolchain)
 ```
 
-If you'd rather build and run the service directly on the host without
-Docker — useful when iterating on the Rust code — see `make local-setup`,
-`make local-run`, `make local-test`. Those drive `scripts/install.sh`, which
-also installs `snarkjs`: the prover's own PLONK verification shells out to
-it (the Docker image ships it).
-
-## Circuit specification
-
-[circuit/CIRCUIT.md](circuit/CIRCUIT.md) has the formal constraint spec, the public-output
-encoding, the fail-mask bits, and the cross-block binding rules.
+A guest change also changes its verification key, which the SDKs pin. Read
+[CONTRIBUTING.md](CONTRIBUTING.md) before changing a guest or a wire format.
 
 ## License
 
-AGPL-3.0, see [LICENSE](LICENSE).
+GNU Affero General Public License v3.0 or later. See [LICENSE](LICENSE).

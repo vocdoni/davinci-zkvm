@@ -6,14 +6,16 @@
 #   cuda  — NVIDIA GPU prover. Requires driver 570+ and
 #           nvidia-container-toolkit on the host (no CUDA toolkit — the
 #           prebuilt cargo-zisk-gpu is statically linked to the CUDA runtime).
+#   watchtower — follows the published image tag and restarts the prover on
+#           a new image (see docs/deployment.md).
 #
 # Typical workflow is driven by the top-level Makefile (`make help`):
 #   make keys     → docker compose --profile setup run --rm key-installer
 #   make up       → docker compose --profile cuda up -d
 #   make test     → run integration tests against the running service
 #
-# The service always produces a PLONK SNARK ready for on-chain verification
-# via the `ZiskVerifier.verifySnarkProof` contract in `solidity/`.
+# The prover returns PLONK proofs for the `ZiskVerifier.verifySnarkProof`
+# contract in `solidity/`, and STARKs for chained mode.
 
 services:
   key-installer:

@@ -6,7 +6,7 @@
 //! field multiplications (omega table generation + barycentric sum + batch inverse).
 //! Using `ark-bls12-381::Fr` maps each multiplication to ~50 pure RISC-V instructions
 //! in the Fibonacci SM table.  The ZisK `arith256_mod` precompile computes
-// ! `d = (a*b + c) mod p` in a single, dedicated ArithMod row => replacing ~50
+//! `d = (a*b + c) mod p` in a single, dedicated ArithMod row => replacing ~50
 //! Fibonacci SM rows per operation with 1 precompile row.
 //!
 //! # Representation
@@ -34,8 +34,8 @@ pub const BLS_FR_MOD: [u64; 4] = [
     0x73eda753299d7d48,
 ];
 
-/// p - 2: exponent for the legacy Fermat inversion `a^(p-2) mod p`.
-/// Retained for reference; `inv()` now uses `fcall_uint256_inv_mod` instead.
+/// p - 2: exponent for Fermat inversion `a^(p-2) mod p`. Unused: `inv()`
+/// takes the inverse as a checked `fcall_uint256_inv_mod` hint.
 #[allow(dead_code)]
 const PM2: [u64; 4] = [
     0xfffffffeffffffff,
@@ -140,7 +140,7 @@ pub fn sub(a: &BlsFrRaw, b: &BlsFrRaw) -> BlsFrRaw {
 #[inline]
 pub fn neg(a: &BlsFrRaw) -> BlsFrRaw {
     // Reduce first: attacker-controlled values may be non-canonical (≥ p),
-    // and `sub_256` underflows on such input. Same fix as `bn254_fr::neg`.
+    // and `sub_256` underflows on such input. Same as `bn254_fr::neg`.
     let a = muladd(a, &ONE, &ZERO);
     if a == ZERO {
         return ZERO;
@@ -151,7 +151,7 @@ pub fn neg(a: &BlsFrRaw) -> BlsFrRaw {
 
 /// Compute `a^(-1) mod p`.
 ///
-/// # Implementation (optimized)
+/// # Implementation
 ///
 /// Uses `fcall_uint256_inv_mod` — a ZisK *free-input call* (fcall) that reads
 /// the inverse as an unverified hint from the prover. Because fcalls are not
@@ -160,10 +160,10 @@ pub fn neg(a: &BlsFrRaw) -> BlsFrRaw {
 /// a malicious prover), the check fails and the guest aborts: a zero
 /// inverse would silently zero the KZG evaluations.
 ///
-/// This replaces the legacy Fermat `a^(p-2) mod p` (~383 `arith256_mod` syscalls)
-/// with **1 fcall hint + 1 checked multiply**. The KZG barycentric evaluation
-/// (`kzg.rs`) calls `inv` inside `batch_inverse` (1× per batch of 4096) plus one
-/// constant inversion — each previously costing ~383 syscalls.
+/// One hint plus one checked multiply, against ~383 `arith256_mod` calls for
+/// Fermat `a^(p-2) mod p`. The KZG barycentric evaluation (`kzg.rs`) calls
+/// `inv` inside `batch_inverse` (once per 4096-cell blob) plus one constant
+/// inversion.
 ///
 /// Returns `ZERO` when `a` is `ZERO`.
 #[inline]
@@ -181,7 +181,7 @@ pub fn inv(a: &BlsFrRaw) -> BlsFrRaw {
 }
 
 /// Modular exponentiation `a^exp mod p`, square-and-multiply (LSB-first).
-/// Retained for reference; `inv()` now uses `fcall_uint256_inv_mod`.
+/// Unused by `inv()`, which takes a checked hint.
 #[allow(dead_code)]
 pub fn pow(a: &BlsFrRaw, exp: &[u64; 4]) -> BlsFrRaw {
     let mut result = ONE;

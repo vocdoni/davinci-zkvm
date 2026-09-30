@@ -104,13 +104,13 @@ fn from_rte_rejects_non_canonical() {
     );
 }
 
-// ----- challenge values match the research -----
+// ----- challenge values match the davinci-dkg vectors -----
 
 #[test]
 fn challenge_values_match_research() {
     // For each organizer vector, re-derive c from (z, w, sk) using
     // z = w + c*sk mod L  =>  c = (z - w) * sk^-1 mod L,
-    // then compare to the research-computed value.
+    // then compare to the value in the vector file.
     let expected: &[(&str, &str)] = &[
         (
             "basic",

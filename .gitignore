@@ -6,10 +6,9 @@ circuit/target/
 # reproducible builds; omit this line if you want to ignore it.
 # Cargo.lock
 
-# ── Circuit ELF ─────────────────────────────────────────────────────────────
-# The pre-built ELF is tracked at circuit/elf/circuit.elf so other contributors
-# can run the service without needing the +zisk toolchain.
-# circuit/elf/circuit.elf  ← intentionally tracked
+# ── Guest ELFs ──────────────────────────────────────────────────────────────
+# The pre-built ELFs in */elf/ are tracked on purpose: the service runs
+# without the ZisK toolchain and CI checks they match the source.
 
 # ── Generated / runtime data ─────────────────────────────────────────────────
 data/
@@ -17,7 +16,7 @@ go-sdk/data/
 proof_output/
 
 # ── Proving keys ─────────────────────────────────────────────────────────────
-# Too large (~37 GB) to track. The Docker-driven `make keys` target
+# Too large (~100 GB) to track. The Docker-driven `make keys` target
 # downloads them into ./zisk-keys; bare-host installs land in ~/.zisk.
 zisk-keys/
 provingKey/
@@ -30,8 +29,7 @@ provingKey/
 *.ptau
 
 # ── Docker / local environment ───────────────────────────────────────────────
-# .env holds COMPOSE_PROFILES and other local overrides; not committed so each
-# developer can choose their own profile (cuda / cpu) without affecting others.
+# .env holds local Compose overrides (see .env.example).
 .env
 .env.local.nodocker
 *.log
@@ -47,8 +45,9 @@ go-sdk/tests/*.test
 .DS_Store
 Thumbs.db
 
-# ── Local editor state ──────────────────────────────────────────────────────
+# ── Local tool state ─────────────────────────────────────────────────────────
 .claude/
+CLAUDE.md
 
 # ── Reference checkouts / prototypes (not part of this repo) ────────────────
 davinci-node/

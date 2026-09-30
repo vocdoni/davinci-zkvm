@@ -9,11 +9,12 @@
 //!   `0x`-prefixed hex.
 //! - `GET /jobs/:id/snark/raw` — raw `proof.bin` (bincode), useful for
 //!   `cargo-zisk verify` and other ZisK-native tooling.
-//! - `GET /jobs/:id/publics` — the 256-byte `publicValues` blob on its own.
+//! - `GET /jobs/:id/publics` — the guest's 64 `u32` output registers
+//!   (256 bytes).
 //! - `GET /jobs/:id/inputs` — the raw `input.bin` the SNARK was generated
 //!   over (audit / re-proving).
 //!
-//! All artifact endpoints return `429 Too Early` until the job is `done`,
+//! All artifact endpoints return `425 Too Early` until the job is `done`,
 //! `422 Unprocessable Entity` if the job failed, and `404 Not Found` for an
 //! unknown job ID.
 
@@ -246,8 +247,8 @@ pub async fn get_job_snark_raw(
 }
 
 /// `GET /jobs/:id/publics` — download the program's `commit_slice` output as
-/// raw bytes (256 B). Same payload as the `public_values` field returned by
-/// `/snark`.
+/// 64 little-endian `u32` (256 B). The `/snark` `public_values` field carries
+/// the same values as 8-byte words.
 pub async fn get_job_publics(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,

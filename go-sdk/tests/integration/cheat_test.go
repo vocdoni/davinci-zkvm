@@ -282,7 +282,7 @@ func findGenInputBin(t *testing.T) string {
 	if p := os.Getenv("GEN_INPUT_BIN"); p != "" {
 		return p
 	}
-	// Try $REPO_ROOT/target/release/gen-input.
+	// Then PATH, then the workspace build.
 	if p, err := exec.LookPath("gen-input"); err == nil {
 		return p
 	}
@@ -511,9 +511,9 @@ func TestCheatSlotHighPathBits(t *testing.T) {
 	assertCircuitFailsExactly(t, tampered, failCensus, "slot_high_path_bits")
 }
 
-// legacySlotKey is the old compact-path slot, BallotMin + ((1 << n) |
+// legacySlotKey is the compact-path slot, BallotMin + ((1 << n) |
 // path_bits). The census root does not bind a leaf position, so the guest
-// must no longer accept it.
+// must reject it.
 func legacySlotKey(t *testing.T, e *Election, idx int) uint64 {
 	t.Helper()
 	p, err := e.Census.GenerateProof(idx)
@@ -524,7 +524,7 @@ func legacySlotKey(t *testing.T, e *Election, idx int) uint64 {
 }
 
 // TestCheatSlotPathDerived builds an otherwise honest batch whose ballots sit
-// at the old path-derived slots: the state, DA and refresh data are all
+// at path-derived slots: the state, DA and refresh data are all
 // consistent, so only the address slot binding (spec 4.1.6) can reject it.
 func TestCheatSlotPathDerived(t *testing.T) {
 	election, err := NewElection(2)

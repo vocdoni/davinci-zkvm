@@ -30,8 +30,8 @@ pub const BN254_FR_MOD: [u64; 4] = [
     0x30644e72e131a029,
 ];
 
-/// p - 2: exponent for the legacy Fermat inversion `a^(p-2) mod p`.
-/// Retained for reference; `inv()` now uses `fcall_uint256_inv_mod` instead.
+/// p - 2: exponent for Fermat inversion `a^(p-2) mod p`. Unused: `inv()`
+/// takes the inverse as a checked `fcall_uint256_inv_mod` hint.
 #[allow(dead_code)]
 const PM2: [u64; 4] = [
     0x43e1f593efffffff,
@@ -106,7 +106,7 @@ pub fn neg(a: &BnFr) -> BnFr {
 
 /// Compute `a^(-1) mod p`.
 ///
-/// # Implementation (optimized)
+/// # Implementation
 ///
 /// Uses `fcall_uint256_inv_mod` — a ZisK *free-input call* (fcall) that reads
 /// the inverse as an unverified hint from the prover. Because fcalls are not
@@ -115,8 +115,8 @@ pub fn neg(a: &BnFr) -> BnFr {
 /// a malicious prover), the check fails and `ZERO` is returned, which propagates
 /// as a verification failure downstream — no unsoundness.
 ///
-/// This replaces the legacy Fermat `a^(p-2) mod p` (~383 `arith256_mod` syscalls)
-/// with **1 fcall hint + 1 checked multiply**.
+/// One hint plus one checked multiply, against ~383 `arith256_mod` calls for
+/// Fermat `a^(p-2) mod p`.
 ///
 /// Returns `ZERO` when `a` is `ZERO`.
 #[inline]
@@ -131,7 +131,7 @@ pub fn inv(a: &BnFr) -> BnFr {
 }
 
 /// Modular exponentiation `a^exp mod p` (square-and-multiply, LSB-first).
-/// Retained for reference; `inv()` now uses `fcall_uint256_inv_mod`.
+/// Unused by `inv()`, which takes a checked hint.
 #[allow(dead_code)]
 pub fn pow(a: &BnFr, exp: &[u64; 4]) -> BnFr {
     let mut result = ONE;

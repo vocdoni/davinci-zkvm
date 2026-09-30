@@ -246,7 +246,7 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
     // --- CSP block (optional, after census block) ---
     // Format: CSPBLK!!(u64) | n_entries(u64)
     //         Per entry: r(FrRaw) s(FrRaw) recid(u64) voter_address(FrRaw) weight(FrRaw) index(u64)
-    // The CSP public key is no longer shipped; it is recovered per-entry via
+    // The CSP public key is not shipped; it is recovered per-entry via
     // `ecdsa_recover_secp256k1` and consistency-checked across entries.
     if off + 8 <= input.len() {
         let maybe_magic = u64::from_le_bytes(input[off..off + 8].try_into().unwrap());

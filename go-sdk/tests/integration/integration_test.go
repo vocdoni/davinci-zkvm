@@ -5,7 +5,7 @@
 // accumulates the ElGamal ciphertexts homomorphically, and verifies the final
 // vote tally by decrypting with the election private key.
 // Prerequisites:
-//   - docker compose up -d --build (starts davinci-zkvm service)
+//   - a running davinci-zkvm service (`make up`)
 //   - DAVINCI_API_URL (default: http://localhost:8080)
 //   - DAVINCI_PROOF_TIMEOUT (default: 5m per ZisK proof)
 package integration

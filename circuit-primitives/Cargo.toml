@@ -3,8 +3,8 @@ name = "circuit-primitives"
 version = "0.1.0"
 edition = "2021"
 
-# Shared crypto primitives for the ZisK guests (vote-batch circuit and
-# aggregator). Depends on ziskos precompile wrappers, so it only builds
+# Shared crypto primitives for the ZisK guests (vote batch, aggregator and
+# results). Depends on ziskos precompile wrappers, so it only builds
 # for the zisk target — kept out of the root workspace like the guests.
 [workspace]
 
@@ -13,7 +13,7 @@ ziskos = "=1.3.0-alpha"
 
 # ziskos drags in proofman-starks-lib-c (via zisk-verifier -> proofman-fields),
 # whose build.rs compiles a CUDA prover no guest ever uses. Declared here only
-# to force its `cpu-only` feature through unification; both guests inherit it.
+# to force its `cpu-only` feature through unification; every guest inherits it.
 proofman-starks-lib-c = { version = "=1.3.0-alpha", features = ["cpu-only"] }
 
 # Test-only: parse the davinci-node-extracted Chaum-Pedersen vectors. Excluded
