@@ -159,5 +159,5 @@ The constants live in `circuit-primitives/src/types.rs` and are mirrored in
 `input-gen`, `go-sdk/types.go` and `rust-sdk/src/limits.rs`. Changing one
 changes the guest and its vk. A settlement transaction can carry at most six
 blobs (EIP-7594), which caps the settleable batch size below 1024 for ballots
-with more than five fields; `davinci.MaxSingleTxBatch(nf)` (Go) and
+with more than five fields (992 at six, 379 at sixteen); `davinci.MaxSingleTxBatch(nf)` (Go) and
 `blob::max_votes_for_cap` (Rust) compute it.

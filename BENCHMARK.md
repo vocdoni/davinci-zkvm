@@ -106,7 +106,7 @@ size over the steady time.
 - A transaction carries at most 6 blobs (EIP-7594), and the settlement
   contract reads all of a transition's blobs from one transaction, so rows
   above 6 blobs are proving figures only. `davinci.MaxSingleTxBatch(nf)`
-  gives the largest settleable batch (1024 up to 5 fields, 366 at 16).
+  gives the largest settleable batch (1024 up to 5 fields, 379 at 16).
 - The proof is 768 bytes plus 512 bytes of public values at every size.
 
 Settling a transition with `solidity/DavinciSettlement.sol` on the simulated
@@ -115,10 +115,32 @@ digest and one point evaluation per blob):
 
 | blobs | gas |
 |---:|---:|
-| 1 (128 votes at nf=2, or up to about 120 updates at nf=16) | ~498 k |
+| 1 (128 votes at nf=2, or up to about 126 updates at nf=16) | ~498 k |
 | 2 | ~554 k |
 | 3 (128 votes + 128 refreshes at nf=16) | ~612 k |
 | 4 (128 overwrites + 256 refreshes at nf=16) | ~667 k |
+
+### DA stream on the emulator
+
+The compact DA stream (v0.2.0) packs vote ids and slot keys four per cell,
+drops the Results accumulator from the blobs and builds the KZG
+root-of-unity table once per batch instead of once per blob. Guest cost from
+`ziskemu -X` on the steady batch of `TestPlonkBenchmark` (N votes plus N
+silent refreshes, the cached ballots), measured with `TestEmuSteps`
+(`go-sdk/tests/integration/emusteps_test.go`) on v0.1.1 and on v0.2.0:
+
+| N | nf | blobs | steps v0.1.1 | steps v0.2.0 | Δ | cost v0.1.1 | cost v0.2.0 | Δ | `arith256_mod` v0.1.1 | v0.2.0 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 256 | 2 | 1 | 110,905,662 | 110,885,686 | −0.02 % | 24,304,471,959 | 24,327,038,954 | +0.09 % | 3,878,016 | 3,876,846 |
+| 512 | 2 | 2 | 227,343,417 | 227,191,911 | −0.07 % | 49,622,312,174 | 49,645,263,252 | +0.05 % | 8,104,386 | 8,097,949 |
+| 256 | 16 | 5 | 196,969,616 | 196,510,634 | −0.23 % | 44,432,224,939 | 44,368,371,321 | −0.14 % | 8,209,900 | 8,192,158 |
+| 512 | 16 | 9 | 398,328,940 | 397,407,237 | −0.23 % | 89,711,725,800 | 89,582,395,031 | −0.14 % | 16,743,319 | 16,707,965 |
+
+The stream saves blob space, not proving: every change stays within 0.25 %.
+Derived from the `arith256_mod` column: building the omega table once saves
+about 4.12k calls per extra blob (512 × 16: 8 extra blobs × 4.12k plus 1,185
+fewer cells × 2 ≈ 35.35k; the table shows 35,354).
+Repeated runs differ by about 0.0005 %.
 
 ## Chained mode (ZisK 0.18)
 

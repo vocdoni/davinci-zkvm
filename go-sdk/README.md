@@ -98,7 +98,7 @@ evaluation points, openings and the digest the guest publishes, and
 `Request` strips them down to what `/prove` needs:
 
 ```go
-blobs, err := davinci.BuildTransitionBlobs(numFields, pid, rootBefore, voteIDs, updates, accumulator)
+blobs, err := davinci.BuildTransitionBlobs(numFields, pid, rootBefore, voteIDs, updates)
 batch.KZG = blobs.Request(pidHex, rootBeforeHex)
 ```
 

@@ -3,10 +3,10 @@ package davinci
 import "testing"
 
 // TestMaxSingleTxBatch pins the single-transaction capacity table: a steady
-// batch of n votes carries n refreshes, each update is 1+2*nf cells, six
-// blobs hold 24576 cells.
+// batch of n votes carries n refreshes, each update is 2*nf point cells plus
+// a quarter of an integer cell, six blobs hold 24576 cells.
 func TestMaxSingleTxBatch(t *testing.T) {
-	want := map[int]int{1: 1024, 2: 1024, 4: 1024, 5: 1024, 6: 909, 8: 701, 12: 481, 16: 366}
+	want := map[int]int{1: 1024, 2: 1024, 4: 1024, 5: 1024, 6: 992, 8: 750, 12: 504, 16: 379}
 	for nf, n := range want {
 		if got := MaxSingleTxBatch(nf); got != n {
 			t.Errorf("MaxSingleTxBatch(%d) = %d, want %d", nf, got, n)

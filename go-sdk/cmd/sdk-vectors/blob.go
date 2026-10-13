@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	mrand "math/rand"
 	"os"
 
 	"github.com/iden3/go-iden3-crypto/babyjub"
@@ -13,7 +14,11 @@ import (
 )
 
 func blobMain() {
+	// Own stream, so the blob cases can change without moving wire_prove.json.
+	saved := rng
+	rng = mrand.New(mrand.NewSource(20261013))
 	write("blob.json", blobVectors())
+	rng = saved
 	write("wire_prove.json", wireProveFixture())
 }
 
@@ -45,7 +50,6 @@ type blobVec struct {
 	RootBefore      string       `json:"root_before"` // raw arbo root bytes
 	VoteIDs         []uint64     `json:"vote_ids"`    // input order (unsorted)
 	Updates         []blobUpdate `json:"updates"`     // input order (unsorted)
-	Accumulator     []string     `json:"accumulator"`
 	Cells           []string     `json:"cells"`
 	Commitments     []string     `json:"commitments"`
 	VersionedHashes []string     `json:"versioned_hashes"`
@@ -55,9 +59,13 @@ type blobVec struct {
 	Digest          string       `json:"digest"`
 }
 
+// blobVectors covers V + U = 2, 0, 1 and 3 (mod 4), so every fill of the last
+// integer cell, and T = 4097: one cell in a second blob.
 func blobVectors() []blobVec {
 	var out []blobVec
-	for _, c := range []struct{ nf, nVids, nUpdates int }{{2, 5, 21}, {6, 40, 80}, {16, 100, 125}} {
+	for _, c := range []struct{ nf, nVids, nUpdates int }{
+		{2, 5, 21}, {6, 40, 80}, {4, 9, 12}, {1, 3, 4}, {16, 1, 127},
+	} {
 		pid := processID(randBytes(20), [4]byte{0xaa, 0xbb, 0xcc, 0xdd}, uint64(c.nf)).MathBigInt()
 		root := randBytes(32)
 		vids := make([]uint64, c.nVids)
@@ -74,13 +82,12 @@ func blobVectors() []blobVec {
 			keySet[k] = true
 			updates = append(updates, davinci.SlotUpdate{Key: k, Ballot: teBallotHex(c.nf)})
 		}
-		acc := teBallotHex(c.nf)
 		var pidBE, rootBE [32]byte
 		copy(pidBE[:], be32(pid))
 		copy(rootBE[:], reverse(root))
-		tb, err := davinci.BuildTransitionBlobs(c.nf, pidBE, rootBE, vids, updates, acc)
+		tb, err := davinci.BuildTransitionBlobs(c.nf, pidBE, rootBE, vids, updates)
 		must(err)
-		v := blobVec{Nf: c.nf, ProcessID: dec(pid), RootBefore: hex.EncodeToString(root), VoteIDs: vids, Accumulator: acc,
+		v := blobVec{Nf: c.nf, ProcessID: dec(pid), RootBefore: hex.EncodeToString(root), VoteIDs: vids,
 			Digest: hex.EncodeToString(tb.Digest[:])}
 		for _, u := range updates {
 			v.Updates = append(v.Updates, blobUpdate{u.Key, u.Ballot})

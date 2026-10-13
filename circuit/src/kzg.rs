@@ -1,9 +1,9 @@
 //! KZG EIP-4844 DA blob binding + barycentric evaluation.
 //!
 //! The blob cells are not host input: the guest rebuilds them from verified
-//! state (the sorted vote ids, the sorted slot updates covering new votes,
-//! overwrites and silent refreshes alike, and the NEW net accumulator)
-//! and evaluates each blob polynomial at the point derived from that blob's
+//! state (the sorted vote ids and the sorted slot updates covering new votes,
+//! overwrites and silent refreshes alike; layout in `da_blob.rs`) and
+//! evaluates each blob polynomial at the point derived from that blob's
 //! commitment. The `(commitment, y)` pairs are hashed into one digest and
 //! emitted in the publics; the settlement contract compares each pair against
 //! the blob's versioned hash via the EIP-4844 point-evaluation precompile.
@@ -56,7 +56,8 @@ const ROU_BYTES: [u8; 32] = [
     0x38, 0x29, 0x97, 0x1f, 0x43, 0x9f, 0x0d, 0x2b,
 ];
 
-/// Generate the 4096 EIP-4844 roots of unity in bit-reversed order.
+/// Generate the 4096 EIP-4844 roots of unity in bit-reversed order. Built
+/// once per batch and shared by every blob.
 fn gen_omega_table() -> [BlsFrRaw; N] {
     let rou = bls_fr::from_be32_raw(&ROU_BYTES);
 
@@ -93,11 +94,10 @@ fn bit_reverse(n: usize, log2n: usize) -> usize {
 // Barycentric evaluation
 
 /// Evaluate one blob polynomial at `z`. `blob` is a flat 4096 x 32 byte buffer,
-/// each cell a big-endian BLS12-381 Fr element (matches EIP-4844 / go-eth-kzg).
-pub fn evaluate_barycentric(blob: &[u8], z: BlsFrRaw) -> BlsFrRaw {
+/// each cell a big-endian BLS12-381 Fr element (matches EIP-4844 / go-eth-kzg);
+/// `omega` is `gen_omega_table()`.
+pub fn evaluate_barycentric(blob: &[u8], z: BlsFrRaw, omega: &[BlsFrRaw; N]) -> BlsFrRaw {
     debug_assert_eq!(blob.len(), N * 32, "blob must be exactly 4096 x 32 bytes");
-
-    let omega = gen_omega_table();
 
     for (k, w) in omega.iter().enumerate() {
         if *w == z {
@@ -163,7 +163,6 @@ pub fn verify_kzg(
     state: Option<&StateBlock>,
     num_fields: usize,
     refreshed_new: &[BallotData],
-    net: &BallotData,
     fail_mask: &mut u32,
 ) -> (bool, [u8; 32], u32) {
     let (block, state) = match (kzg, state) {
@@ -194,7 +193,7 @@ pub fn verify_kzg(
     let n_updates = updates.len();
 
     // 3) Cell layout and expected n_blobs.
-    let cells = build_cells(&vids, &updates, net, num_fields);
+    let cells = build_cells(&vids, &updates, num_fields);
     let t = total_cells(n_vids, n_updates, num_fields);
     debug_assert_eq!(cells.len(), t);
     let expected_n_blobs = n_blobs_from_t(t);
@@ -210,7 +209,8 @@ pub fn verify_kzg(
 
     // 4) Per blob: copy cells into a 131072-byte buffer, evaluate at z_b, and
     // collect the (com, y) pairs. The last blob is zero-padded past the cell
-    // count.
+    // count. The roots of unity are the same for every blob.
+    let omega = gen_omega_table();
     const BLOB_BYTES: usize = N * 32;
     let mut pairs: Vec<([u8; 48], [u8; 32])> = Vec::with_capacity(n_blobs_have);
     let mut blob_buf = alloc::vec![0u8; BLOB_BYTES];
@@ -224,7 +224,7 @@ pub fn verify_kzg(
             blob_buf[local * 32..(local + 1) * 32].copy_from_slice(&cells[global]);
         }
         let z_b = compute_z(&block.process_id, &block.root_hash_before, &block.commitments[b]);
-        let y_b = evaluate_barycentric(&blob_buf, z_b);
+        let y_b = evaluate_barycentric(&blob_buf, z_b, &omega);
         pairs.push((block.commitments[b], bls_fr::to_be32(&y_b)));
     }
     let digest = digest_pairs(&pairs);

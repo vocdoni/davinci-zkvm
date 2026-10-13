@@ -117,9 +117,9 @@ type Election struct {
 	reencChain *elgamal.ReencChain
 
 	// lastDA holds the DA blob inputs produced by BuildStateBlock for this
-	// batch: vote id first-limbs, every (key, ballot) update — batch ballots
-	// then silent refreshes — and the NEW net accumulator (BallotFields BE
-	// hex coords). BuildKZGBlock reads them to build the transition blobs.
+	// batch: vote id first-limbs and every (key, ballot) update — batch
+	// ballots then silent refreshes. BuildKZGBlock reads them to build the
+	// transition blobs.
 	// Rebuilt by every BuildStateBlock call; a BuildKZGBlock before the first
 	// BuildStateBlock errors out.
 	lastDA *daBatchState
@@ -130,9 +130,8 @@ type Election struct {
 // of these values must go through the RefreshKeysOverride knob or reach for
 // the stash directly.
 type daBatchState struct {
-	VoteIDs     []uint64
-	Updates     []davinci.SlotUpdate
-	Accumulator []string
+	VoteIDs []uint64
+	Updates []davinci.SlotUpdate
 }
 
 // voterSeed derives the signer seed of test voter i. It must be injective: a
@@ -676,9 +675,8 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 	// what the guest hashes. Batch ballot updates come first, then silent
 	// refreshes; the cell builder stable-sorts everything by key anyway.
 	da := &daBatchState{
-		VoteIDs:     make([]uint64, n),
-		Updates:     make([]davinci.SlotUpdate, 0, n+len(items)),
-		Accumulator: frAccumToStrings(newResults),
+		VoteIDs: make([]uint64, n),
+		Updates: make([]davinci.SlotUpdate, 0, n+len(items)),
 	}
 	for i, res := range ballotResults {
 		da.VoteIDs[i] = res.VoteID
@@ -877,8 +875,8 @@ func identityCiphertext() *elgamal.Ciphertext {
 
 // BuildKZGBlock builds the DA blob binding for the batch that BuildStateBlock
 // just applied. It rebuilds the exact cell stream the guest constructs from
-// verified state (vote ids, batch ballot updates, silent-refresh updates, and
-// the NEW net accumulator), splits it into EIP-4844 blobs, commits and opens
+// verified state (vote ids, batch ballot updates and silent-refresh updates),
+// splits it into EIP-4844 blobs, commits and opens
 // each at z_b = SHA-256(processID || rootBefore || commitment_b) mod r_bls.
 // Returns the commitments-only KZGRequest plus the full TransitionBlobs so
 // settlement tests can feed the on-chain point-evaluation precompile.
@@ -906,7 +904,6 @@ func (e *Election) BuildKZGBlock(oldRoot string) (*davinci.KZGRequest, *davinci.
 		pid32, rhb32,
 		e.lastDA.VoteIDs,
 		e.lastDA.Updates,
-		e.lastDA.Accumulator,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("BuildTransitionBlobs: %w", err)

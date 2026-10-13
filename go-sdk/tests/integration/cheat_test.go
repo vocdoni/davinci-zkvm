@@ -432,6 +432,80 @@ func TestCheatWrongKZGCommitment(t *testing.T) {
 	}
 }
 
+// kzgBlockWithCount rewrites an encoded KZGBLK to carry n commitments: the
+// honest ones truncated, or extended with copies of the last.
+func kzgBlockWithCount(block []byte, n int) []byte {
+	const header = 8 + 32 + 32 + 8 // magic, process id, root before, n_blobs
+	have := (len(block) - header) / 48
+	out := append([]byte(nil), block[:header]...)
+	binary.LittleEndian.PutUint64(out[header-8:], uint64(n))
+	for i := 0; i < n; i++ {
+		j := min(i, have-1)
+		out = append(out, block[header+48*j:header+48*(j+1)]...)
+	}
+	return out
+}
+
+// TestCheatKZGBlobCount: the honest batch's blobs digest equals the one
+// BuildTransitionBlobs computes (the guest and the Go builder lay out the
+// same cells), and one commitment fewer or more than ceil(T / 4096) sets
+// FAIL_KZG and nothing else, for every fill of the last integer cell
+// (V + U mod 4).
+func TestCheatKZGBlobCount(t *testing.T) {
+	cases := []struct {
+		name          string
+		voters, first int // election size; voters in an earlier, unchecked batch
+		residue       int // (V + U) mod 4 of the checked batch
+	}{
+		{"one-vote", 1, 0, 2},           // V 1, U 1
+		{"two-votes", 2, 0, 0},          // V 2, U 2
+		{"vote-one-refresh", 2, 1, 3},   // V 1, U 1 + 1 refresh
+		{"vote-three-refresh", 4, 3, 1}, // V 1, U 1 + 3 refreshes
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			election, err := NewElection(c.voters)
+			if err != nil {
+				t.Fatalf("NewElection: %v", err)
+			}
+			var base *cheatElectionInput
+			if c.first == 0 {
+				base, election, _ = buildCheatInputElection(t, election)
+			} else {
+				base, election, _ = buildCheatInputBatches(t, election, election.Voters[:c.first], election.Voters[c.first:])
+			}
+			sd := base.stateData
+			if got := (len(sd.VoteIDSmt) + len(sd.BallotSmt) + len(sd.RefreshSmt)) % 4; got != c.residue {
+				t.Fatalf("(V + U) mod 4 = %d, want %d", got, c.residue)
+			}
+			outputs, err := runZiskEmu(base.fullInput())
+			if err != nil {
+				t.Fatalf("ziskemu: %v", err)
+			}
+			if outputs[davinci.OutputOverallOk] != 1 {
+				t.Fatalf("honest batch rejected: fail_mask=0x%08x", outputs[davinci.OutputFailMask])
+			}
+			_, tb, err := election.BuildKZGBlock(base.oldRoot)
+			if err != nil {
+				t.Fatalf("BuildKZGBlock: %v", err)
+			}
+			var digest [32]byte
+			for i := 0; i < 8; i++ {
+				binary.LittleEndian.PutUint32(digest[4*i:], outputs[davinci.OutputBlobsDigest+i])
+			}
+			if digest != tb.Digest {
+				t.Fatalf("guest blobs digest %x, BuildTransitionBlobs %x", digest, tb.Digest)
+			}
+			honest := int(binary.LittleEndian.Uint64(base.kzgBlock[72:80]))
+			for _, n := range []int{honest - 1, honest + 1} {
+				bad := *base
+				bad.kzgBlock = kzgBlockWithCount(base.kzgBlock, n)
+				assertCircuitFailsExactly(t, bad.fullInput(), failKZG, fmt.Sprintf("%s-%d-blobs", c.name, n))
+			}
+		})
+	}
+}
+
 // TestCheatWrongCensusRoot verifies that a wrong census root causes FAIL_CENSUS.
 func TestCheatWrongCensusRoot(t *testing.T) {
 	base, election, _ := buildCheatInput(t)

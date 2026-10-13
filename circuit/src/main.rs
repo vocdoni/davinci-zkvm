@@ -204,7 +204,7 @@ fn main() {
     //     - NewResults = OldResults + Σ voter_ballots − Σ overwritten + refresh_delta
     //     - Refresh chain leaves are checked against refreshed_old / refreshed_new
     //     This ensures the election tally is correctly maintained across batches.
-    let (results_ok, net_results) = match &parsed.state {
+    let (results_ok, _net_results) = match &parsed.state {
         Some(state) => results::verify_results(
             state,
             num_fields,
@@ -216,21 +216,21 @@ fn main() {
     };
 
     // Data availability
-    // The guest rebuilds the DA blob cells from verified state (vote-id list,
-    // sorted slot updates covering new votes, overwrites and silent refreshes,
-    // and the NEW net accumulator) and evaluates each blob polynomial at the
-    // point derived from that blob's commitment. The emitted digest binds the
-    // sequencer's commitments to what the circuit has just proved; the
-    // settlement contract checks each `(commitment, y)` against the blob's
-    // versioned hash via the EIP-4844 point-evaluation precompile. Runs AFTER
-    // results verification (needs the net accumulator) and AFTER verify_state
-    // (needs the SMT chains).
+    // The guest rebuilds the DA blob cells from verified state (vote-id list
+    // and sorted slot updates covering new votes, overwrites and silent
+    // refreshes; the Results accumulator is not emitted, a follower
+    // recomputes it) and evaluates each blob polynomial at the point derived
+    // from that blob's commitment. The emitted digest binds the sequencer's
+    // commitments to what the circuit has just proved; the settlement
+    // contract checks each `(commitment, y)` against the blob's versioned
+    // hash via the EIP-4844 point-evaluation precompile. Runs AFTER the
+    // re-encryption (needs `refreshed_new`) and AFTER verify_state (needs the
+    // SMT chains).
     let (kzg_ok, blobs_digest, n_blobs) = kzg::verify_kzg(
         &parsed.kzg,
         parsed.state.as_ref(),
         num_fields,
         &refreshed_new,
-        &net_results,
         &mut fail_mask,
     );
 

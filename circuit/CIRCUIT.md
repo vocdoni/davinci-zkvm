@@ -212,10 +212,10 @@ offset  size            field
 ```
 
 No `y_claimed`, no blob bytes. The guest rebuilds the blob cells from
-verified state (vote-id list, sorted slot updates, and the NEW net
-accumulator; see §8) and evaluates each polynomial itself. `n_blobs` above
-`MAX_BLOBS` or a truncated commitment list sets `FAIL_PARSE`; zero blobs, or
-a count other than the one the reconstructed cells need, sets `FAIL_KZG`.
+verified state (vote-id list and sorted slot updates; see §8) and evaluates
+each polynomial itself. `n_blobs` above `MAX_BLOBS` or a truncated
+commitment list sets `FAIL_PARSE`; zero blobs, or a count other than the one
+the reconstructed cells need, sets `FAIL_KZG`.
 
 ### Parse failures
 
@@ -890,20 +890,21 @@ about its tree size fails there even if it passes here.
 **Module:** `kzg.rs`, `circuit-primitives/src/da_blob.rs`
 **Fail bits:** `FAIL_KZG` (bit 18)
 
-Runs **after** §4.2 (SMT chains), §4.3 (re-encryption) and §4.4 (result
-accumulator): it needs the state chains, the guest-computed `refreshed_new`
-ballots and the NEW net accumulator that §4.4 returns.
+Runs **after** §4.2 (SMT chains) and §4.3 (re-encryption): it needs the
+state chains and the guest-computed `refreshed_new` ballots.
 
 ### Purpose
 
 Bind the sequencer's DA-blob commitments to what the circuit has just proved.
 Blob cells are not host input: the guest rebuilds them from verified state
-(vote-id list, sorted slot updates covering new votes, overwrites and silent
-refreshes alike, and the NEW net accumulator), packs them into 4096-cell
-EIP-4844 blobs, and evaluates each blob polynomial at the point derived from
-that blob's commitment. The emitted `BlobsDigest` (§3) hashes the ordered
-`(commitment, y)` pairs; the settlement contract checks each pair against the
-blob's versioned hash via the EIP-4844 point-evaluation precompile.
+(vote-id list and sorted slot updates covering new votes, overwrites and
+silent refreshes alike), packs them into 4096-cell EIP-4844 blobs, and
+evaluates each blob polynomial at the point derived from that blob's
+commitment. The Results accumulator is not in the blobs: a follower
+recomputes it (see "Results accumulator" below). The emitted `BlobsDigest`
+(§3) hashes the ordered `(commitment, y)` pairs; the settlement contract
+checks each pair against the blob's versioned hash via the EIP-4844
+point-evaluation precompile.
 
 The KZG block itself carries only the process context and the per-blob
 commitments (see §2 KZGBLK). Absent KZG block or absent STATETX: trivially
@@ -913,7 +914,10 @@ pass with `BlobsDigest = 0` and `NBlobs = 0`.
 
 Cells are 32-byte big-endian BLS12-381 Fr elements. Encoders:
 
-- `enc_u64(v)` = `v` as a 32-byte big-endian integer (top 24 bytes zero).
+- `header(v, u)` = `v · 2⁶⁴ + u`. Both counts are below 2¹²; bits 128..255
+  are a version field, zero, and every other unused bit is zero.
+- `pack4(a, b, c, d)` = `a · 2¹⁸⁹ + b · 2¹²⁶ + c · 2⁶³ + d` for four integers
+  below 2⁶³, built with shifts; the result is below 2²⁵².
 - `pack(x, y)` = `y_canon + ((x_canon & 1) << 254)`, where `x_canon`,
   `y_canon` are the BabyJubJub coords reduced mod BN254 Fr. Fits in
   BLS12-381 Fr since `p_bn254 + 2²⁵⁴ < r_bls`; BN254 Fr `< 2²⁵⁴`, so bit 254
@@ -923,40 +927,55 @@ Cells are 32-byte big-endian BLS12-381 Fr elements. Encoders:
 Layout in cell order:
 
 ```
-enc_u64(n_vids)
-enc_u64(vid_0) .. enc_u64(vid_{n_vids-1})               // ascending
-enc_u64(n_updates)
+header(n_vids, n_updates)
+pack4(I[0], I[1], I[2], I[3])  pack4(I[4], ..) ..       // ceil((n_vids + n_updates) / 4) cells
+    I = [vid_0 & (2^63 - 1) .. vid_{n_vids-1} & (2^63 - 1), key_0 .. key_{n_updates-1}]
+    missing elements of the last cell are zero
 for each (key, ballot) update, ascending by key (stable):
-    enc_u64(key)
     pack(c1_0) pack(c2_0) .. pack(c1_{nf-1}) pack(c2_{nf-1})
-for f in 0..nf:
-    pack(acc_c1_f) pack(acc_c2_f)                       // NEW net accumulator
 zero cells to end of last blob
 ```
 
 Where:
 
 - Vote ids come from `state.vote_id_chain[*].new_key[0]` (the upper limbs
-  are zero by 4.1.4b), sorted ascending.
+  are zero by 4.1.4b), sorted ascending. 4.1 pins every id to
+  `[2⁶³, 2⁶⁴)`, so the top bit is implied and the packed form is
+  `vid & (2⁶³ − 1)`. The guest masks; it never computes `vid − 2⁶³`, so an
+  out-of-namespace id (already `FAIL_CONSISTENCY`) cannot make it panic.
 - Updates cover EVERY slot the batch touched: first the ballot-chain entries
   (in ballot-chain order, ballot = `state.voter_ballots[i]`), then the
   refresh-chain entries (in refresh-chain order, ballot = `refreshed_new[j]`
   as re-encrypted in §4.3/§4.5). The combined list is then stable-sorted by
   `key = transition.new_key[0]`, so an on-chain reader sees one uniform
-  sorted list and cannot tell an overwrite from a silent refresh. A key
+  sorted list and cannot tell an overwrite from a silent refresh. Keys are
+  below 2⁶³ (4.1, 4.5.3), so they fill a 63-bit slot as they are. A key
   written for the first time is a new vote: refreshes only touch occupied
   slots (§4.5). `nf = num_fields` from the BallotMode config; padded fields
   `f ≥ nf` are not emitted (soundness rests on §4.3.4 / §4.5.7 pinning
   them to the TE identity).
-- The accumulator pack cells carry the NEW net Results ballot
-  (`OldResults + Σ voter_ballots − Σ overwritten + refresh_delta` from §4.4).
 
 Cell count:
 
 ```
-T = 2 + n_vids + n_updates · (1 + 2·nf) + 2·nf
+T = 1 + ceil((n_vids + n_updates) / 4) + 2·nf·n_updates
 n_blobs = ceil(T / 4096)          // 1 ≤ n_blobs ≤ MAX_BLOBS = 32
 ```
+
+### Results accumulator
+
+The NEW net Results ballot is not emitted. A follower holds the old Results
+leaf and every occupied slot's ballot under `OldStateRoot`, and computes
+`old_results + Σ_u (new_ballot_u − old_ballot_{key_u})`, with the identity as
+the old ballot of an empty slot. That is the §4.4 value regrouped by slot:
+a new vote adds `new − identity`; an overwrite subtracts
+`overwritten_ballots[j]`, pinned to the tree's old leaf (4.4.3); a refresh
+adds `new_j − old_j` with `old_j` pinned the same way (4.5.5, 4.5.6); a slot
+is never refreshed and written in one batch (4.5.3); the first batch starts
+from the genesis identity leaf. The group is abelian and both sides use the
+complete twisted-Edwards law on canonical coordinates (13.2), so the
+follower's tree reaches `NewStateRoot` exactly when its stored ballots are
+right.
 
 ### Evaluation point derivation
 
@@ -1013,9 +1032,13 @@ point-evaluation result, not as a `FAIL_KZG` bit.
 ### Security rationale
 
 - **No unbound blob bytes.** Every cell is reconstructed from data already
-  bound by earlier phases (SMT chains, ballot leaf hashes, net-Results leaf
-  and refresh checks). A malicious sequencer cannot smuggle extra cells or
-  swap contents without breaking one of those.
+  bound by earlier phases (SMT chains, ballot leaf hashes and refresh
+  checks). A malicious sequencer cannot smuggle extra cells or swap contents
+  without breaking one of those.
+- **Packed integers.** Four 63-bit slots per cell never overlap: ids enter
+  masked and keys are below 2⁶³. The header's counts are no secret:
+  `n_vids` is register 18 and `n_updates` the number of keys listed, and the
+  list still does not mark which updates are overwrites.
 - **Uniform update stream.** Overwrites, new votes and silent refreshes go
   through the same sort key. The layout does not mark them, so an overwrite
   looks like a refresh, the deniability property of §4.5; a slot's first
@@ -1030,13 +1053,13 @@ point-evaluation result, not as a `FAIL_KZG` bit.
 
 ### Performance note
 
-Each blob costs roughly 25k–33k `arith256_mod` calls, depending on how many
-cells are non-zero: the 4096-entry root-of-unity table (rebuilt per blob), the
-4096 differences, the batch inverse (the largest part, ~12k) and the weighted
-sum. Small transitions fit in one blob. `MAX_BLOBS = 32` (131072 cells) is
-above the largest valid transition (1024 votes, 2048 refreshes, 16 fields:
-T = 102434, 26 blobs); a 1024-vote batch with 1024 refreshes at 16 fields
-needs 17.
+Each blob costs roughly 16k–25k `arith256_mod` calls, depending on how many
+cells are non-zero: the 4096 differences, the batch inverse (the largest
+part, ~12k) and two calls per non-zero cell for the weighted sum. The
+4096-entry root-of-unity table (~4.1k calls) is built once per batch. Small
+transitions fit in one blob. `MAX_BLOBS = 32` (131072 cells) is above the
+largest valid transition (1024 votes, 2048 refreshes, 16 fields: T = 99329,
+25 blobs); a 1024-vote batch with 1024 refreshes at 16 fields needs 17.
 
 ---
 
@@ -1228,9 +1251,10 @@ values, preventing substitution.
 
 ### 12.8 Data Availability
 
-Blob cells are rebuilt in-guest from verified state (vote-id list, sorted
-slot updates covering new votes, overwrites and silent refreshes, and the
-NEW net accumulator). Each blob polynomial is evaluated at
+Blob cells are rebuilt in-guest from verified state (vote-id list and
+sorted slot updates covering new votes, overwrites and silent refreshes; a
+follower recomputes the Results ballot, §8). Each blob polynomial is
+evaluated at
 `z_b = SHA-256(pid ‖ root_before ‖ com_b) mod r_bls` and the ordered
 `(com_b, y_b)` pairs are hashed into `BlobsDigest`. The settlement contract
 verifies each `(com_b, y_b)` against the blob-tx versioned hash via the
@@ -1284,9 +1308,10 @@ in subsequent batches).
 ### 13.5 Blob Content Verification
 
 The KZG block carries no blob bytes: the guest rebuilds the cells from
-verified state (vote-id list, sorted slot updates covering new votes,
-overwrites and silent refreshes, and the NEW net accumulator) and evaluates
-each blob polynomial itself (§8). The only host-chosen values are the
+verified state (vote-id list and sorted slot updates covering new votes,
+overwrites and silent refreshes) and evaluates each blob polynomial itself
+(§8).
+The only host-chosen values are the
 commitments, which the settlement contract checks against the blob versioned
 hashes (13.3).
 

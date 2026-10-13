@@ -207,9 +207,10 @@ fn batch_publics_from_recorded_job() {
     let pv = hex::decode(s(&snark["public_values"]).trim_start_matches("0x")).unwrap();
     assert_eq!(pv.len(), 512);
     assert_eq!(BatchPublics::from_public_values(&pv).unwrap(), p);
+    // Recorded on the v0.1 batch ELF; the publics layout did not change since.
     assert_eq!(
         s(&snark["program_vk"]),
-        format!("0x{}", hex::encode(BATCH_PROGRAM_VK))
+        "0x6cfc89d562d0b22f04478a5c15b390433eb52f1b03147030b183076260da7a10"
     );
     assert_eq!(
         s(&snark["root_c_vadcop_final"]),
@@ -335,11 +336,11 @@ fn build_results_request_roundtrip() {
 fn release_pins() {
     assert_eq!(
         hex::encode(BATCH_PROGRAM_VK),
-        "6cfc89d562d0b22f04478a5c15b390433eb52f1b03147030b183076260da7a10"
+        "a0ad5c4c7e39d4a7007933158181418a752e6c1563a211af84c579640db435fa"
     );
     assert_eq!(
         hex::encode(RESULTS_PROGRAM_VK),
-        "7bc8c5e9235548386a44b1885732a2a7ffb1badddc8c7fba599d07ece47be794"
+        "e693589453ecaee63eba697c48d4c5321a714bb18c2d84a97437b3f368578f68"
     );
     assert_eq!(
         hex::encode(ROOT_C_VADCOP_FINAL),

@@ -96,28 +96,30 @@ type TransitionBlobs struct {
 	Digest [32]byte
 }
 
-// TransitionCells rebuilds the DA blob cell stream — the same byte-exact
-// layout the guest constructs in circuit_primitives::da_blob::build_cells.
+// TransitionCells rebuilds the DA blob cell stream, byte-identical to the
+// guest's circuit_primitives::da_blob::build_cells:
+//
+//	header               nVids*2^64 + nUpdates (bits 128 and up zero)
+//	ceil((V+U)/4) cells  [vid & (2^63-1) ..., key ...], four per cell, the
+//	                     first in the top 63-bit slot
+//	U*2*numFields cells  per update in key order: pack(c1_0) pack(c2_0) ...
+//
 // The caller passes:
 //   - numFields: the election's declared num_fields (1..=NumFields);
 //   - voteIDs: the batch's new vote-id chain first-limbs (u64), any order;
-//     they are sorted ascending in place;
+//     a sorted copy is laid out;
 //   - updates: (key, ballot) pairs for every batch ballot + every silent
 //     refresh, in ballot-chain-then-refresh order; stable-sorted by key.
 //     Each Ballot must be exactly BallotFields big-endian hex coords, but
-//     only the first 4·numFields entries are consumed;
-//   - accumulator: the NEW net Results accumulator, BallotFields BE hex
-//     coords; only the first 4·numFields consumed.
+//     only the first 4·numFields entries are consumed.
 //
-// The last blob is NOT padded here — pad up to cellsPerBlob when packing
-// into blob buffers. Kept as its own function so tests can lock the byte
-// layout without needing a KZG trusted setup.
-func TransitionCells(numFields int, voteIDs []uint64, updates []SlotUpdate, accumulator []string) ([][32]byte, error) {
+// The Results accumulator is not in the stream: a follower recomputes it
+// from the ballots it already holds. The last blob is NOT padded here — pad
+// up to cellsPerBlob when packing into blob buffers. Kept as its own
+// function so tests can lock the byte layout without a KZG trusted setup.
+func TransitionCells(numFields int, voteIDs []uint64, updates []SlotUpdate) ([][32]byte, error) {
 	if numFields < 1 || numFields > NumFields {
 		return nil, fmt.Errorf("num_fields out of range: got %d, want 1..=%d", numFields, NumFields)
-	}
-	if len(accumulator) != BallotFields {
-		return nil, fmt.Errorf("accumulator must have %d coords, got %d", BallotFields, len(accumulator))
 	}
 	for i, u := range updates {
 		if len(u.Ballot) != BallotFields {
@@ -135,13 +137,21 @@ func TransitionCells(numFields int, voteIDs []uint64, updates []SlotUpdate, accu
 	t := totalCells(len(sortedVIDs), len(sortedUpdates), numFields)
 	cells := make([][32]byte, 0, t)
 
-	cells = append(cells, encU64(uint64(len(sortedVIDs))))
+	cells = append(cells, headerCell(len(sortedVIDs), len(sortedUpdates)))
+	ints := make([]uint64, 0, len(sortedVIDs)+len(sortedUpdates)+3)
 	for _, v := range sortedVIDs {
-		cells = append(cells, encU64(v))
+		ints = append(ints, v&low63)
 	}
-	cells = append(cells, encU64(uint64(len(sortedUpdates))))
+	for _, u := range sortedUpdates {
+		ints = append(ints, u.Key)
+	}
+	for len(ints)%4 != 0 {
+		ints = append(ints, 0)
+	}
+	for i := 0; i < len(ints); i += 4 {
+		cells = append(cells, pack4(ints[i], ints[i+1], ints[i+2], ints[i+3]))
+	}
 	for i, u := range sortedUpdates {
-		cells = append(cells, encU64(u.Key))
 		for f := 0; f < numFields; f++ {
 			base := f * 4
 			c, err := packTeHex(u.Ballot[base], u.Ballot[base+1])
@@ -155,19 +165,6 @@ func TransitionCells(numFields int, voteIDs []uint64, updates []SlotUpdate, accu
 			}
 			cells = append(cells, c)
 		}
-	}
-	for f := 0; f < numFields; f++ {
-		base := f * 4
-		c, err := packTeHex(accumulator[base], accumulator[base+1])
-		if err != nil {
-			return nil, fmt.Errorf("accumulator field %d c1: %w", f, err)
-		}
-		cells = append(cells, c)
-		c, err = packTeHex(accumulator[base+2], accumulator[base+3])
-		if err != nil {
-			return nil, fmt.Errorf("accumulator field %d c2: %w", f, err)
-		}
-		cells = append(cells, c)
 	}
 	if len(cells) != t {
 		return nil, fmt.Errorf("internal: expected %d cells, got %d", t, len(cells))
@@ -186,9 +183,8 @@ func BuildTransitionBlobs(
 	processIDBE32, rootBeforeBE32 [32]byte,
 	voteIDs []uint64,
 	updates []SlotUpdate,
-	accumulator []string,
 ) (*TransitionBlobs, error) {
-	cells, err := TransitionCells(numFields, voteIDs, updates, accumulator)
+	cells, err := TransitionCells(numFields, voteIDs, updates)
 	if err != nil {
 		return nil, err
 	}
@@ -340,16 +336,32 @@ func parseHex32BE(s string) (*big.Int, error) {
 	return new(big.Int).SetBytes(b), nil
 }
 
-// encU64 encodes v as a 32-byte big-endian integer.
-func encU64(v uint64) [32]byte {
+// low63 masks a vote id to its packed form (its top bit is implied); it is
+// also every integer slot's width.
+const low63 = 1<<63 - 1
+
+// headerCell is nVids*2^64 + nUpdates as a 32-byte big-endian cell.
+func headerCell(nVids, nUpdates int) [32]byte {
 	var out [32]byte
-	binary.BigEndian.PutUint64(out[24:32], v)
+	binary.BigEndian.PutUint64(out[16:24], uint64(nVids))
+	binary.BigEndian.PutUint64(out[24:32], uint64(nUpdates))
 	return out
 }
 
-// totalCells matches da_blob::total_cells.
+// pack4 is a*2^189 + b*2^126 + c*2^63 + d for integers below 2^63, built
+// from the cell's four 64-bit words. Mirrors da_blob::pack4.
+func pack4(a, b, c, d uint64) [32]byte {
+	var out [32]byte
+	binary.BigEndian.PutUint64(out[0:8], a>>3)
+	binary.BigEndian.PutUint64(out[8:16], b>>2|a<<61)
+	binary.BigEndian.PutUint64(out[16:24], c>>1|b<<62)
+	binary.BigEndian.PutUint64(out[24:32], d|c<<63)
+	return out
+}
+
+// totalCells matches da_blob::total_cells: 1 + ceil((V+U)/4) + 2*nf*U.
 func totalCells(nVids, nUpdates, nf int) int {
-	return 2 + nVids + nUpdates*(1+2*nf) + 2*nf
+	return 1 + (nVids+nUpdates+3)/4 + 2*nf*nUpdates
 }
 
 // sortUint64Asc sorts s in place, ascending (insertion sort).
