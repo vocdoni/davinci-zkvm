@@ -188,9 +188,9 @@ fn batch_publics_from_recorded_job() {
     assert_eq!(p.fail_mask, 0);
     assert_eq!(
         (p.voters, p.overwrites, p.n_blobs, p.occupied_before),
-        (3, 3, 1, 24)
+        (225, 0, 2, 0)
     );
-    assert_eq!((p.nproofs, p.n_public, p.log_n), (3, 3, 1));
+    assert_eq!((p.nproofs, p.n_public, p.log_n), (225, 3, 7));
     let reg = |i: usize| u32::from_le_bytes(regs[4 * i..4 * i + 4].try_into().unwrap());
     assert_eq!(
         (p.nproofs, p.n_public, p.log_n),
@@ -207,16 +207,13 @@ fn batch_publics_from_recorded_job() {
     let pv = hex::decode(s(&snark["public_values"]).trim_start_matches("0x")).unwrap();
     assert_eq!(pv.len(), 512);
     assert_eq!(BatchPublics::from_public_values(&pv).unwrap(), p);
-    // Recorded on the v0.1 batch ELF; the publics layout did not change since.
     assert_eq!(
         s(&snark["program_vk"]),
-        "0x6cfc89d562d0b22f04478a5c15b390433eb52f1b03147030b183076260da7a10"
+        format!("0x{}", hex::encode(BATCH_PROGRAM_VK))
     );
-    // Recorded on the ZisK 1.3.0 snark setup. TODO: re-record on a 1.3.2 prover
-    // and compare against ROOT_C_VADCOP_FINAL again.
     assert_eq!(
         s(&snark["root_c_vadcop_final"]),
-        "0x05006517b6ccde5da4d890587ba62845b5af8a307c00e87d4b9d05099b16dc80"
+        format!("0x{}", hex::encode(ROOT_C_VADCOP_FINAL))
     );
 
     let mut bad = pv.clone();
