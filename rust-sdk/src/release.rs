@@ -15,9 +15,16 @@
 //!   prover, `provingKeySnark/vadcop_final.verkey.json` holds the same four u64
 //!   words (big-endian, concatenated), as do the snark setup's
 //!   `ZiskVerifier.getRootCVadcopFinal()` and the aggregator's `SETUP_VK`.
-//! - `ZISK_VERIFIER_CODEHASH`: after a ZisK snark setup change, `forge build`
-//!   in davinci-contracts and take the keccak256 of `ZiskVerifier`'s
-//!   `deployedBytecode` (it has no immutables, so it equals `eth_getCode`).
+//! - `ZISK_VERIFIER_CODEHASH`: after a ZisK snark setup change, vendor the
+//!   setup's verifier into davinci-contracts as its `docs/development.md`
+//!   ("Vendoring the ZisK verifier") describes, `forge build`, and take the
+//!   keccak256 of `ZiskVerifier`'s `deployedBytecode` (it has no immutables, so
+//!   it equals `eth_getCode`). All three files come from
+//!   `provingKeySnark/final/`: `PlonkVerifier.sol` to `src/verifiers/`,
+//!   `IZiskVerifier.sol` to `src/interfaces/`, and `ZiskVerifier.sol` to
+//!   `src/verifiers/` with its import rewritten to
+//!   `../interfaces/IZiskVerifier.sol`. Skipping or editing any of them moves
+//!   the hash.
 //!
 //! A host that accepts a snark should compare its `program_vk` and
 //! `root_c_vadcop_final` against these pins rather than trust the values the
