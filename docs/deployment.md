@@ -125,7 +125,8 @@ overflow kills the prover and not the host. The kernel OOM kill of the prover
 **Retries.** Some ZisK failures are transient: a destroyed CUDA context on
 the first proof after start, a Fiat-Shamir challenge mismatch, witness
 failures inside the recursion stage, an internal counter timeout, an OOM
-kill, and a rejected PLONK self-check. The worker retries these up to three
+kill, a crash of the prover process by SIGSEGV or SIGBUS (a host-side fault,
+not a guest assertion), and a rejected PLONK self-check. The worker retries these up to three
 times, from the second attempt with `--minimal-memory`. Failures that repeat
 on every attempt are real, for example a stale proving key.
 
