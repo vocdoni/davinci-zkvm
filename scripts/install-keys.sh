@@ -5,7 +5,7 @@
 # flag so modern Linux will load it at prove time.
 set -euo pipefail
 
-ZISK_VERSION="${ZISK_VERSION:-1.3.0-alpha}"
+ZISK_VERSION="${ZISK_VERSION:-1.3.2-alpha}"
 ZISK_DIR="${ZISK_DIR:-/zisk}"
 
 export HOME="${HOME:-/root}"

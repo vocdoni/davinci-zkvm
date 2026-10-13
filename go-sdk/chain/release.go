@@ -28,9 +28,9 @@ type Release struct {
 // scripts/build-guests.sh: `cargo-zisk setup -e <elf> -k <proving-key>` prints
 // `Root hash`, whose words rendered big-endian and concatenated are the vk.
 var CircuitRelease = Release{
-	AggVK:     "0x7d6c05197d40ae62b0f0c110c2457970b03544972a462891c761109f0722032b",
-	BatchVK:   "0xa0ad5c4c7e39d4a7007933158181418a752e6c1563a211af84c579640db435fa",
-	ResultsVK: "0xe693589453ecaee63eba697c48d4c5321a714bb18c2d84a97437b3f368578f68",
+	AggVK:     "0x7a2cd627f932f740b7762eff2a18bffb9f2c948fc8de194256afa5a9e6e9dd70",
+	BatchVK:   "0xe39e460085ecddecf365649a61183a71c0fe778aa9c06fd2aa1a6c43cddb988b",
+	ResultsVK: "0x394694558f39d0b2da0bbb09322333a0f567ee8d16bea2f354543a086587d167",
 }
 
 // IsSet reports whether the release has been pinned (both vks present).

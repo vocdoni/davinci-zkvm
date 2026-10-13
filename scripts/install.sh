@@ -3,9 +3,9 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# ZISK_VERSION here is the bare version ("1.3.0-alpha"); the ziskup CLI
+# ZISK_VERSION here is the bare version ("1.3.2-alpha"); the ziskup CLI
 # adds the leading 'v' itself. ZISK_TAG is the upstream git tag with 'v'.
-ZISK_VERSION="${ZISK_VERSION:-1.3.0-alpha}"
+ZISK_VERSION="${ZISK_VERSION:-1.3.2-alpha}"
 ZISK_TAG="${ZISK_TAG:-v${ZISK_VERSION}}"
 ZISK_HOME="${ZISK_HOME:-$HOME/.zisk}"
 ZISK_BIN_DIR="${ZISK_BIN_DIR:-$ZISK_HOME/bin}"

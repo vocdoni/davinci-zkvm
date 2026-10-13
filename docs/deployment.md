@@ -32,7 +32,9 @@ make up
   both proving keys to `./zisk-keys` (`ZISK_KEYS_DIR` to change it). It takes
   20 to 60 minutes depending on bandwidth and is idempotent. It also clears
   the executable-stack flag of the PLONK key's `final.so`, which current Linux
-  kernels refuse to load otherwise.
+  kernels refuse to load otherwise. Keys from another ZisK release do not
+  work: since 1.3.1 `cargo-zisk` refuses a key whose `setupVersion` differs
+  from its own, so rerun `make keys` after changing `ZISK_VERSION`.
 - `make build` builds the prover image (`Dockerfile.cuda`) from the checkout.
 
 On its first start the container builds the GPU setup files into the key
@@ -81,7 +83,7 @@ command line:
 | `LISTEN_PORT` | `8080` | Host port of the API. |
 | `BIND_ADDR` | `0.0.0.0` | Host address the port binds to. Set a private address to keep the API off public interfaces. |
 | `DAVINCI_ZKVM_IMAGE` | `davinci-zkvm-cuda:latest` | Image to run. The default is the one `make build` produces. |
-| `ZISK_TAG`, `ZISK_VERSION` | `v1.3.0-alpha`, `1.3.0-alpha` | ZisK release for the image and the keys. Keep them in sync and matching the guests. |
+| `ZISK_TAG`, `ZISK_VERSION` | `v1.3.2-alpha`, `1.3.2-alpha` | ZisK release for the image and the keys. Keep them in sync and matching the guests. |
 | `MAX_QUEUE_SIZE` | `100` | Jobs waiting at most; further submits get `503`. |
 | `ZISK_MINIMAL_MEMORY_FROM` | `512` | Batches with at least this many ballots prove with `--minimal-memory` from the first attempt. |
 | `ZISK_MINIMAL_MEMORY` | `0` | `1` uses `--minimal-memory` for every job. |
