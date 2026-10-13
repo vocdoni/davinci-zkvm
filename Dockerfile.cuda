@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-ARG ZISK_VERSION=v1.3.0-alpha
+ARG ZISK_VERSION=v1.3.2-alpha
 
 # Download and extract the prebuilt ZisK GPU bundle for linux/amd64.
 # The tarball layout: ./bin/{cargo-zisk-gpu,cargo-zisk-dev-gpu,ziskemu,...} +

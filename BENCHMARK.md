@@ -1,7 +1,8 @@
 # Benchmarks
 
-Measured proving times. The first two sections are for the current guests on
-ZisK 1.3.0-alpha; the chained-mode and older per-batch figures were taken on
+Measured proving times. The first two sections are for the current guest
+source on ZisK 1.3.0-alpha and have not been re-measured on 1.3.2-alpha, which
+the guests now pin; the chained-mode and older per-batch figures were taken on
 ZisK 0.18 with earlier guests and are kept for comparison. Reproduce the
 prover sweeps with `make benchmark` ([benchmark/](benchmark/README.md)) and
 `TestPlonkBenchmark` ([docs/testing.md](docs/testing.md#benchmarks)).

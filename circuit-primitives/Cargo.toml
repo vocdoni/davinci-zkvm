@@ -9,12 +9,12 @@ edition = "2021"
 [workspace]
 
 [dependencies]
-ziskos = "=1.3.0-alpha"
+ziskos = "=1.3.2-alpha"
 
 # ziskos drags in proofman-starks-lib-c (via zisk-verifier -> proofman-fields),
 # whose build.rs compiles a CUDA prover no guest ever uses. Declared here only
 # to force its `cpu-only` feature through unification; every guest inherits it.
-proofman-starks-lib-c = { version = "=1.3.0-alpha", features = ["cpu-only"] }
+proofman-starks-lib-c = { version = "=1.3.2-alpha", features = ["cpu-only"] }
 
 # Test-only: parse the davinci-node-extracted Chaum-Pedersen vectors. Excluded
 # from the guest ELF build (dev-dependencies are not compiled for release).

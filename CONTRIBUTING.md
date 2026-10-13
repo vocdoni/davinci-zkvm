@@ -8,8 +8,8 @@ first for how the pieces fit.
 ## Setup
 
 - Rust stable (CI uses 1.95) and Go (version from `go-sdk/go.mod`).
-- For guest work: ZisK 1.3.0-alpha, installed with its `ziskup` installer.
-  `ziskup -v 1.3.0-alpha --cpu --nokey` is enough to build the guests and run
+- For guest work: ZisK 1.3.2-alpha, installed with its `ziskup` installer.
+  `ziskup -v 1.3.2-alpha --cpu --nokey` is enough to build the guests and run
   the emulator (`cargo-zisk`, `ziskemu` and the guest toolchain under
   `~/.zisk`); it needs no proving keys and no GPU.
 - For proving: a GPU host, see [docs/deployment.md](docs/deployment.md).
@@ -132,7 +132,7 @@ protocol change and needs review as such.
 
 ## ZisK notes
 
-- The ZisK version is pinned (`ziskos = "=1.3.0-alpha"` in the guests,
+- The ZisK version is pinned (`ziskos = "=1.3.2-alpha"` in the guests,
   `ZISK_VERSION` in the Makefile and Dockerfiles). The in-guest STARK
   verifier and the vadcop blob layout are ZisK internals; an upgrade means
   checking `circuit-aggregator/src/main.rs` and `input-gen/src/aggregator.rs`

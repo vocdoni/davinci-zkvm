@@ -22,7 +22,7 @@
 //   n_levels    u64       SMT depth (siblings padded to this length)
 //   siblings    n x 32B   inclusion siblings for the Results leaf (key 0x04)
 //
-// Proof blob layout (u64 LE words, `get_proof_bytes()` from ZisK 1.3.0-alpha):
+// Proof blob layout (u64 LE words, `get_proof_bytes()` from ZisK 1.3.2-alpha):
 //   [minimal][n_publics=69][flag][program_vk(4)][publics(64)][proof]
 //   [zisk_vk(4)][hash_tag]
 // Each publics word holds one u32 of the inner guest's output registers. Only
@@ -65,17 +65,17 @@ const AGG_MAGIC_OUT: u32 = u32::from_le_bytes(*b"DAG1");
 const MODE_FOLD: u64 = 1;
 const MODE_FINALIZE: u64 = 2;
 
-// Universal ZisK vadcop-final setup key for the pinned 1.3.0-alpha release.
+// Universal ZisK vadcop-final setup key for the pinned 1.3.2-alpha release.
 // Bound to the ZisK proving key, not to any guest program, and passed to
 // `verify_zisk_proof_c` as `expected_setup_vk`. It MUST stay a compile-time
 // constant: read from input it would be self-keyed and authenticate nothing.
 // Refreeze from provingKey/zisk/vadcop_final/vadcop_final.verkey.json whenever
 // the ZisK release or its setup changes.
 const SETUP_VK: [u64; 4] = [
-    0x05006517b6ccde5d,
-    0xa4d890587ba62845,
-    0xb5af8a307c00e87d,
-    0x4b9d05099b16dc80,
+    0x6b2490fba336fb00,
+    0xf0c8719a961de309,
+    0xa8db6f43a9bfb757,
+    0x5ca5f014d609b265,
 ];
 
 const CONFIG_LEN: usize = 200;

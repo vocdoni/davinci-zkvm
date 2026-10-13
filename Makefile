@@ -7,8 +7,8 @@ REPO_ROOT := $(CURDIR)
 # All Docker targets read the same env vars docker-compose does. Override
 # any of these on the command line or in a .env file at the repo root.
 
-ZISK_TAG         ?= v1.3.0-alpha
-ZISK_VERSION     ?= 1.3.0-alpha
+ZISK_TAG         ?= v1.3.2-alpha
+ZISK_VERSION     ?= 1.3.2-alpha
 ZISK_KEYS_DIR    ?= $(REPO_ROOT)/zisk-keys
 LISTEN_PORT      ?= 8080
 API_URL          ?= http://127.0.0.1:$(LISTEN_PORT)

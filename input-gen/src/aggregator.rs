@@ -75,7 +75,7 @@ impl ChainConfig {
 }
 
 // Minimal bincode mirrors of ZisK's `common::proof::Proof`. Only the layout
-// matters; see upstream `common/src/proof.rs` (1.3.0-alpha).
+// matters; see upstream `common/src/proof.rs` (1.3.2-alpha).
 
 /// Hash families indexed by the tag word written into a serialized proof.
 /// Upstream `verifier::HASH_TAGS` — append-only, position is the wire value.
