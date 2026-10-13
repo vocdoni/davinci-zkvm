@@ -34,7 +34,8 @@ make up
   the executable-stack flag of the PLONK key's `final.so`, which current Linux
   kernels refuse to load otherwise. Keys from another ZisK release do not
   work: since 1.3.1 `cargo-zisk` refuses a key whose `setupVersion` differs
-  from its own, so rerun `make keys` after changing `ZISK_VERSION`.
+  from its own, so rerun `make keys` after changing `ZISK_VERSION`. When the
+  installed version differs, it replaces both keys, the PLONK key included.
 - `make build` builds the prover image (`Dockerfile.cuda`) from the checkout.
 
 On its first start the container builds the GPU setup files into the key

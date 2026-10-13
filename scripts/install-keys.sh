@@ -21,8 +21,17 @@ log() { echo "[install-keys] $*"; }
 # pulls both the STARK and PLONK keys in one invocation.
 #
 # Idempotent: ziskup reads the version stamped in ${ZISK_DIR}/.zisk-bundle,
-# skips a matching install and replaces the keys of any other version.
-log "Running ziskup -v ${ZISK_VERSION} --system --provingkey --with-snark --cpu..."
+# skips a matching install and replaces the STARK key of any other version.
+# It keeps an existing provingKeySnark unless forced, so a version change
+# passes --force: a stale PLONK key would carry the old setup.
+installed=$(awk -F= '$1 == "version" { sub(/^[^=]+=/, ""); print; exit }' \
+    "${ZISK_DIR}/.zisk-bundle" 2>/dev/null || true)
+force=()
+if [ -d "${ZISK_DIR}/provingKeySnark" ] && [ "${installed}" != "${ZISK_VERSION}" ]; then
+    log "Installed keys are ${installed:-unversioned}, replacing both with ${ZISK_VERSION}"
+    force=(--force)
+fi
+log "Running ziskup -v ${ZISK_VERSION} --system --provingkey --with-snark --cpu ${force[*]}..."
 ziskup -v "${ZISK_VERSION}" \
     --system \
     --prefix "${ZISK_DIR}" \
@@ -30,7 +39,8 @@ ziskup -v "${ZISK_VERSION}" \
     --provingkey \
     --with-snark \
     --cpu \
-    --yes
+    --yes \
+    "${force[@]}"
 
 # Drop the executable-stack flag on final.so. ZisK ships a Circom-generated
 # shared object that requests RWE on its GNU_STACK segment; modern Linux
