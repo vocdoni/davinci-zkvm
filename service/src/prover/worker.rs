@@ -276,6 +276,12 @@ const PROVE_RETRY_DELAY_SECS: u64 = 5;
 /// 6. **SNARK self-check.** `--verify-proof` occasionally rejects the fresh
 ///    PLONK wrap (`SNARK proof verification failed`) after a clean STARK; the
 ///    same input verifies on rerun.
+/// 7. **Host crash (`signal: 11` SIGSEGV, `signal: 7` SIGBUS).** The
+///    `cargo-zisk` process itself died in native code (CUDA, libc, MPI),
+///    seen on a healthy host after hundreds of clean jobs. This is a
+///    host-side crash of the prover, not a guest assertion: a deterministic
+///    guest failure exits with an error code or a fail mask, never a
+///    segfault. The same job proves on retry.
 ///
 /// We deliberately do **not** match the bare `SIGABRT` keyword or generic
 /// witness-generation failures — those also fire for deterministic guest
@@ -291,7 +297,18 @@ fn is_transient_prover_error(msg: &str) -> bool {
         || msg.contains("Failed assert in template/function VerifyEvaluations")
         || msg.contains("Counter timeout after")
         || msg.contains("signal: 9")
+        || exit_signal(msg, "11")
+        || exit_signal(msg, "7")
         || msg.contains("SNARK proof verification failed")
+}
+
+/// True if `msg` holds `signal: <num>` as a whole number, the form
+/// `ExitStatus` prints (`signal: 11 (SIGSEGV) (core dumped)`), so `7` does
+/// not match `signal: 70`.
+fn exit_signal(msg: &str, num: &str) -> bool {
+    let key = format!("signal: {num}");
+    msg.match_indices(&key)
+        .any(|(i, _)| !msg[i + key.len()..].starts_with(|c: char| c.is_ascii_digit()))
 }
 
 /// Run `cargo-zisk prove`, transparently retrying [`MAX_PROVE_RETRIES`] times
@@ -562,5 +579,26 @@ pub(crate) mod tests {
              failed: Proof error: SNARK proof verification failed: "
         ));
         assert!(!is_transient_prover_error("Error: guest panicked: SIGABRT"));
+    }
+
+    #[test]
+    fn host_crash_signals_are_transient() {
+        let msg = |sig: &str| format!("cargo-zisk prove failed (exit {sig}): \n");
+        assert!(is_transient_prover_error(&msg(
+            "signal: 11 (SIGSEGV) (core dumped)"
+        )));
+        assert!(is_transient_prover_error(&msg(
+            "signal: 7 (SIGBUS) (core dumped)"
+        )));
+        assert!(is_transient_prover_error(&msg("signal: 9 (SIGKILL)")));
+        assert!(!is_transient_prover_error(&msg(
+            "signal: 6 (SIGABRT) (core dumped)"
+        )));
+        // Prefix of a longer number must not match.
+        assert!(!is_transient_prover_error(&msg("signal: 110")));
+        assert!(!is_transient_prover_error(&msg("signal: 70 (SIG?)")));
+        assert!(!is_transient_prover_error(
+            "cargo-zisk prove failed (exit exit status: 1): Error: assertion failed: ok == 1"
+        ));
     }
 }
