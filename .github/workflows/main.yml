@@ -208,7 +208,7 @@ jobs:
 
   docker:
     name: Docker
-    needs: [rust, go]
+    needs: [rust, go, guests]
     permissions:
       contents: read
       packages: write
