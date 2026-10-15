@@ -1,0 +1,50 @@
+name: Integration tests
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * *'
+
+# Runs on the z6 self-hosted runner. Uses a dedicated compose project
+# (davinci-zkvm-ci, port 8081) so it doesn't disturb the live service
+# on port 8080. The proofs volume is reused between runs so consttrees
+# are only built once.
+jobs:
+  integration:
+    name: GPU integration tests
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 90
+    env:
+      LISTEN_PORT: 8081
+      COMPOSE_PROJECT_NAME: davinci-zkvm-ci
+      ZISK_KEYS_DIR: /home/gui/davinci-zkvm/zisk-keys
+      DAVINCI_API_URL: http://127.0.0.1:8081
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: make build
+
+      - name: Start service
+        run: make up
+
+      - name: Wait for healthy
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8081/health && echo && exit 0
+            echo "Waiting... ($i/60)"
+            sleep 5
+          done
+          echo "Service did not become healthy"
+          exit 1
+
+      - name: Run integration tests
+        run: cd go-sdk/tests && DAVINCI_API_URL=http://127.0.0.1:8081 make test
+
+      - name: Stop service
+        if: always()
+        run: |
+          LISTEN_PORT=8081 COMPOSE_PROJECT_NAME=davinci-zkvm-ci \
+            ZISK_KEYS_DIR=/home/gui/davinci-zkvm/zisk-keys \
+            make down
