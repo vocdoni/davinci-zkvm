@@ -9,7 +9,9 @@
 //! [pack(c1_0) pack(c2_0) ...]    per update, ascending by key, fields < nf
 //! zero cells to the end of the last blob
 //! pack(P) = Point::compress(P)
-//! z_b    = int_be(sha256(pid_BE32 || BE32(root_before_int) || com_b)) mod r_bls
+//! D      = sha256("davinci/cells/v1" || u64_be(nf) || u64_be(T) || cell_0 .. cell_{T-1})
+//! z_b    = int_be(sha256("davinci/point/v1" || pid_BE32 || BE32(root_before_int)
+//!                        || D || u64_be(n_blobs) || u64_be(b) || com_b)) mod r_bls
 //! digest = sha256(com_0 || y_0 || ...)
 //! ```
 //!
@@ -54,7 +56,14 @@ pub struct TransitionBlobs {
     pub versioned_hashes: Vec<[u8; 32]>,
     /// The value the guest publishes in registers 28..35.
     pub digest: [u8; 32],
+    /// `D` over the cell stream, published in registers 46..53.
+    pub cells_digest: [u8; 32],
 }
+
+/// Domain tag of the cell-stream digest `D`.
+pub const CELLS_TAG: [u8; 16] = *b"davinci/cells/v1";
+/// Domain tag of the per-blob evaluation point.
+pub const POINT_TAG: [u8; 16] = *b"davinci/point/v1";
 
 // BLS12-381 scalar field order.
 const R_BLS_BE: [u8; 32] = [
@@ -190,13 +199,38 @@ fn new_blob() -> Blob {
         .expect("BLOB_SIZE-sized buffer")
 }
 
-/// Evaluation point bound by the guest: `sha256(pid || root_be || com) mod r_bls`.
-pub fn compute_z(pid: &Fr, old_root: &[u8; 32], commitment: &[u8; 48]) -> [u8; 32] {
+/// `D = sha256(CELLS_TAG || u64_be(nf) || u64_be(T) || cells)` over the
+/// unpadded stream [`cells`] returns, `nf` as the guest reads it (1..=16).
+pub fn cells_digest(nf: u8, cells: &[[u8; 32]]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(CELLS_TAG);
+    h.update(u64::from(nf).to_be_bytes());
+    h.update((cells.len() as u64).to_be_bytes());
+    for c in cells {
+        h.update(c);
+    }
+    h.finalize().into()
+}
+
+/// Evaluation point the guest binds to blob `index` of `n_blobs`:
+/// `sha256(POINT_TAG || pid || root_be || D || u64_be(n_blobs) || u64_be(index) || com) mod r_bls`.
+pub fn compute_z(
+    pid: &Fr,
+    old_root: &[u8; 32],
+    cells_digest: &[u8; 32],
+    n_blobs: usize,
+    index: usize,
+    commitment: &[u8; 48],
+) -> [u8; 32] {
     let mut root_be = *old_root;
     root_be.reverse();
     let mut h = Sha256::new();
+    h.update(POINT_TAG);
     h.update(fr_to_be(pid));
     h.update(root_be);
+    h.update(cells_digest);
+    h.update((n_blobs as u64).to_be_bytes());
+    h.update((index as u64).to_be_bytes());
     h.update(commitment);
     let z = BigUint::from_bytes_be(&h.finalize()) % BigUint::from_bytes_be(&R_BLS_BE);
     let zb = z.to_bytes_be();
@@ -247,7 +281,9 @@ pub fn build_blobs(
             t.num_fields
         )));
     }
-    let blobs = blobs_from_cells(&cells(t))?;
+    let cells = cells(t);
+    let d = cells_digest(t.num_fields, &cells);
+    let blobs = blobs_from_cells(&cells)?;
     let settings = c_kzg::ethereum_kzg_settings(0);
     let n = blobs.len();
     let mut out = TransitionBlobs {
@@ -258,11 +294,12 @@ pub fn build_blobs(
         proofs: Vec::with_capacity(n),
         versioned_hashes: Vec::with_capacity(n),
         digest: [0u8; 32],
+        cells_digest: d,
     };
-    for blob in blobs {
+    for (i, blob) in blobs.into_iter().enumerate() {
         let kb = kzg_blob(&blob)?;
         let com = commit(&kb)?;
-        let z = compute_z(pid, old_root, &com);
+        let z = compute_z(pid, old_root, &d, n, i, &com);
         let (proof, y) = settings
             .compute_kzg_proof(&kb, &c_kzg::Bytes32::from(z))
             .map_err(|e| Error::Blob(format!("opening: {e:?}")))?;

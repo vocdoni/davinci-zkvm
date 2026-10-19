@@ -19,7 +19,6 @@ import (
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/chain"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/circuits/ballotproof"
-	ballotprooftest "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/circuits/test/ballotproof"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto"
 	bjj "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/bjj_gnark"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/signatures/ethereum"
@@ -32,8 +31,6 @@ func ballotVKLeaf(vk []byte) *big.Int {
 	must(err)
 	return v
 }
-
-func circomV1VK() []byte { return ballotproof.CircomVerificationKey }
 
 func le32hex(v *big.Int) string { return hex.EncodeToString(reverse(be32(v))) }
 
@@ -120,39 +117,65 @@ type imtTree struct {
 	Proofs []imtProof `json:"proofs,omitempty"`
 }
 
+// node32 is the wire form of a census value: 0x + 64 hex digits, big-endian.
+func node32(v *big.Int) string { return "0x" + hex32(v) }
+
+func nodes32(vs []*big.Int) []string {
+	out := make([]string, len(vs))
+	for i, v := range vs {
+		out[i] = node32(v)
+	}
+	return out
+}
+
+// leanIMTVectors builds Keccak lean-IMTs over the first n census leaves:
+// every size up to 40 (proofs for every leaf at a few sizes) and a few large
+// sizes. Most multi-member roots exceed the BN254 modulus.
 func leanIMTVectors() map[string]any {
-	withProofs := map[int]bool{1: true, 2: true, 3: true, 5: true, 8: true, 13: true, 33: true}
-	var leaves []string
-	for i := 0; i < 40; i++ {
+	const nLeaves = 1024
+	withProofs := map[int][]int{}
+	for _, n := range []int{1, 2, 3, 5, 8, 13, 33} {
+		for i := 0; i < n; i++ {
+			withProofs[n] = append(withProofs[n], i)
+		}
+	}
+	withProofs[1000] = []int{0, 1, 500, 998, 999}
+	var leaves []*big.Int
+	for i := 0; i < nLeaves; i++ {
 		l, _, _ := censusLeaf(i)
-		leaves = append(leaves, dec(l))
+		leaves = append(leaves, l)
 	}
 	var trees []imtTree
-	for size := 1; size <= 40; size++ {
-		t, err := leanimt.New(leanimt.PoseidonHasher, leanimt.BigIntEqual, nil, nil, nil)
+	for _, size := range append(seq(1, 40), 64, 100, 1000, nLeaves) {
+		t, err := leanimt.New(davinci.KeccakHasher, leanimt.BigIntEqual, nil, nil, nil)
 		must(err)
-		for i := 0; i < size; i++ {
-			l, _, _ := censusLeaf(i)
+		for _, l := range leaves[:size] {
 			t.Insert(l)
 		}
 		root, _ := t.Root()
-		tv := imtTree{Size: size, Root: dec(root)}
-		if withProofs[size] {
-			for i := 0; i < size; i++ {
-				p, err := t.GenerateProof(i)
-				must(err)
-				if !t.VerifyProof(p) {
-					panic("lean-imt proof does not verify")
-				}
-				tv.Proofs = append(tv.Proofs, imtProof{
-					Index: i, Leaf: dec(p.Leaf), PathBits: p.PathBits,
-					Siblings: decs(p.Siblings),
-				})
+		tv := imtTree{Size: size, Root: node32(root)}
+		for _, i := range withProofs[size] {
+			p, err := t.GenerateProof(i)
+			must(err)
+			if !t.VerifyProof(p) {
+				panic("lean-imt proof does not verify")
 			}
+			tv.Proofs = append(tv.Proofs, imtProof{
+				Index: i, Leaf: node32(p.Leaf), PathBits: p.PathBits,
+				Siblings: nodes32(p.Siblings),
+			})
 		}
 		trees = append(trees, tv)
 	}
-	return map[string]any{"leaves": leaves, "trees": trees}
+	return map[string]any{"leaves": nodes32(leaves), "trees": trees}
+}
+
+func seq(from, to int) []int {
+	var out []int
+	for i := from; i <= to; i++ {
+		out = append(out, i)
+	}
+	return out
 }
 
 // Fixed secp256k1 keys (never used anywhere else).
@@ -274,17 +297,16 @@ func voteIDSigVectors() map[string]any {
 }
 
 type ballotVec struct {
-	ProcessID  string    `json:"process_id"` // decimal
-	Address    string    `json:"address"`    // 20 bytes hex
-	K          string    `json:"k"`
-	Weight     string    `json:"weight"`
-	Mode       modeJSON  `json:"mode"`
-	Fields     []uint64  `json:"fields"`
-	Pk         pointJSON `json:"pk"`
-	VoteID     uint64    `json:"vote_id"`
-	Ballot     []string  `json:"ballot"` // 64 TE coords
-	InputsHash string    `json:"inputs_hash"`
-	Inputs     []string  `json:"inputs"` // the 71 hashed inputs
+	ProcessID     string    `json:"process_id"` // decimal
+	Address       string    `json:"address"`    // 20 bytes hex
+	K             string    `json:"k"`
+	Weight        string    `json:"weight"`
+	Mode          modeJSON  `json:"mode"`
+	Fields        []uint64  `json:"fields"`
+	Pk            pointJSON `json:"pk"`
+	VoteID        uint64    `json:"vote_id"`
+	Ballot        []string  `json:"ballot"`         // 64 TE coords
+	PublicSignals []string  `json:"public_signals"` // the 71 ballot proof public inputs
 }
 
 func buildBallot(pk *bjj.BJJ, mode spec.BallotMode, fields []uint64, weight int64) (*ballotproof.BallotProofInputsResult, ballotVec) {
@@ -308,23 +330,20 @@ func buildBallot(pk *bjj.BJJ, mode spec.BallotMode, fields []uint64, weight int6
 	must(err)
 	x, y := teOf(pk)
 	coords := res.Ballot.BigInts()
-	packed, err := mode.Pack()
+	pubs, err := ballotproof.PublicSignals(pid, mode, pk, addr, res.VoteID, res.Ballot.FromTEtoRTE(), in.Weight)
 	must(err)
-	inputs := []*big.Int{pid.MathBigInt(), packed, x, y, new(big.Int).SetBytes(addr), new(big.Int).SetUint64(res.VoteID.Uint64())}
-	inputs = append(inputs, coords...)
-	inputs = append(inputs, big.NewInt(weight))
 	return res, ballotVec{
 		ProcessID: dec(pid.MathBigInt()), Address: hex.EncodeToString(addr), K: dec(k),
 		Weight: fmt.Sprint(weight), Mode: modeOf(mode), Fields: fields, Pk: pj(x, y),
-		VoteID: res.VoteID.Uint64(), Ballot: decs(coords), InputsHash: dec(res.BallotInputsHash.MathBigInt()),
-		Inputs: decs(inputs),
+		VoteID: res.VoteID.Uint64(), Ballot: decs(coords), PublicSignals: decs(pubs),
 	}
 }
 
 func ballotVectors() []ballotVec {
 	_, pk := fixedKey()
 	var out []ballotVec
-	for i, mode := range []spec.BallotMode{ballotModes[1], ballotModes[2], ballotModes[3]} {
+	// Field counts 1, 2, 6, 16 and 8: padded and unpadded ballots.
+	for i, mode := range ballotModes {
 		fields := randFields(int(mode.NumFields), int(min(mode.MaxValue, 1000))+1)
 		_, v := buildBallot(pk, mode, fields, int64(1+i*41))
 		out = append(out, v)
@@ -364,17 +383,6 @@ func realProofVector() realProof {
 	var signals []string
 	must(json.Unmarshal([]byte(pubs), &signals))
 	return realProof{Vk: vk, Proof: json.RawMessage(proof), PublicSignals: signals, Ballot: &v}
-}
-
-// realProofV1Vector is the go-sdk's own DeterministicBallotProof (davinci-circom
-// v1.0.0 artifacts, the VK the zkVM integration tests pin).
-func realProofV1Vector() realProof {
-	_, pk := fixedKey()
-	res, err := ballotprooftest.DeterministicBallotProof(randBytes(20), processID(randBytes(20), [4]byte{0, 0, 0, 1}, 5), pk, 7)
-	must(err)
-	var signals []string
-	must(json.Unmarshal([]byte(res.PubInputs), &signals))
-	return realProof{Vk: circomV1VK(), Proof: json.RawMessage(res.Proof), PublicSignals: signals}
 }
 
 func sha256Sum(b []byte) []byte {

@@ -9,7 +9,7 @@ package integration
 //   1. Groth16 batch proof verification (ballot proofs + VK)
 //   2. ECDSA signature verification (one per ballot)
 //   3. STATETX state transition (voteID / ballot / Results SMT ops)
-//   4. CENSUS lean-IMT Poseidon membership proofs
+//   4. CENSUS Keccak lean-IMT membership proofs
 //   5. REENCBLK BabyJubJub ElGamal re-encryption verification
 //   6. KZGBLK EIP-4844 blob barycentric evaluation
 //

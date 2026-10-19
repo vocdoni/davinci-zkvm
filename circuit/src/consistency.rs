@@ -1,10 +1,11 @@
 //! DAVINCI protocol consistency checks:
 //! 1. **VoteID namespace**: each `vote_id_chain[i].new_key[0] ∈ [VoteIDMin, VoteIDMax]`
-//! 2. **VoteID–proof binding**: `vote_id_chain[i].new_key[0] == proofs[i].public_inputs[1][0]`
-//! 3. **Ballot namespace**: each `ballot_chain[i].new_key[0] ∈ [BallotMin, BallotMax]`
-//! 4. **Ballot–slot binding**: `ballot_chain[i].new_key[0] == slot(i)`, where the
+//!    with zero upper limbs. The key is ballot proof `i`'s public input 1
+//!    (`publics.rs`), so the proof itself binds it.
+//! 2. **Ballot namespace**: each `ballot_chain[i].new_key[0] ∈ [BallotMin, BallotMax]`
+//! 3. **Ballot–slot binding**: `ballot_chain[i].new_key[0] == slot(i)`, where the
 //!    slot is derived from the voter's census address or CSP index (see `slot_key`)
-//! 5. **Distinct slots**: no two `ballot_chain` entries share a key
+//! 4. **Distinct slots**: no two `ballot_chain` entries share a key
 //! A missing STATETX block sets `FAIL_MISSING_BLOCK`; a batch without voters
 //! passes trivially.
 
@@ -14,9 +15,6 @@ use crate::io::ParsedInput;
 const VOTE_ID_MIN: u64 = 0x8000_0000_0000_0000;
 const BALLOT_MIN: u64 = 0x0000_0000_0000_0010; // ConfigMax + 1
 const BALLOT_MAX: u64 = 0x7FFF_FFFF_FFFF_FFFF; // VoteIDMin - 1
-
-// Public input index of the voteID in the BN254 Groth16 ballot proof.
-const PUB_VOTE_ID: usize = 1;
 
 use crate::hash::sha256_once;
 use crate::types::{FAIL_CONSISTENCY, FAIL_BALLOT_NS, MAX_BATCH_SIZE};
@@ -64,21 +62,6 @@ pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
             *fail_mask |= FAIL_CONSISTENCY;
             ok = false;
         }
-
-        // Binding check: matches Groth16 public input[1] (voteID) for proof i.
-        if i < parsed.proofs.len() && parsed.n_public > PUB_VOTE_ID {
-            let pubs = &parsed.proofs[i].public_inputs[PUB_VOTE_ID];
-            let pub_vote_id = pubs[0];
-            // VoteIDs are 64-bit values; upper limbs must be zero.
-            if pubs[1] != 0 || pubs[2] != 0 || pubs[3] != 0 {
-                *fail_mask |= FAIL_CONSISTENCY;
-                ok = false;
-            }
-            if pub_vote_id != vid_key {
-                *fail_mask |= FAIL_CONSISTENCY;
-                ok = false;
-            }
-        }
     }
 
     // Ballot chain consistency
@@ -109,8 +92,7 @@ pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
 
             // Slot binding: the key is derived from the census proof the guest
             // verified for this voter, so a ballot can only land in its owner's
-            // slot. The census leaf is bound to the ballot proof's address in
-            // main.rs (FAIL_BINDING).
+            // slot. The census address is the ballot proof's public input 0.
             if slot_key(parsed, census_origin, i) != Some(ballot_key) {
                 *fail_mask |= FAIL_BALLOT_NS;
                 ok = false;
@@ -139,7 +121,7 @@ pub fn verify_consistency(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
 /// Ballot slot of voter `i`.
 ///
 /// Merkle census: `address_slot` of the 20 bytes the census leaf binds (bits
-/// 88..247, the bytes main.rs compares with the ballot proof's address). The
+/// 88..247, the ballot proof's public input 0). The
 /// lean-IMT root does not bind a leaf position, so the slot cannot come from
 /// the proof. CSP census: `BallotMin + index`, the index the CSP signed.
 /// `None` when the derivation is impossible (missing proof, index out of the

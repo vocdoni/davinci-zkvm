@@ -2,14 +2,17 @@
 //!
 //! The blob cells are not host input: the guest rebuilds them from verified
 //! state (the sorted vote ids and the sorted slot updates covering new votes,
-//! overwrites and silent refreshes alike; layout in `da_blob.rs`) and
-//! evaluates each blob polynomial at the point derived from that blob's
-//! commitment. The `(commitment, y)` pairs are hashed into one digest and
-//! emitted in the publics; the settlement contract compares each pair against
+//! overwrites and silent refreshes alike; layout in `da_blob.rs`), hashes the
+//! cell stream into `D` and evaluates each blob polynomial at a point derived
+//! from `D` and that blob's commitment. `D` and the digest of the
+//! `(commitment, y)` pairs are emitted in the publics; the settlement
+//! contract derives the same points from `D` and checks each pair against
 //! the blob's versioned hash via the EIP-4844 point-evaluation precompile.
 //!
-//! Evaluation point per blob:
-//!   `Z_b = SHA-256(processID_be32 || rootHashBefore_be32 || commitment_b) mod p_bls`
+//! Evaluation point per blob (`D` fixes the polynomial before the point exists):
+//!   `D   = SHA-256("davinci/cells/v1" || u64_be(nf) || u64_be(T) || cells)`
+//!   `Z_b = SHA-256("davinci/point/v1" || processID_be32 || rootHashBefore_be32
+//!                  || D || u64_be(n_blobs) || u64_be(b) || commitment_b) mod p_bls`
 //!
 //! Digest over the ordered pairs:
 //!   `digest = SHA-256(com_0 || y_0_be32 || com_1 || y_1_be32 || ...)`
@@ -28,19 +31,50 @@ const LOG_N: usize = 12;
 /// N as a BLS12-381 Fr element (used for the `1/N` factor).
 const N_FR: BlsFrRaw = [4096, 0, 0, 0];
 
-/// Compute the KZG evaluation point `Z` for one blob.
-/// `Z = SHA-256(processID_be32 || rootHashBefore_be32 || commitment_48) mod p_bls`.
-pub fn compute_z(process_id: &FrRaw, root_hash_before: &FrRaw, commitment: &[u8; 48]) -> BlsFrRaw {
-    let mut preimage = [0u8; 112]; // 32 (processID) + 32 (rootBefore) + 48 (commitment)
+/// Domain tag of the cell-stream digest `D`.
+const CELLS_TAG: [u8; 16] = *b"davinci/cells/v1";
+/// Domain tag of the per-blob evaluation point.
+const POINT_TAG: [u8; 16] = *b"davinci/point/v1";
 
+/// `D = SHA-256(CELLS_TAG || u64_be(nf) || u64_be(T) || cell_0 || .. || cell_{T-1})`
+/// over the unpadded stream. The tag and counts fill one cell, so the
+/// preimage is one buffer of T + 1 cells hashed by the `sha256f` precompile.
+fn cells_digest(nf: usize, cells: &[[u8; 32]]) -> [u8; 32] {
+    let mut head = [0u8; 32];
+    head[..16].copy_from_slice(&CELLS_TAG);
+    head[16..24].copy_from_slice(&(nf as u64).to_be_bytes());
+    head[24..].copy_from_slice(&(cells.len() as u64).to_be_bytes());
+    let mut buf: Vec<[u8; 32]> = Vec::with_capacity(cells.len() + 1);
+    buf.push(head);
+    buf.extend_from_slice(cells);
+    sha256_once(buf.as_flattened())
+}
+
+/// Compute the KZG evaluation point `Z` of blob `index` out of `n_blobs`:
+/// `SHA-256(POINT_TAG || processID_be32 || rootHashBefore_be32 || D
+/// || u64_be(n_blobs) || u64_be(index) || commitment_48) mod p_bls`.
+pub fn compute_z(
+    process_id: &FrRaw,
+    root_hash_before: &FrRaw,
+    cells_digest: &[u8; 32],
+    n_blobs: usize,
+    index: usize,
+    commitment: &[u8; 48],
+) -> BlsFrRaw {
+    // 16 (tag) + 32 (processID) + 32 (rootBefore) + 32 (D) + 8 + 8 + 48 (commitment)
+    let mut preimage = [0u8; 176];
+    preimage[..16].copy_from_slice(&POINT_TAG);
     for i in 0..4 {
-        preimage[(3 - i) * 8..(4 - i) * 8].copy_from_slice(&process_id[i].to_be_bytes());
+        preimage[16 + (3 - i) * 8..16 + (4 - i) * 8].copy_from_slice(&process_id[i].to_be_bytes());
     }
     for i in 0..4 {
-        preimage[32 + (3 - i) * 8..32 + (4 - i) * 8]
+        preimage[48 + (3 - i) * 8..48 + (4 - i) * 8]
             .copy_from_slice(&root_hash_before[i].to_be_bytes());
     }
-    preimage[64..112].copy_from_slice(commitment);
+    preimage[80..112].copy_from_slice(cells_digest);
+    preimage[112..120].copy_from_slice(&(n_blobs as u64).to_be_bytes());
+    preimage[120..128].copy_from_slice(&(index as u64).to_be_bytes());
+    preimage[128..176].copy_from_slice(commitment);
 
     let hash = sha256_once(&preimage);
     bls_fr::from_be32_mod(&hash)
@@ -70,7 +104,8 @@ fn gen_omega_table() -> [BlsFrRaw; N] {
     let mut domain = [ZERO; N];
     domain[0] = ONE;
     for i in 1..N {
-        domain[i] = bls_fr::mul(&domain[i - 1], &generator);
+        let (prev, rest) = domain.split_at_mut(i);
+        bls_fr::muladd_into(&mut rest[0], &prev[i - 1], &generator, &ZERO);
     }
 
     let mut omega = [ZERO; N];
@@ -109,16 +144,20 @@ pub fn evaluate_barycentric(blob: &[u8], z: BlsFrRaw, omega: &[BlsFrRaw; N]) -> 
     let diffs: [BlsFrRaw; N] = core::array::from_fn(|i| bls_fr::sub(&z, &omega[i]));
     let inv_diffs = batch_inverse(&diffs);
 
-    let mut sum = ZERO;
+    // In-place field ops: the running sum ping-pongs between two words.
+    let (mut s0, mut s1, mut d_omega) = (ZERO, ZERO, ZERO);
+    let (mut sum, mut next) = (&mut s0, &mut s1);
     for i in 0..N {
         let cell: &[u8; 32] = blob[i * 32..(i + 1) * 32].try_into().unwrap();
         let d = bls_fr::from_be32_raw(cell);
         if d == ZERO {
             continue;
         }
-        let d_omega = bls_fr::mul(&d, &omega[i]);
-        sum = bls_fr::muladd(&d_omega, &inv_diffs[i], &sum);
+        bls_fr::muladd_into(&mut d_omega, &d, &omega[i], &ZERO);
+        bls_fr::muladd_into(next, &d_omega, &inv_diffs[i], sum);
+        core::mem::swap(&mut sum, &mut next);
     }
+    let sum = *sum;
 
     let mut z_pow_n = z;
     for _ in 0..LOG_N {
@@ -135,39 +174,43 @@ fn batch_inverse(v: &[BlsFrRaw; N]) -> [BlsFrRaw; N] {
     let mut prefix = [ZERO; N];
     prefix[0] = v[0];
     for i in 1..N {
-        prefix[i] = bls_fr::mul(&prefix[i - 1], &v[i]);
+        let (prev, rest) = prefix.split_at_mut(i);
+        bls_fr::muladd_into(&mut rest[0], &prev[i - 1], &v[i], &ZERO);
     }
 
-    let mut acc = bls_fr::inv(&prefix[N - 1]);
+    let (mut a0, mut a1) = (bls_fr::inv(&prefix[N - 1]), ZERO);
+    let (mut acc, mut next) = (&mut a0, &mut a1);
 
     let mut result = [ZERO; N];
     for i in (1..N).rev() {
-        result[i] = bls_fr::mul(&prefix[i - 1], &acc);
-        acc = bls_fr::mul(&acc, &v[i]);
+        bls_fr::muladd_into(&mut result[i], &prefix[i - 1], acc, &ZERO);
+        bls_fr::muladd_into(next, acc, &v[i], &ZERO);
+        core::mem::swap(&mut acc, &mut next);
     }
-    result[0] = acc;
+    result[0] = *acc;
     result
 }
 
 // Block verification
 
-/// Verify the KZG DA binding: build cells from the verified state, evaluate
-/// each blob polynomial at its bound point, and emit
+/// Verify the KZG DA binding: build cells from the verified state, hash them
+/// into `D`, evaluate each blob polynomial at its bound point, and emit
 /// `digest = SHA-256(com_0 || y_0 || com_1 || y_1 || ...)` over the ordered
-/// pairs. Returns `(ok, digest, n_blobs)`.
+/// pairs. Returns `(ok, digest, n_blobs, D)`.
 ///
 /// Absent KZG block (chained mode) or absent state: trivially pass with a
-/// zero digest and `n_blobs = 0` — all output limbs 28..39 stay zero.
+/// zero digest, `n_blobs = 0` and a zero `D` — output limbs 28..39 and
+/// 46..53 stay zero. On FAIL_KZG both digests are zero.
 pub fn verify_kzg(
     kzg: &Option<KZGBlock>,
     state: Option<&StateBlock>,
     num_fields: usize,
     refreshed_new: &[BallotData],
     fail_mask: &mut u32,
-) -> (bool, [u8; 32], u32) {
+) -> (bool, [u8; 32], u32, [u8; 32]) {
     let (block, state) = match (kzg, state) {
         (Some(b), Some(s)) => (b, s),
-        _ => return (true, [0u8; 32], 0),
+        _ => return (true, [0u8; 32], 0, [0u8; 32]),
     };
 
     // 1) Vote id list from vote_id_chain (limb 0), sorted ascending.
@@ -204,8 +247,13 @@ pub fn verify_kzg(
         || n_blobs_have != expected_n_blobs
     {
         *fail_mask |= FAIL_KZG;
-        return (false, [0u8; 32], n_blobs_have as u32);
+        return (false, [0u8; 32], n_blobs_have as u32, [0u8; 32]);
     }
+
+    // D from the cells alone, before any commitment value is read: every
+    // point below then depends on the exact polynomials, so content cannot
+    // be fitted to a point known in advance.
+    let d = cells_digest(num_fields, &cells);
 
     // 4) Per blob: copy cells into a 131072-byte buffer, evaluate at z_b, and
     // collect the (com, y) pairs. The last blob is zero-padded past the cell
@@ -223,10 +271,17 @@ pub fn verify_kzg(
         for (local, global) in (start..end).enumerate() {
             blob_buf[local * 32..(local + 1) * 32].copy_from_slice(&cells[global]);
         }
-        let z_b = compute_z(&block.process_id, &block.root_hash_before, &block.commitments[b]);
+        let z_b = compute_z(
+            &block.process_id,
+            &block.root_hash_before,
+            &d,
+            n_blobs_have,
+            b,
+            &block.commitments[b],
+        );
         let y_b = evaluate_barycentric(&blob_buf, z_b, &omega);
         pairs.push((block.commitments[b], bls_fr::to_be32(&y_b)));
     }
     let digest = digest_pairs(&pairs);
-    (true, digest, n_blobs_have as u32)
+    (true, digest, n_blobs_have as u32, d)
 }

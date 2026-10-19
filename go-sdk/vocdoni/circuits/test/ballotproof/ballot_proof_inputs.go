@@ -145,19 +145,25 @@ func CompileAndGenerateProofForTest(inputs []byte) (string, string, error) {
 // user after ballot proof generation. It includes the value of the given
 // process id and address in the format used inside the circuit.
 type BallotProofResult struct {
-	ProcessID  *big.Int
-	Address    *big.Int
-	Weight     *big.Int
-	Ballot     *elgamal.Ballot
-	Proof      string
-	PubInputs  string
-	InputsHash *big.Int
-	VoteID     types.VoteID
+	ProcessID *big.Int
+	Address   *big.Int
+	Weight    *big.Int
+	Ballot    *elgamal.Ballot
+	Proof     string
+	PubInputs string
+	VoteID    types.VoteID
 }
 
 // DeterministicBallotProof function returns the information after proving a valid
-// ballot using deterministic generation for reproducible testing.
+// ballot using deterministic generation for reproducible testing, with the
+// fixture weight testutil.Weight.
 func DeterministicBallotProof(address []byte, processID types.ProcessID, encryptionKey ecc.Point, seed int64) (*BallotProofResult, error) {
+	return DeterministicBallotProofWeight(address, processID, encryptionKey, seed, big.NewInt(testutil.Weight))
+}
+
+// DeterministicBallotProofWeight is DeterministicBallotProof for a voter of
+// the given census weight (public input 6 of the proof).
+func DeterministicBallotProofWeight(address []byte, processID types.ProcessID, encryptionKey ecc.Point, seed int64, weight *big.Int) (*BallotProofResult, error) {
 	startTime := time.Now()
 	// generate deterministic fields
 	fields := testutil.GenDeterministicBallotFields(seed)
@@ -173,7 +179,7 @@ func DeterministicBallotProof(address []byte, processID types.ProcessID, encrypt
 		EncryptionKey: types.SliceOf(encryptionKey.BigInts(), types.BigIntConverter),
 		K:             new(types.BigInt).SetBigInt(k),
 		BallotMode:    testutil.BallotMode(),
-		Weight:        new(types.BigInt).SetInt(testutil.Weight),
+		Weight:        new(types.BigInt).SetBigInt(weight),
 		FieldValues:   fields[:],
 	}
 	proofInputs, err := ballotproof.GenerateBallotProofInputs(ballotProofInputs)
@@ -191,12 +197,11 @@ func DeterministicBallotProof(address []byte, processID types.ProcessID, encrypt
 	}
 	log.DebugTime("ballot proof generation", startTime)
 	return &BallotProofResult{
-		ProcessID:  proofInputs.CircomInputs.ProcessID.MathBigInt(),
-		Address:    proofInputs.CircomInputs.Address.MathBigInt(),
-		Ballot:     proofInputs.Ballot,
-		Proof:      circomProof,
-		PubInputs:  circomPubInputs,
-		InputsHash: proofInputs.BallotInputsHash.MathBigInt(),
-		VoteID:     proofInputs.VoteID,
+		ProcessID: proofInputs.CircomInputs.ProcessID.MathBigInt(),
+		Address:   proofInputs.CircomInputs.Address.MathBigInt(),
+		Ballot:    proofInputs.Ballot,
+		Proof:     circomProof,
+		PubInputs: circomPubInputs,
+		VoteID:    proofInputs.VoteID,
 	}, nil
 }

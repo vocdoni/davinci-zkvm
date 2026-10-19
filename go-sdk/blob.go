@@ -83,8 +83,8 @@ type TransitionBlobs struct {
 	// VersionedHashes is the EIP-4844 versioned blob hash for each
 	// Commitment: sha256(commitment) with the version byte set to 0x01.
 	VersionedHashes [][32]byte
-	// Zs is the 32-byte big-endian bound evaluation point per blob:
-	// SHA-256(processIDBE32 || rootBeforeBE32 || commitment) mod r_bls.
+	// Zs is the 32-byte big-endian bound evaluation point per blob, see
+	// EvaluationPoint.
 	Zs [][32]byte
 	// Ys is the 32-byte big-endian claimed evaluation P_b(Zs[b]) per blob.
 	Ys [][32]byte
@@ -94,6 +94,36 @@ type TransitionBlobs struct {
 	// Digest is sha256(com_0 || y_0 || ... || com_{n-1} || y_{n-1}), the
 	// exact value the guest emits in publicValues[28..35].
 	Digest [32]byte
+	// CellsDigest is D over Cells (see CellsDigest), the value the guest
+	// emits in publicValues[46..53] and every Zs entry is derived from.
+	CellsDigest [32]byte
+}
+
+// cellsTag and pointTag are the domain tags of D and of the evaluation
+// points (circuit/src/kzg.rs CELLS_TAG, POINT_TAG).
+const (
+	cellsTag = "davinci/cells/v1"
+	pointTag = "davinci/point/v1"
+)
+
+// CellsDigest is D = SHA-256(cellsTag || u64_be(numFields) || u64_be(T) ||
+// cell_0 || ... || cell_{T-1}) over the unpadded stream TransitionCells
+// returns. It is computed from the cells before any evaluation point, so the
+// points depend on the exact polynomials.
+func CellsDigest(numFields int, cells [][32]byte) [32]byte {
+	h := sha256.New()
+	h.Write([]byte(cellsTag))
+	var w [8]byte
+	binary.BigEndian.PutUint64(w[:], uint64(numFields))
+	h.Write(w[:])
+	binary.BigEndian.PutUint64(w[:], uint64(len(cells)))
+	h.Write(w[:])
+	for i := range cells {
+		h.Write(cells[i][:])
+	}
+	var out [32]byte
+	h.Sum(out[:0])
+	return out
 }
 
 // TransitionCells rebuilds the DA blob cell stream, byte-identical to the
@@ -174,10 +204,9 @@ func TransitionCells(numFields int, voteIDs []uint64, updates []SlotUpdate) ([][
 
 // BuildTransitionBlobs rebuilds the same cell stream as the guest, splits it
 // into EIP-4844 blobs (padding the tail of the last blob with zero cells),
-// commits, and opens each blob at the guest-bound point
-// z_b = SHA-256(processID || rootBefore || commitment_b) mod r_bls.
+// commits, and opens each blob at the guest-bound point EvaluationPoint.
 // The returned TransitionBlobs carries the SHA-256 pair digest that must
-// match publicValues[28..35].
+// match publicValues[28..35] and D for publicValues[46..53].
 func BuildTransitionBlobs(
 	numFields int,
 	processIDBE32, rootBeforeBE32 [32]byte,
@@ -204,6 +233,7 @@ func BuildTransitionBlobs(
 		Zs:              make([][32]byte, nBlobs),
 		Ys:              make([][32]byte, nBlobs),
 		Proofs:          make([]kzg4844.Proof, nBlobs),
+		CellsDigest:     CellsDigest(numFields, cells),
 	}
 
 	hasher := sha256.New()
@@ -227,7 +257,7 @@ func BuildTransitionBlobs(
 		tb.Commitments[b] = commitment
 		tb.VersionedHashes[b] = kzg4844.CalcBlobHashV1(hasher, &commitment)
 
-		z := computeZ(processIDBE32, rootBeforeBE32, commitment)
+		z := EvaluationPoint(processIDBE32, rootBeforeBE32, tb.CellsDigest, nBlobs, b, commitment)
 		tb.Zs[b] = z
 
 		var point kzg4844.Point
@@ -263,15 +293,20 @@ func (t *TransitionBlobs) Request(processIDHex, rootBeforeHex string) *KZGReques
 	}
 }
 
-// computeZ mirrors circuit/src/kzg.rs::compute_z: SHA-256 over the 112-byte
-// preimage (processID BE32 || rootBefore BE32 || commitment(48)), reduced
-// mod r_bls (the KZG scalar field). Returns the reduced value as 32-byte
-// big-endian, ready to hand to kzg4844.ComputeProof.
-func computeZ(processIDBE32, rootBeforeBE32 [32]byte, commitment [48]byte) [32]byte {
-	var preimage [112]byte
-	copy(preimage[0:32], processIDBE32[:])
-	copy(preimage[32:64], rootBeforeBE32[:])
-	copy(preimage[64:112], commitment[:])
+// EvaluationPoint mirrors circuit/src/kzg.rs::compute_z for blob index of
+// nBlobs: SHA-256 over the 176-byte preimage pointTag(16) || processID BE32
+// || rootBefore BE32 || cellsDigest(32) || u64_be(nBlobs) || u64_be(index)
+// || commitment(48), reduced mod r_bls (the KZG scalar field). Returns the
+// reduced value as 32-byte big-endian, ready to hand to kzg4844.ComputeProof.
+func EvaluationPoint(processIDBE32, rootBeforeBE32, cellsDigest [32]byte, nBlobs, index int, commitment [48]byte) [32]byte {
+	var preimage [176]byte
+	copy(preimage[0:16], pointTag)
+	copy(preimage[16:48], processIDBE32[:])
+	copy(preimage[48:80], rootBeforeBE32[:])
+	copy(preimage[80:112], cellsDigest[:])
+	binary.BigEndian.PutUint64(preimage[112:120], uint64(nBlobs))
+	binary.BigEndian.PutUint64(preimage[120:128], uint64(index))
+	copy(preimage[128:176], commitment[:])
 	sum := sha256.Sum256(preimage[:])
 
 	// Reduce mod BLS12-381 Fr. The guest applies bls_fr::from_be32_mod which

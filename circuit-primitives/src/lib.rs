@@ -14,7 +14,6 @@ pub mod da_blob;
 pub mod hash;
 pub mod poseidon;
 mod poseidon13_constants;
-mod poseidon_wide_constants;
 pub mod results;
 pub mod smt;
 pub mod types;

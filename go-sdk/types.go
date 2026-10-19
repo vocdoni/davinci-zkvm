@@ -129,6 +129,12 @@ const (
 	BallotFields = NumFields * 4
 )
 
+// BallotPublicInputs is the ballot proof's public-input count: address, vote
+// ID, process ID, packed ballot mode, encryption key x and y, weight, then the
+// BallotFields ciphertext coordinates (rust-sdk groth16::N_PUBLIC,
+// ballotproof.NumberOfPublicInputs).
+const BallotPublicInputs = 7 + BallotFields
+
 // Output register layout for the ZisK circuit.
 // These constants identify the index of each u32 output register returned
 // by the ZisK emulator / prover and mirror the public inputs of the
@@ -153,7 +159,7 @@ const (
 	OutputVotersCount      = 18 // number of non-dummy votes in this batch
 	OutputOverwrittenCount = 19 // number of votes that overwrote an earlier ballot
 
-	// CensusRoot: 256-bit lean-IMT Poseidon BN254 census root (8 × u32, LE)
+	// CensusRoot: 256-bit Keccak lean-IMT census root (8 × u32, LE)
 	OutputCensusRoot = 20 // base index; occupies slots [20..27]
 
 	// BlobsDigest: SHA-256 over the ordered (commitment, y) pairs of every
@@ -174,6 +180,14 @@ const (
 	OutputNProofs        = 43 // number of Groth16 proofs verified
 	OutputNPublic        = 44 // number of public inputs per Groth16 proof
 	OutputLogN           = 45 // log₂ of the aggregation tree depth
+
+	// CellsDigest: D, SHA-256 over the DA cell stream (8 × u32, LE), the
+	// seed of every blob's evaluation point. Zero if no KZG block.
+	OutputCellsDigest = 46 // base index; occupies slots [46..53]
+
+	// OutputRegisters is the number of registers the guest commits; the
+	// remaining publics up to 64 are zero.
+	OutputRegisters = 54
 )
 
 // SmtEntry represents one Arbo-compatible SMT state-transition proof.
@@ -281,7 +295,8 @@ type BallotProofData struct {
 	RefreshedBallots [][]string `json:"refreshed_ballots,omitempty"`
 }
 
-// CensusProof is a lean-IMT Poseidon membership proof for a census voter.
+// CensusProof is a Keccak lean-IMT membership proof for a census voter. Every
+// value is a 256-bit integer, never reduced mod the BN254 field.
 // The leaf value is PackAddressWeight(address, weight) = (address << 88) | weight.
 // Siblings are the actual non-empty siblings in the Merkle path (lean-IMT omits empty levels).
 type CensusProof struct {
@@ -299,7 +314,7 @@ type CensusProof struct {
 type CensusOrigin uint64
 
 const (
-	// CensusOriginMerkle represents lean-IMT Poseidon Merkle tree census (origins 1-3).
+	// CensusOriginMerkle represents the Keccak lean-IMT Merkle census (origins 1-3).
 	CensusOriginMerkle CensusOrigin = 1
 	// CensusOriginCSP represents CSP ECDSA census (origin 4).
 	CensusOriginCSP CensusOrigin = 4
@@ -382,17 +397,16 @@ type ReencryptionData struct {
 type ProveRequest struct {
 	// VK is the snarkjs verification key (JSON object).
 	VK json.RawMessage `json:"vk"`
-	// Proofs is the array of snarkjs Groth16 proof objects.
+	// Proofs is the array of snarkjs Groth16 proof objects. The guest
+	// derives their public inputs from the other blocks.
 	Proofs []json.RawMessage `json:"proofs"`
-	// PublicInputs contains the public signals for each proof (same order as Proofs).
-	PublicInputs [][]string `json:"public_inputs"`
 	// Sigs contains one ECDSA signature per proof (same order as Proofs). Mandatory.
 	Sigs []json.RawMessage `json:"sigs"`
 	// State contains the full state-transition data for the DAVINCI protocol.
 	// When non-nil, the circuit verifies chained SMT transitions and outputs
 	// the old/new state roots and vote counts (output registers 2..19).
 	State *StateTransitionData `json:"state,omitempty"`
-	// CensusProofs contains one lean-IMT Poseidon membership proof per voter.
+	// CensusProofs contains one Keccak lean-IMT membership proof per voter.
 	// When non-empty, the circuit verifies each proof against the census root.
 	CensusProofs []CensusProof `json:"census_proofs,omitempty"`
 	// CspData contains CSP ECDSA census proofs (used when censusOrigin == 4).

@@ -82,16 +82,3 @@ pub fn poseidon(inputs: &[Fr]) -> Result<Fr, Error> {
     mix(state, &prm.m);
     Ok(state[0])
 }
-
-/// davinci `MultiPoseidon`: up to 16 inputs hash directly, more are hashed in
-/// chunks of 16 and the chunk digests hashed again (recursively above 256).
-pub fn multi_poseidon(inputs: &[Fr]) -> Result<Fr, Error> {
-    if inputs.len() <= 16 {
-        return poseidon(inputs);
-    }
-    let chunks = inputs
-        .chunks(16)
-        .map(poseidon)
-        .collect::<Result<Vec<_>, _>>()?;
-    multi_poseidon(&chunks)
-}

@@ -5,10 +5,10 @@
 //! All integers are little-endian; field/curve elements are stored as `[u64; N]`.
 //!
 //! ```text
-//! Header : magic(u64) log_n(u64) nproofs(u64) n_public(u64)
+//! Header : magic(u64) log_n(u64) nproofs(u64) n_public(u64, must be 71)
 //! VK     : alpha_g1(G1) beta_g2(G2) gamma_g2(G2) delta_g2(G2)
 //!          gamma_abc_len(u64) gamma_abc[..](G1 each)
-//! Proofs : nproofs(u64) [a(G1) b(G2) c(G1) pubs[..](FrRaw each)] × nproofs
+//! Proofs : nproofs(u64) [a(G1) b(G2) c(G1)] × nproofs  (public inputs are derived in-guest)
 //! ECDSA  : [r(FrRaw) s(FrRaw) recid(u64)] × nproofs  (mandatory)
 //! STATETX: STATE_MAGIC(u64) followed by full state-transition data
 //! CENSUS : CENSUS_MAGIC(u64) followed by lean-IMT proofs
@@ -50,7 +50,7 @@ pub struct ParsedInput {
     pub ecdsa: Vec<EcdsaEntry>,
     /// Full state-transition data (STATETX! magic). None if absent.
     pub state: Option<StateBlock>,
-    /// Census lean-IMT Poseidon proofs (CENSUS!! magic). Empty if absent.
+    /// Census Keccak lean-IMT proofs (CENSUS!! magic). Empty if absent.
     pub census_proofs: Vec<CensusProofEntry>,
     /// CSP ECDSA census block (CSPBLK!! magic). None if absent.
     pub csp_block: Option<CspBlock>,
@@ -124,7 +124,9 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
     if nproofs == 0 || nproofs > crate::types::MAX_BATCH_SIZE {
         *fail_mask |= 1 << 31;
     }
-    if n_public > 256 {
+    // The ballot circuit has exactly N_PUBLIC public inputs; any other VK shape
+    // is not a ballot VK.
+    if n_public != crate::types::N_PUBLIC {
         *fail_mask |= 1 << 31;
     }
     // Clamp before any allocation: the guards above only flag the error, and an
@@ -164,16 +166,7 @@ pub fn parse_input(input: &[u8], fail_mask: &mut u32) -> ParsedInput {
         let a = read_g1!(&mut off);
         let b = read_g2!(&mut off);
         let c = read_g1!(&mut off);
-        let mut public_inputs = Vec::with_capacity(n_public);
-        for _ in 0..n_public {
-            public_inputs.push(read_fr!(&mut off));
-        }
-        proofs.push(ProofRaw {
-            a,
-            b,
-            c,
-            public_inputs,
-        });
+        proofs.push(ProofRaw { a, b, c });
     }
 
     // --- ECDSA block (mandatory) ---

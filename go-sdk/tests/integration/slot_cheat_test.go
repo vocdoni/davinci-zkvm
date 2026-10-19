@@ -21,13 +21,14 @@ const failCSP = uint32(1 << 23) // CSP signature, key or duplicate check failed
 // CSPBLK layout: magic(8) n(8), then per entry r(32) s(32) recid(8)
 // voter_address(32) weight(32) index(8).
 const (
-	cspHeaderLen   = 16
-	cspEntryLen    = 144
-	cspAddrOffset  = 72
-	cspIndexOffset = 136
+	cspHeaderLen    = 16
+	cspEntryLen     = 144
+	cspAddrOffset   = 72
+	cspWeightOffset = 104
+	cspIndexOffset  = 136
 )
 
-// bn254R is the BN254 scalar field modulus (Poseidon, Groth16 publics).
+// bn254R is the BN254 scalar field modulus (Groth16 public inputs).
 var bn254R, _ = new(big.Int).SetString("21888242871839275222246405745257275088548364400416034343698204186575808495617", 10)
 
 // addrSlot is the Merkle slot the guest derives for v.
@@ -78,14 +79,14 @@ func withLimb1(t *testing.T, key string) string {
 }
 
 // shareAddressHigh makes voter b a second census member for voter a's
-// address with leaf PackAddressWeight(addr, w) | hi << 248. hi must keep the
-// leaf below the field modulus (hi <= 0x2f).
+// address with leaf PackAddressWeight(addr, w) | hi << 248: same address and
+// weight bits, a leaf the guest must refuse (check 3A.6, leaf < 2^248).
 func shareAddressHigh(t *testing.T, e *Election, a, b int, hi int64) {
 	t.Helper()
 	va, vb := e.Voters[a], e.Voters[b]
 	vb.Signer, vb.AddressBytes, vb.AddressBigInt, vb.Weight = va.Signer, va.AddressBytes, va.AddressBigInt, va.Weight
 	e.censusLeaves[b] = new(big.Int).Or(packAddressWeight(vb.AddressBigInt, vb.Weight), new(big.Int).Lsh(big.NewInt(hi), 248))
-	imt, err := leanimt.New(poseidonHasher, bigIntEq, nil, nil, nil)
+	imt, err := leanimt.New(davinci.KeccakHasher, bigIntEq, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("leanimt.New: %v", err)
 	}
@@ -111,8 +112,8 @@ func TestCheatSlotSwap(t *testing.T) {
 
 // TestCheatSlotSwapWithCensus is TestCheatSlotSwap with the census proofs
 // permuted to match the swapped slots, so the slot binding holds. The census
-// address of entry i is then not the address of ballot proof i, and only the
-// address binding (6.6) ties the slot back to the signer.
+// address of entry i is then ballot proof i's public input 0 and the address
+// its signature must recover: the pairing and ECDSA both fail.
 func TestCheatSlotSwapWithCensus(t *testing.T) {
 	election, err := NewElection(2)
 	if err != nil {
@@ -122,7 +123,7 @@ func TestCheatSlotSwapWithCensus(t *testing.T) {
 	election.SlotOverride = map[int]uint64{0: addrSlot(v1), 1: addrSlot(v0)}
 	base, _, _ := buildCheatInputElection(t, election)
 	census := eligibilityBlock(t, election, []*Voter{v1, v0})
-	assertCircuitFailsExactly(t, base.assembleWith(census), failBinding, "slot_swap_with_census")
+	assertCircuitFailsExactly(t, base.assembleWith(census), failPairing|failECDSA, "slot_swap_with_census")
 }
 
 // TestCheatSlotOverwriteOther writes voter 0's ballot over voter 1's cast
@@ -177,18 +178,17 @@ func TestCheatSlotRevoteFreshSlot(t *testing.T) {
 	})
 }
 
-// TestCheatSlotSharedLeafHighBits covers spec 6.9 / 4.1.6 for a crafted census
-// with a second leaf for one address, differing only in leaf bits 248..253
-// (bits 160..165 of leaf >> 88). The guest drops those bits, so the second
-// leaf can only overwrite its signer's ballot; writing it to a second slot
-// is rejected.
-func TestCheatSlotSharedLeafHighBits(t *testing.T) {
+// TestCheatSlotSharedAddress covers spec 4.1.7 across batches: a crafted
+// census with a second leaf for one address (weight w + 1). The second leaf
+// can only overwrite its signer's ballot; writing it to a second slot is
+// rejected.
+func TestCheatSlotSharedAddress(t *testing.T) {
 	build := func(t *testing.T, fresh bool) *cheatElectionInput {
 		election, err := NewElection(3)
 		if err != nil {
 			t.Fatalf("NewElection: %v", err)
 		}
-		shareAddressHigh(t, election, 1, 2, 0x2f)
+		shareAddress(t, election, 1, 2)
 		v1, v2 := election.Voters[1], election.Voters[2]
 		base, _, _ := buildCheatInputBatchesHook(t, election, []*Voter{v1}, []*Voter{v2}, func() {
 			if fresh {
@@ -198,14 +198,28 @@ func TestCheatSlotSharedLeafHighBits(t *testing.T) {
 		return base
 	}
 	t.Run("overwrites_own_slot", func(t *testing.T) {
-		out := runAccepted(t, build(t, false).fullInput(), "shared_leaf_overwrite")
+		out := runAccepted(t, build(t, false).fullInput(), "shared_address_overwrite")
 		if got := out[davinci.OutputOverwrittenCount]; got != 1 {
 			t.Errorf("expected overwritten=1, got %d", got)
 		}
 	})
 	t.Run("second_slot", func(t *testing.T) {
-		assertCircuitFailsExactly(t, build(t, true).fullInput(), failBallotNS, "shared_leaf_second_slot")
+		assertCircuitFailsExactly(t, build(t, true).fullInput(), failBallotNS, "shared_address_second_slot")
 	})
+}
+
+// TestCheatCensusLeafHighBits gives voter 2 voter 1's address and weight in a
+// leaf with bits 248..253 set (check 3A.6). The address and weight the guest
+// reads are the real ones, so only the leaf bound rejects it; the bits also
+// reach the derived address, so the pairing fails.
+func TestCheatCensusLeafHighBits(t *testing.T) {
+	election, err := NewElection(3)
+	if err != nil {
+		t.Fatalf("NewElection: %v", err)
+	}
+	shareAddressHigh(t, election, 1, 2, 0x2f)
+	base, _, _ := buildCheatInputBatches(t, election, election.Voters[:1], election.Voters[2:3])
+	assertCircuitFails(t, base.fullInput(), failCensus, "census_leaf_high_bits")
 }
 
 // TestCheatSlotSameLeafTwice puts two ballots of one voter, with the same
@@ -222,9 +236,8 @@ func TestCheatSlotSameLeafTwice(t *testing.T) {
 }
 
 // TestCheatCensusLeafNonCanonical ships voter 0's census leaf as leaf + r.
-// Poseidon reduces it, so the membership proof still verifies and the raw
-// duplicate-leaf check does not see it, but the address bits move: the slot
-// binding and the address binding (6.6) must both fail.
+// Census values are never reduced: it is a different, too wide leaf (3A.6), the
+// Keccak walk misses the root, and its address bits are not the signer's.
 func TestCheatCensusLeafNonCanonical(t *testing.T) {
 	base, election, _ := buildCheatInput(t)
 	proofs, err := election.BuildCensusProofs(election.Voters)
@@ -240,32 +253,7 @@ func TestCheatCensusLeafNonCanonical(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeCensusBlock: %v", err)
 	}
-	assertCircuitFailsExactly(t, base.assembleWith(census), failBinding|failBallotNS, "census_leaf_plus_r")
-}
-
-// TestCheatProofAddressNonCanonical adds r to ballot proof 0's address
-// public input. The pairing and the inputs hash see the same residue, but the
-// low 160 bits change, so the ECDSA signer and the census address no longer
-// match it (2.6, 6.6).
-func TestCheatProofAddressNonCanonical(t *testing.T) {
-	base, _, _ := buildCheatInput(t)
-	off, _, _ := proofsSectionOffset(t, base.baseBin)
-	full := base.fullInput()
-	p := off + 64 + 128 + 64 // pubs[0] of proof 0, 4 LE words
-	var words [4]uint64
-	for i := range words {
-		words[i] = binary.LittleEndian.Uint64(full[p+i*8:])
-	}
-	v := new(big.Int)
-	for i := 3; i >= 0; i-- {
-		v.Lsh(v, 64).Or(v, new(big.Int).SetUint64(words[i]))
-	}
-	v.Add(v, bn254R)
-	mask := new(big.Int).SetUint64(^uint64(0))
-	for i := 0; i < 4; i++ {
-		binary.LittleEndian.PutUint64(full[p+i*8:], new(big.Int).And(new(big.Int).Rsh(v, uint(64*i)), mask).Uint64())
-	}
-	assertCircuitFailsExactly(t, full, failECDSA|failBinding, "proof_address_plus_r")
+	assertCircuitFails(t, base.assembleWith(census), failCensus, "census_leaf_plus_r")
 }
 
 // TestCheatBallotKeyHighLimb keeps the right slot in limb 0 of the ballot key
@@ -427,12 +415,31 @@ func TestCheatCSPDoubleCredential(t *testing.T) {
 	})
 	t.Run("high_address_bits", func(t *testing.T) {
 		// Bit 160 would make the address a second one for 3B.3 while the
-		// message, binding and ECDSA still read the same 160 bits.
+		// message and ECDSA still read the same 160 bits. It also reaches
+		// public input 0, so the pairing fails.
 		base := build(t)
 		csp := append([]byte(nil), base.censusBlock...)
 		csp[cspHeaderLen+cspEntryLen+cspAddrOffset+20] |= 0x01 // limb 2, bit 32
-		assertCircuitFailsExactly(t, base.assembleWith(csp), failCSP, "csp_double_credential_high_bits")
+		assertCircuitFailsExactly(t, base.assembleWith(csp), failCSP|failPairing, "csp_double_credential_high_bits")
 	})
+}
+
+// TestCheatCSPWeightTooWide gives voter 0 a CSP weight of 2^88, one bit
+// wider than a Merkle census leaf can carry (check 3B.2c). The weight is
+// public input 6, so the pairing fails as well.
+func TestCheatCSPWeightTooWide(t *testing.T) {
+	election, err := NewCSPElection(2)
+	if err != nil {
+		t.Fatalf("NewCSPElection: %v", err)
+	}
+	base := buildCSPBatch(t, election, election.Voters)
+	csp := append([]byte(nil), base.censusBlock...)
+	w := csp[cspHeaderLen+cspWeightOffset : cspHeaderLen+cspWeightOffset+32] // 4 LE limbs
+	for i := range w {
+		w[i] = 0
+	}
+	w[11] = 0x01 // limb 1, bit 24: 2^88
+	assertCircuitFails(t, base.assembleWith(csp), failCensus, "csp_weight_2^88")
 }
 
 // TestCheatOriginFlipToCSP: a Merkle election (origin 1 in the tree) proved
@@ -463,7 +470,7 @@ func TestCheatOriginFlipToMerkle(t *testing.T) {
 		t.Fatalf("NewCSPElection: %v", err)
 	}
 	election.CspKey = nil
-	imt, err := leanimt.New(poseidonHasher, bigIntEq, nil, nil, nil)
+	imt, err := leanimt.New(davinci.KeccakHasher, bigIntEq, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("leanimt.New: %v", err)
 	}

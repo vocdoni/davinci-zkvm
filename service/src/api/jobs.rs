@@ -4,6 +4,7 @@
 //!
 //! - `GET /jobs/:id` — JSON status (queued / running / done / failed) plus
 //!   timing metadata.
+//! - `DELETE /jobs/:id` — cancel a queued or running job.
 //! - `GET /jobs/:id/snark` — JSON payload ready for the on-chain verifier:
 //!   `{ program_vk, root_c_vadcop_final, public_values, proof_bytes }`, all
 //!   `0x`-prefixed hex.
@@ -40,6 +41,32 @@ pub async fn get_job_status(
 ) -> impl IntoResponse {
     match state.prover.jobs.get(&id) {
         Some(job) => (StatusCode::OK, Json(job.clone())).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "job not found"})),
+        )
+            .into_response(),
+    }
+}
+
+/// `DELETE /jobs/:id` — cancel a job: `200` with the job, now `failed` with
+/// error `cancelled`, for a queued one; `202` for a running one (it reads
+/// `failed: cancelled` once its prover is dead); `200` unchanged for a
+/// finished one, so a repeat is harmless.
+pub async fn cancel_job(State(state): State<AppState>, Path(id): Path<Uuid>) -> impl IntoResponse {
+    match state
+        .prover
+        .cancel(id, &state.config.proof_output_dir)
+        .await
+    {
+        Some(job) => {
+            let code = if job.status == JobStatus::Running {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::OK
+            };
+            (code, Json(job)).into_response()
+        }
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "job not found"})),
@@ -373,7 +400,7 @@ pub async fn get_job_proof_stark(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prover::worker::tests::test_config;
+    use crate::prover::worker::tests::{gated_handle, test_config, wait_status};
     use crate::prover::ProverHandle;
     use crate::types::JobKind;
     use axum::http::Uri;
@@ -437,6 +464,59 @@ mod tests {
             .await
             .unwrap();
         (code, serde_json::from_slice(&body).unwrap())
+    }
+
+    async fn cancel(state: &AppState, id: Uuid) -> (StatusCode, serde_json::Value) {
+        let resp = cancel_job(State(state.clone()), Path(id))
+            .await
+            .into_response();
+        let code = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (code, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn cancel_route_codes() {
+        let config = test_config("cancel-route");
+        let dir = config.proof_output_dir.clone();
+        let (h, gate, _) = gated_handle(config.clone());
+        let state = AppState {
+            config,
+            prover: Arc::new(h),
+        };
+        let (code, _) = cancel(&state, Uuid::new_v4()).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+
+        let p = &state.prover;
+        let elf = PathBuf::from("unused.elf");
+        let running = p
+            .submit(vec![1], &dir, JobKind::Batch, elf.clone(), vec![], 1)
+            .await
+            .unwrap();
+        wait_status(p, running, JobStatus::Running).await;
+        let queued = p
+            .submit(vec![2], &dir, JobKind::Batch, elf, vec![], 2)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let (code, body) = cancel(&state, queued).await;
+            assert_eq!(code, StatusCode::OK);
+            assert_eq!(body["status"], "failed");
+            assert_eq!(body["error"], "cancelled");
+        }
+        // Accepted: the fake prove ignores the token, so the job ends on
+        // its own and is then reported cancelled.
+        let (code, body) = cancel(&state, running).await;
+        assert_eq!(code, StatusCode::ACCEPTED);
+        assert_eq!(body["status"], "running");
+        gate.add_permits(1);
+        wait_status(p, running, JobStatus::Failed).await;
+        let (code, body) = cancel(&state, running).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body["error"], "cancelled");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

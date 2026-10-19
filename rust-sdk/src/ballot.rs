@@ -1,5 +1,5 @@
-//! Ballots, the ballot mode word and the hashes that bind them: leaf values,
-//! vote ids and the circom ballot proof's inputs hash.
+//! Ballots, the ballot mode word and the values that bind them: leaf values,
+//! vote ids and the circom ballot proof's public signals.
 
 use ark_ff::{BigInteger, PrimeField};
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,8 @@ use sha2::{Digest, Sha256};
 use crate::crypto::babyjubjub::Point;
 use crate::crypto::elgamal::{encrypt, Ciphertext};
 use crate::crypto::field::{fr_from_le, fr_to_be, fr_to_u256, Fr};
-use crate::crypto::poseidon::{multi_poseidon, poseidon};
+use crate::crypto::poseidon::poseidon;
+use crate::groth16::N_PUBLIC;
 use crate::limits::{BALLOT_COORDS, NUM_FIELDS, VOTE_ID_MIN};
 use crate::Error;
 
@@ -211,9 +212,12 @@ pub fn vote_id(pid: &Fr, address: &Fr, k: &Fr) -> u64 {
     VOTE_ID_MIN | (h.into_bigint().0[0] & (VOTE_ID_MIN - 1))
 }
 
-/// Third public signal of the ballot proof: MultiPoseidon over
-/// `[pid, mode, pk.x, pk.y, address, vote_id, 64 ballot coords, weight]`.
-pub fn inputs_hash(
+/// The ballot proof's public signals in circuit order (davinci-circom
+/// `ballot_proof.circom`): address, vote id, process id, packed ballot mode,
+/// encryption key x and y, weight, then `c1.x, c1.y, c2.x, c2.y` per field.
+/// Fields at or above the election's `num_fields` must hold the identity, as
+/// [`encrypt_ballot`] leaves them; the batch guest derives the same values.
+pub fn public_signals(
     pid: &Fr,
     mode: &BallotMode,
     pk: &Point,
@@ -221,12 +225,19 @@ pub fn inputs_hash(
     vote_id: u64,
     ballot: &Ballot,
     weight: &Fr,
-) -> Result<Fr, Error> {
-    let mut inputs = Vec::with_capacity(71);
-    inputs.extend_from_slice(&[*pid, mode.pack()?, pk.x, pk.y, *address, Fr::from(vote_id)]);
-    inputs.extend_from_slice(&ballot.coords());
-    inputs.push(*weight);
-    multi_poseidon(&inputs)
+) -> Result<[Fr; N_PUBLIC], Error> {
+    let mut out = [Fr::from(0u64); N_PUBLIC];
+    out[..7].copy_from_slice(&[
+        *address,
+        Fr::from(vote_id),
+        *pid,
+        mode.pack()?,
+        pk.x,
+        pk.y,
+        *weight,
+    ]);
+    out[7..].copy_from_slice(&ballot.coords());
+    Ok(out)
 }
 
 /// Arbo leaf value bytes of a digest-valued leaf: the integer `int_be(digest)`

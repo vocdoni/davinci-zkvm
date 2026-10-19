@@ -25,12 +25,14 @@
 //!
 //! - All entries recover to the same secp256k1 public key (single authorised CSP)
 //! - Every `voter_address` is a canonical uint160 (upper 96 bits zero)
+//! - Every `weight` is below 2^88, the Merkle census weight width (check 3B.2c,
+//!   `FAIL_CENSUS`)
 //! - No duplicate voter_address and no duplicate index
 //! - The recovered CSP address is exported as the census root; the caller binds
 //!   it to the process-config census-root key.
 
 use crate::hash::keccak256_short;
-use crate::types::{CspBlock, FrRaw, FAIL_CSP, ZERO_FR};
+use crate::types::{CspBlock, FrRaw, FAIL_CENSUS, FAIL_CSP, ZERO_FR};
 use ziskos::zisklib::ecdsa_recover_secp256k1;
 
 /// Compute the Ethereum signed-message hash for a CSP attestation.
@@ -106,6 +108,7 @@ fn address_to_fr(addr: &[u8; 20]) -> FrRaw {
 ///
 /// # Fail-mask bits
 /// - `FAIL_CSP` (bit 23): signature recovery, key-mismatch, or duplicate check failed
+/// - `FAIL_CENSUS` (bit 16): a weight is 2^88 or more
 pub fn verify_csp(
     csp: &CspBlock,
     process_id: &FrRaw,
@@ -124,6 +127,15 @@ pub fn verify_csp(
     for e in &csp.entries {
         if e.voter_address[2] >> 32 != 0 || e.voter_address[3] != 0 {
             *fail_mask |= FAIL_CSP;
+            return (false, ZERO_FR);
+        }
+    }
+
+    // Check 3B.2c: weights fit the 88 bits a Merkle census leaf gives them, so
+    // a weight is always a canonical public input (limb 1 below 2^24).
+    for e in &csp.entries {
+        if e.weight[1] >> 24 != 0 || e.weight[2] != 0 || e.weight[3] != 0 {
+            *fail_mask |= FAIL_CENSUS;
             return (false, ZERO_FR);
         }
     }

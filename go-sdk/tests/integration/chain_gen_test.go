@@ -99,13 +99,6 @@ func TestGenChainInputs(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("proof_%d.json", idx)), res.ProofJSON, 0o600); err != nil {
 				t.Fatalf("write proof_%d: %v", idx, err)
 			}
-			pubBytes, err := json.Marshal(res.PublicInputs)
-			if err != nil {
-				t.Fatalf("marshal public_%d: %v", idx, err)
-			}
-			if err := os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("public_%d.json", idx)), pubBytes, 0o600); err != nil {
-				t.Fatalf("write public_%d: %v", idx, err)
-			}
 			if err := os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("sig_%d.json", idx)), res.SigJSON, 0o600); err != nil {
 				t.Fatalf("write sig_%d: %v", idx, err)
 			}

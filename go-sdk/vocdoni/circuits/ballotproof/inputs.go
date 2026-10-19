@@ -14,9 +14,10 @@ import (
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/types"
 )
 
-// NumberOfPublicInputs is the number of public inputs for the ballot proof
-// circom circuit.
-const NumberOfPublicInputs = 3
+// NumberOfPublicInputs is the number of public inputs of the ballot proof
+// circom circuit: address, vote ID, process ID, packed ballot mode, the two
+// encryption key coordinates, weight, and four coordinates per cipherfield.
+const NumberOfPublicInputs = 7 + 4*params.FieldsPerBallot
 
 // BallotProofInputs struct contains the required inputs to compose the
 // data to generate the witness for a ballot proof using the circom circuit.
@@ -54,17 +55,14 @@ func (b *BallotProofInputs) VoteID() (types.VoteID, error) {
 	return types.VoteID(voteID), nil
 }
 
-// BallotInputsHash helper function calculates the hash of the public inputs
-// of the ballot proof circuit. This hash is used to verify the proof generated
-// by the user and is also used to generate the voteID. The hash is calculated
-// using the poseidon hash function and includes the process ID, ballot mode,
-// encryption key, address, ballot and weight, in that particular order. The
-// function transforms the inputs to the correct format:
-//   - processID and address are converted to FF
-//   - encryption key is converted to twisted edwards form
-//   - ballot mode is converted to circuit ballot mode
-//   - ballot is converted to twisted edwards form
-func BallotInputsHashGnark(
+// PublicSignals returns the ballot proof's public inputs in circuit order:
+// address, vote ID, process ID, packed ballot mode, encryption key x and y,
+// weight, then c1.x, c1.y, c2.x, c2.y of every field. The encryption key and
+// the ballot are given in gnark (reduced twisted Edwards) form; the signals
+// carry the twisted Edwards coordinates the circuit sees. Unused fields must
+// already hold the identity ciphertext, as GenerateBallotProofInputs leaves
+// them.
+func PublicSignals(
 	processID types.ProcessID,
 	ballotMode spec.BallotMode,
 	encryptionKey ecc.Point,
@@ -72,80 +70,40 @@ func BallotInputsHashGnark(
 	voteID types.VoteID,
 	ballot *elgamal.Ballot,
 	weight *types.BigInt,
-) (*types.BigInt, error) {
-	// check if unconverted parameters are in the field
-	if !voteID.IsInField(params.BallotProofCurve.ScalarField()) {
+) ([]*big.Int, error) {
+	field := params.BallotProofCurve.ScalarField()
+	if !voteID.IsInField(field) {
 		return nil, fmt.Errorf("voteID is not in the scalar field")
 	}
-	if !weight.IsInField(params.BallotProofCurve.ScalarField()) {
+	if !weight.IsInField(field) {
 		return nil, fmt.Errorf("weight is not in the scalar field")
 	}
-	if !address.BigInt().IsInField(params.BallotProofCurve.ScalarField()) {
+	if !address.BigInt().IsInField(field) {
 		return nil, fmt.Errorf("address is not in the scalar field")
 	}
-	if !processID.BigInt().IsInField(params.BallotProofCurve.ScalarField()) {
+	if !processID.BigInt().IsInField(field) {
 		return nil, fmt.Errorf("processID is not in the scalar field")
 	}
-
-	// convert the encryption key to twisted edwards form
-	encryptionKeyXTE, encryptionKeyYTE := format.FromRTEtoTE(encryptionKey.Point())
-	// compose a list with the inputs of the circuit to hash them
-	ballotInputHash, err := spec.BallotInputsHashRTE(
-		processID.MathBigInt(),
-		ballotMode,
-		encryptionKeyXTE,
-		encryptionKeyYTE,
+	packed, err := ballotMode.Pack()
+	if err != nil {
+		return nil, fmt.Errorf("pack ballot mode: %w", err)
+	}
+	coords := ballot.FromRTEtoTE().BigInts()
+	if len(coords) != 4*params.FieldsPerBallot {
+		return nil, fmt.Errorf("ballot has %d coordinates, want %d", len(coords), 4*params.FieldsPerBallot)
+	}
+	keyX, keyY := format.FromRTEtoTE(encryptionKey.Point())
+	out := make([]*big.Int, 0, NumberOfPublicInputs)
+	out = append(out,
 		address.BigInt().MathBigInt(),
-		voteID.Uint64(),
-		ballot.FromRTEtoTE().BigInts(),
+		new(big.Int).SetUint64(voteID.Uint64()),
+		processID.MathBigInt(),
+		packed,
+		keyX,
+		keyY,
 		weight.MathBigInt(),
 	)
-	if err != nil {
-		return nil, err
-	}
-	return (*types.BigInt)(ballotInputHash), nil
-}
-
-func BallotInputsHashIden3(
-	processID types.ProcessID,
-	ballotMode spec.BallotMode,
-	encryptionKey ecc.Point,
-	address types.HexBytes,
-	voteID types.VoteID,
-	ballot *elgamal.Ballot, // Expected to be in RTE format (snarkjs and circom output)
-	weight *types.BigInt,
-) (*types.BigInt, error) {
-	// check if unconverted parameters are in the field
-	if !voteID.IsInField(params.BallotProofCurve.ScalarField()) {
-		return nil, fmt.Errorf("voteID is not in the scalar field")
-	}
-	if !weight.IsInField(params.BallotProofCurve.ScalarField()) {
-		return nil, fmt.Errorf("weight is not in the scalar field")
-	}
-	if !address.BigInt().IsInField(params.BallotProofCurve.ScalarField()) {
-		return nil, fmt.Errorf("address is not in the scalar field")
-	}
-	if !processID.BigInt().IsInField(params.BallotProofCurve.ScalarField()) {
-		return nil, fmt.Errorf("processID is not in the scalar field")
-	}
-
-	// convert the encryption key to twisted edwards form
-	encryptionKeyXTE, encryptionKeyYTE := format.FromRTEtoTE(encryptionKey.Point())
-
-	ballotInputHash, err := spec.BallotInputsHashRTE(
-		processID.MathBigInt(),
-		ballotMode,
-		encryptionKeyXTE,
-		encryptionKeyYTE,
-		address.BigInt().MathBigInt(),
-		voteID.Uint64(),
-		ballot.BigInts(),
-		weight.MathBigInt(),
-	)
-	if err != nil {
-		return nil, err
-	}
-	return (*types.BigInt)(ballotInputHash), nil
+	return append(out, coords...), nil
 }
 
 // GenerateBallotProofInputs composes the data to generate the inputs required
@@ -207,31 +165,17 @@ func GenerateBallotProofInputs(
 	if err != nil {
 		return nil, fmt.Errorf("error generating vote ID: %w", err)
 	}
-	// calculate the ballot inputs hash
-	ballotInputsHash, err := BallotInputsHashGnark(
-		inputs.ProcessID,
-		inputs.BallotMode,
-		encryptionKey,
-		inputs.Address,
-		voteID,
-		ballot,
-		inputs.Weight,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("error calculating ballot input hash: %w", err)
-	}
 	packedBallot, err := ballotMode.Pack()
 	if err != nil {
 		return nil, fmt.Errorf("error packing ballot mode: %w", err)
 	}
 
 	return &BallotProofInputsResult{
-		ProcessID:        inputs.ProcessID,
-		Address:          inputs.Address,
-		Weight:           inputs.Weight,
-		Ballot:           ballot.FromRTEtoTE(),
-		BallotInputsHash: ballotInputsHash,
-		VoteID:           voteID,
+		ProcessID: inputs.ProcessID,
+		Address:   inputs.Address,
+		Weight:    inputs.Weight,
+		Ballot:    ballot.FromRTEtoTE(),
+		VoteID:    voteID,
 		CircomInputs: &CircomInputs{
 			Fields:        bigIntArrayToNInternal(fields[:], params.FieldsPerBallot),
 			BallotMode:    new(types.BigInt).SetBigInt(packedBallot),
@@ -242,7 +186,6 @@ func GenerateBallotProofInputs(
 			EncryptionKey: types.SliceOf([]*big.Int{circomEncryptionKeyX, circomEncryptionKeyY}, types.BigIntConverter),
 			K:             inputs.K,
 			Cipherfields:  bigIntArrayToNInternal(ballot.FromRTEtoTE().BigInts(), params.FieldsPerBallot*elgamal.BigIntsPerCiphertext),
-			InputsHash:    ballotInputsHash,
 		},
 	}, nil
 }

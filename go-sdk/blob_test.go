@@ -316,3 +316,172 @@ func TestBuildTransitionBlobsMultipleBlobs(t *testing.T) {
 		}
 	}
 }
+
+// Known-answer inputs shared with rust-sdk tests/blob.rs and the registry's
+// forge tests: every byte distinct, so a reversed or shifted field shows up.
+func katPointInputs() (pid, rootBE, d [32]byte, com [48]byte) {
+	for i := range pid {
+		pid[i] = byte(i) // 31-byte process id: top byte zero
+		rootBE[i] = byte(0x3f - i)
+		d[i] = byte(0x40 + i)
+	}
+	for i := range com {
+		com[i] = byte(0x60 + i)
+	}
+	return
+}
+
+func TestEvaluationPointKnownAnswers(t *testing.T) {
+	pid, rootBE, d, com := katPointInputs()
+	for _, c := range []struct {
+		n, b int
+		want string
+	}{
+		{3, 2, "2e68404174db9baf4868d118f11d7785ab9229ff6ca34ff9f13a2e9b5b28c858"},
+		{32, 31, "380120e02ac40876fbff01e9c74d852999b7dcd028c008fb5898b8f64236a5f7"},
+		// The raw hash is above r_bls here: the reduction is exercised.
+		{1, 0, "1b5d86841b7b84d14f182c18852689813b81270252cb91c62467600f1e924f71"},
+	} {
+		z := EvaluationPoint(pid, rootBE, d, c.n, c.b, com)
+		if got := hex.EncodeToString(z[:]); got != c.want {
+			t.Errorf("z(n=%d, b=%d) = %s, want %s", c.n, c.b, got, c.want)
+		}
+	}
+	cells := [][32]byte{{}, {}, {}}
+	for i := range cells {
+		for j := range cells[i] {
+			cells[i][j] = byte(i + 1)
+		}
+	}
+	d2 := CellsDigest(2, cells)
+	if got := hex.EncodeToString(d2[:]); got != "68aa598b4b224849460be6b385c0a75f409f16a2546ba18c864fd069a97d5a8c" {
+		t.Errorf("CellsDigest = %s", got)
+	}
+}
+
+// TestEvaluationPointPreimage locks the field order and widths against a
+// hand-assembled preimage, and that index, count and D each move the point.
+func TestEvaluationPointPreimage(t *testing.T) {
+	pid, rootBE, d, com := katPointInputs()
+	var pre []byte
+	pre = append(pre, "davinci/point/v1"...)
+	pre = append(pre, pid[:]...)
+	pre = append(pre, rootBE[:]...)
+	pre = append(pre, d[:]...)
+	pre = binary.BigEndian.AppendUint64(pre, 5)
+	pre = binary.BigEndian.AppendUint64(pre, 4)
+	pre = append(pre, com[:]...)
+	sum := sha256.Sum256(pre)
+	var want [32]byte
+	new(big.Int).Mod(new(big.Int).SetBytes(sum[:]), blsFrModulus).FillBytes(want[:])
+	if got := EvaluationPoint(pid, rootBE, d, 5, 4, com); got != want {
+		t.Fatalf("EvaluationPoint = %x, want %x", got, want)
+	}
+	seen := map[[32]byte]bool{want: true}
+	d2 := d
+	d2[31] ^= 1
+	for _, z := range [][32]byte{
+		EvaluationPoint(pid, rootBE, d, 5, 3, com),
+		EvaluationPoint(pid, rootBE, d, 6, 4, com),
+		EvaluationPoint(pid, rootBE, d2, 5, 4, com),
+	} {
+		if seen[z] {
+			t.Errorf("point did not move: %x", z)
+		}
+		seen[z] = true
+	}
+}
+
+// TestCellsDigestPreimage: D = sha256(tag || u64_be(nf) || u64_be(T) ||
+// cells), and a trailing zero cell (padding) is not absorbed silently.
+func TestCellsDigestPreimage(t *testing.T) {
+	ballot := identityBallot()
+	cells, err := TransitionCells(2, []uint64{1<<63 | 9}, []SlotUpdate{{Key: 0x10, Ballot: ballot}, {Key: 0x11, Ballot: ballot}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pre []byte
+	pre = append(pre, "davinci/cells/v1"...)
+	pre = binary.BigEndian.AppendUint64(pre, 2)
+	pre = binary.BigEndian.AppendUint64(pre, uint64(len(cells)))
+	pre = append(pre, flat(cells)...)
+	if got, want := CellsDigest(2, cells), sha256.Sum256(pre); got != want {
+		t.Fatalf("CellsDigest = %x, want %x", got, want)
+	}
+	if CellsDigest(2, append(cells, [32]byte{})) == CellsDigest(2, cells) {
+		t.Error("a zero cell appended leaves D unchanged")
+	}
+	if CellsDigest(3, cells) == CellsDigest(2, cells) {
+		t.Error("D ignores num_fields")
+	}
+}
+
+// TestChallengeBindsRefreshSelection is the regression for the evaluation
+// point fixed before the content: two valid refresh selections (one slot of
+// an adjacent occupied pair, same position in the sorted stream), the same
+// old root and the same sequencer-supplied commitments must give different
+// points. Under sha256(pid || root || C) they were equal, which let a
+// sequencer fit the content to a wrong blob's value at a known point.
+func TestChallengeBindsRefreshSelection(t *testing.T) {
+	const nf = 2
+	vids := []uint64{1<<63 | 77}
+	vote := SlotUpdate{Key: 0x40, Ballot: identityBallot()}
+	refreshed := identityBallot()
+	refreshed[1] = "0x0000000000000000000000000000000000000000000000000000000000000002"
+	var pid, rootBE [32]byte
+	pid[30], pid[31] = 0x12, 0x34
+	rootBE[0], rootBE[31] = 0x56, 0x78
+
+	build := func(refreshKey uint64) *TransitionBlobs {
+		tb, err := BuildTransitionBlobs(nf, pid, rootBE, vids,
+			[]SlotUpdate{vote, {Key: refreshKey, Ballot: refreshed}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tb
+	}
+	a, b := build(0x20), build(0x21)
+	if len(a.Cells) != len(b.Cells) || len(a.Blobs) != 1 || len(b.Blobs) != 1 {
+		t.Fatal("selections must give the same layout shape")
+	}
+	if a.CellsDigest == b.CellsDigest {
+		t.Fatal("D equal for different refresh selections")
+	}
+	// The same supplied commitment for both: the points must still differ.
+	c := [48]byte(a.Commitments[0])
+	za := EvaluationPoint(pid, rootBE, a.CellsDigest, 1, 0, c)
+	zb := EvaluationPoint(pid, rootBE, b.CellsDigest, 1, 0, c)
+	if za == zb {
+		t.Fatal("same point for two refresh selections under one commitment")
+	}
+	if za != a.Zs[0] {
+		t.Fatal("BuildTransitionBlobs did not open at EvaluationPoint")
+	}
+}
+
+// TestBuildTransitionBlobsPointsPerBlob: in a multi-blob transition every
+// blob is opened at its own point from the shared D, count and index.
+func TestBuildTransitionBlobsPointsPerBlob(t *testing.T) {
+	ballot := identityBallot()
+	updates := make([]SlotUpdate, 127)
+	for i := range updates {
+		updates[i] = SlotUpdate{Key: uint64(0x10 + i), Ballot: ballot}
+	}
+	var pid, rootBE [32]byte
+	pid[31], rootBE[0] = 7, 9
+	tb, err := BuildTransitionBlobs(16, pid, rootBE, []uint64{1 << 63}, updates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tb.Blobs) != 2 {
+		t.Fatalf("n_blobs = %d, want 2", len(tb.Blobs))
+	}
+	if tb.CellsDigest != CellsDigest(16, tb.Cells) {
+		t.Fatal("CellsDigest not over the unpadded cells")
+	}
+	for b := range tb.Blobs {
+		if want := EvaluationPoint(pid, rootBE, tb.CellsDigest, 2, b, [48]byte(tb.Commitments[b])); tb.Zs[b] != want {
+			t.Errorf("blob %d opened at %x, want %x", b, tb.Zs[b], want)
+		}
+	}
+}

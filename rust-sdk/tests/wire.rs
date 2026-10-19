@@ -34,9 +34,17 @@ fn prove_request_matches_go_json() {
     let vk: ig::SnarkJsVk = serde_json::from_value(ours["vk"].clone()).unwrap();
     let proofs: Vec<ig::SnarkJsProof> = serde_json::from_value(ours["proofs"].clone()).unwrap();
     let sigs: Vec<ig::EcdsaSig> = serde_json::from_value(ours["sigs"].clone()).unwrap();
-    let pubs: Vec<Vec<String>> = serde_json::from_value(ours["public_inputs"].clone()).unwrap();
-    let bin = ig::generate_input(&vk, &proofs, &pubs, &sigs).unwrap();
-    assert!(!bin.is_empty());
+    assert!(ours.get("public_inputs").is_none());
+    let bin = ig::generate_input(&vk, &proofs, &sigs).unwrap();
+    // Header n_public = 71; Proofs section is A ‖ B ‖ C only.
+    let word = |i: usize| u64::from_le_bytes(bin[i * 8..i * 8 + 8].try_into().unwrap());
+    assert_eq!((word(2), word(3)), (1, 71));
+    let vk_words = 8 + 3 * 16 + 1 + 72 * 8;
+    assert_eq!(word(4 + vk_words), 1, "nproofs again");
+    assert_eq!(
+        bin.len(),
+        (4 + vk_words + 1 + (8 + 16 + 8) + (4 + 4 + 1)) * 8
+    );
     assert_eq!(sigs[0].signature_v, req.sigs[0].signature_v);
 
     // Every other field parses with the service's hex rules.
@@ -188,9 +196,9 @@ fn batch_publics_from_recorded_job() {
     assert_eq!(p.fail_mask, 0);
     assert_eq!(
         (p.voters, p.overwrites, p.n_blobs, p.occupied_before),
-        (225, 0, 2, 0)
+        (2, 0, 1, 0)
     );
-    assert_eq!((p.nproofs, p.n_public, p.log_n), (225, 3, 7));
+    assert_eq!((p.nproofs, p.n_public, p.log_n), (2, 71, 1));
     let reg = |i: usize| u32::from_le_bytes(regs[4 * i..4 * i + 4].try_into().unwrap());
     assert_eq!(
         (p.nproofs, p.n_public, p.log_n),
@@ -335,11 +343,11 @@ fn build_results_request_roundtrip() {
 fn release_pins() {
     assert_eq!(
         hex::encode(BATCH_PROGRAM_VK),
-        "e39e460085ecddecf365649a61183a71c0fe778aa9c06fd2aa1a6c43cddb988b"
+        "1e4a74a1c6fb1cd1874d80895e1e075930837955efb4a135539016f7cdead2a8"
     );
     assert_eq!(
         hex::encode(RESULTS_PROGRAM_VK),
-        "394694558f39d0b2da0bbb09322333a0f567ee8d16bea2f354543a086587d167"
+        "de55d751582e510bf378d4eec0d98ee3fa5817a50b77bc0e5ce560035e29e4e9"
     );
     assert_eq!(
         hex::encode(ROOT_C_VADCOP_FINAL),

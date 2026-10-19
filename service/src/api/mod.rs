@@ -35,7 +35,10 @@ pub fn router(state: AppState) -> Router {
         .route("/finalize", post(fold::submit_finalize))
         .route("/results", post(results::submit_results))
         .route("/jobs/import", post(jobs::import_stark))
-        .route("/jobs/:id", get(jobs::get_job_status))
+        .route(
+            "/jobs/:id",
+            get(jobs::get_job_status).delete(jobs::cancel_job),
+        )
         .route("/jobs/:id/stark", get(jobs::get_job_stark))
         .route("/jobs/:id/proof/stark", get(jobs::get_job_proof_stark))
         .route("/jobs/:id/snark", get(jobs::get_job_snark))

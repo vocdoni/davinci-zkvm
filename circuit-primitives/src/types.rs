@@ -4,25 +4,25 @@
 //!
 //! | Bit | Name                    | Set by         | Meaning                                    |
 //! |-----|-------------------------|----------------|--------------------------------------------|
-//! |   1 | `FAIL_CURVE`            | groth16.rs     | Proof point not on curve                   |
+//! |   1 | `FAIL_CURVE`            | groth16.rs     | Proof/VK point invalid, or VK delta == gamma |
 //! |   2 | `FAIL_PAIRING`          | groth16.rs     | Batch pairing check failed                 |
 //! |   3 | `FAIL_ECDSA`            | ecdsa.rs       | ECDSA signature or address binding failed  |
 //! |  10 | `FAIL_SMT_VOTEID`       | smt.rs         | VoteID insertion chain invalid             |
 //! |  11 | `FAIL_SMT_BALLOT`       | smt.rs         | Ballot insertion chain invalid             |
 //! |  12 | `FAIL_SMT_RESULTS`      | smt.rs         | net Results transition invalid             |
 //! |  13 | `FAIL_SMT_PROCESS`      | smt.rs         | Process config proof invalid or missing    |
-//! |  14 | `FAIL_CONSISTENCY`      | consistency.rs | VoteID namespace / proof binding mismatch  |
+//! |  14 | `FAIL_CONSISTENCY`      | consistency.rs | VoteID key namespace                       |
 //! |  15 | `FAIL_BALLOT_NS`        | consistency.rs | Ballot namespace / slot binding mismatch   |
-//! |  16 | `FAIL_CENSUS`           | census.rs      | Census membership proof failed             |
+//! |  16 | `FAIL_CENSUS`           | census.rs/csp  | Census proof failed, leaf >= 2^248, CSP weight >= 2^88 |
 //! |  17 | `FAIL_REENC`            | babyjubjub.rs  | Re-encryption verification failed          |
 //! |  18 | `FAIL_KZG`              | kzg.rs         | KZG barycentric evaluation mismatch        |
 //! |  19 | `FAIL_MISSING_BLOCK`    | various        | Mandatory block absent from input          |
 //! |  20 | `FAIL_RESULT_ACCUM`     | results.rs     | Result accumulator ballot sum mismatch     |
 //! |  21 | `FAIL_LEAF_HASH`        | results.rs     | Ballot SMT leaf hash mismatch              |
-//! |  22 | `FAIL_BINDING`          | main.rs        | Cross-block binding mismatch               |
+//! |  22 | `FAIL_BINDING`          | main.rs/publics| Cross-block binding, public-input source missing or non-canonical |
 //! |  23 | `FAIL_CSP`              | csp.rs         | CSP ECDSA signature or address check failed|
 //! |  24 | `FAIL_REFRESH`          | smt.rs/results | Silent-refresh chain or accumulator invalid|
-//! |  31 | `FAIL_PARSE`            | io.rs          | Binary format / parse error                |
+//! |  31 | `FAIL_PARSE`            | io.rs          | Binary format / parse error, n_public != 71 |
 
 /// BN254 G1 affine point: (x[4], y[4]) in 256-bit little-endian limbs.
 pub type G1 = [u64; 8];
@@ -119,13 +119,18 @@ pub const FAIL_BINDING: u32 = 1 << 22;
 /// not folded into the results accumulator.
 pub const FAIL_REFRESH: u32 = 1 << 24;
 
-/// One Groth16 proof and its associated public inputs.
+/// Public inputs of a ballot proof (davinci-circom `BallotProof(16)`): address,
+/// vote id, process id, packed ballot mode, encryption key x and y, weight,
+/// then c1.x, c1.y, c2.x, c2.y per field. The guest derives all of them.
+pub const N_PUBLIC: usize = 7 + BALLOT_FIELDS;
+
+/// One Groth16 ballot proof. Its public inputs are derived in-guest
+/// (circuit/src/publics.rs), never read from the input.
 #[derive(Clone)]
 pub struct ProofRaw {
     pub a: G1,
     pub b: G2,
     pub c: G1,
-    pub public_inputs: Vec<FrRaw>,
 }
 
 /// One secp256k1 ECDSA entry from the optional signature block.
@@ -223,12 +228,14 @@ pub struct ReencEntry {
     pub reencrypted: [BjjCiphertext; NUM_FIELDS],
 }
 
-/// One lean-IMT Poseidon membership proof for a census voter.
+/// One Keccak lean-IMT membership proof for a census voter. Root, leaf and
+/// siblings are 256-bit integers as LE limbs, never field elements.
 #[derive(Clone)]
 pub struct CensusProofEntry {
     /// Tree root at the time of the proof.
     pub root: FrRaw,
-    /// Leaf value: `PackAddressWeight(address, weight)` = `(address << 88) | weight`.
+    /// Leaf value: `PackAddressWeight(address, weight)` = `(address << 88) | weight`,
+    /// required below 2^248.
     pub leaf: FrRaw,
     /// Packed path bits (bit `i` = `(index >> i) & 1`; 1 = node is right child).
     pub index: u64,

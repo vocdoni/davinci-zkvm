@@ -46,6 +46,10 @@ pub struct SnarkJsProof {
 /// snarkjs verification key (`verification_key.json`).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct SnarkJsVk {
+    /// davinci-circom's setup label (`"dev"` for the development setup);
+    /// carried through, never used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<String>,
     #[serde(default = "groth16")]
     pub protocol: String,
     #[serde(default = "bn128")]
@@ -213,8 +217,8 @@ pub struct KzgJson {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ProveRequest {
     pub vk: SnarkJsVk,
+    /// The guest derives each proof's 71 public inputs from the other blocks.
     pub proofs: Vec<SnarkJsProof>,
-    pub public_inputs: Vec<[String; 3]>,
     pub sigs: Vec<EcdsaSigJson>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<StateTransitionJson>,

@@ -4,11 +4,10 @@
 //! into the binary format expected by the `davinci-zkvm-circuit` guest program.
 
 use anyhow::{anyhow, bail, Context, Result};
-use ark_bn254::{Bn254, Fq, Fq2, Fr, G1Affine, G2Affine};
+use ark_bn254::{Bn254, Fq, Fq2, G1Affine, G2Affine};
 use ark_ec::AffineRepr;
 use ark_ff::{BigInt as ArkBigInt, PrimeField};
-use ark_groth16::{prepare_verifying_key, Groth16, Proof, VerifyingKey};
-use ark_snark::SNARK;
+use ark_groth16::{Proof, VerifyingKey};
 use num_bigint::BigUint;
 use serde::Deserialize;
 use std::cmp::Ordering;
@@ -42,6 +41,10 @@ pub const MAX_REFRESH: usize = 2048;
 
 /// Maximum number of KZG blob commitments per KZGBLK!! block.
 pub const MAX_BLOBS: usize = 32;
+
+/// Public inputs of the davinci-circom ballot proof. The guest derives them;
+/// the input only carries the count, from the VK.
+pub const N_PUBLIC: usize = 7 + BALLOT_FIELDS;
 
 /// One Arbo-compatible SMT state-transition entry for binary encoding.
 /// All `[u64; 4]` fields use little-endian word order (word[0] = least-significant 64 bits),
@@ -353,33 +356,6 @@ pub struct SnarkJsVk {
     pub ic: Vec<[String; 3]>,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum G2Mode {
-    C0C1,
-    C1C0,
-    C0C1YSwap,
-    C1C0YSwap,
-    XYSwapC0C1,
-    XYSwapC1C0,
-    XYSwapC0C1YSwap,
-    XYSwapC1C0YSwap,
-}
-
-impl G2Mode {
-    fn all() -> [G2Mode; 8] {
-        [
-            G2Mode::C0C1,
-            G2Mode::C1C0,
-            G2Mode::C0C1YSwap,
-            G2Mode::C1C0YSwap,
-            G2Mode::XYSwapC0C1,
-            G2Mode::XYSwapC1C0,
-            G2Mode::XYSwapC0C1YSwap,
-            G2Mode::XYSwapC1C0YSwap,
-        ]
-    }
-}
-
 fn parse_big_decimal(s: &str) -> Result<BigUint> {
     BigUint::parse_bytes(s.as_bytes(), 10).ok_or_else(|| anyhow!("invalid decimal integer: {s}"))
 }
@@ -403,11 +379,6 @@ fn fq_from_dec(s: &str) -> Result<Fq> {
     Fq::from_bigint(ArkBigInt::<4>(limbs)).ok_or_else(|| anyhow!("invalid Fq element"))
 }
 
-fn fr_from_dec(s: &str) -> Result<Fr> {
-    let limbs = big_to_u64x4_le(&parse_big_decimal(s)?)?;
-    Fr::from_bigint(ArkBigInt::<4>(limbs)).ok_or_else(|| anyhow!("invalid Fr element"))
-}
-
 fn parse_g1(v: &[String; 3]) -> Result<G1Affine> {
     if v[2] == "0" {
         return Ok(G1Affine::identity());
@@ -421,51 +392,41 @@ fn parse_g1(v: &[String; 3]) -> Result<G1Affine> {
     Ok(p)
 }
 
-fn parse_g2(v: &[[String; 2]; 3], mode: G2Mode) -> Result<G2Affine> {
+/// snarkjs G2 ordering only: `[[x_c0, x_c1], [y_c0, y_c1], [1, 0]]` (what
+/// circom/snarkjs emit and the SDKs hash).
+fn parse_g2(v: &[[String; 2]; 3]) -> Result<G2Affine> {
     if v[2][0] == "0" && v[2][1] == "0" {
         return Ok(G2Affine::identity());
     }
-
-    let (x_pair, y_pair) = match mode {
-        G2Mode::XYSwapC0C1
-        | G2Mode::XYSwapC1C0
-        | G2Mode::XYSwapC0C1YSwap
-        | G2Mode::XYSwapC1C0YSwap => (&v[1], &v[0]),
-        _ => (&v[0], &v[1]),
-    };
-
-    let x0 = fq_from_dec(&x_pair[0])?;
-    let x1 = fq_from_dec(&x_pair[1])?;
-    let y0 = fq_from_dec(&y_pair[0])?;
-    let y1 = fq_from_dec(&y_pair[1])?;
-
-    let (x_c0, x_c1, y_c0, y_c1) = match mode {
-        G2Mode::C0C1 | G2Mode::XYSwapC0C1 => (x0, x1, y0, y1),
-        G2Mode::C1C0 | G2Mode::XYSwapC1C0 => (x1, x0, y1, y0),
-        G2Mode::C0C1YSwap | G2Mode::XYSwapC0C1YSwap => (x0, x1, y1, y0),
-        G2Mode::C1C0YSwap | G2Mode::XYSwapC1C0YSwap => (x1, x0, y0, y1),
-    };
-
-    let p = G2Affine::new_unchecked(Fq2::new(x_c0, x_c1), Fq2::new(y_c0, y_c1));
+    let x = Fq2::new(fq_from_dec(&v[0][0])?, fq_from_dec(&v[0][1])?);
+    let y = Fq2::new(fq_from_dec(&v[1][0])?, fq_from_dec(&v[1][1])?);
+    let p = G2Affine::new_unchecked(x, y);
     if !p.is_on_curve() || !p.is_in_correct_subgroup_assuming_on_curve() {
         bail!("invalid G2 point");
     }
     Ok(p)
 }
 
-fn build_vk(vk: &SnarkJsVk, mode: G2Mode) -> Result<VerifyingKey<Bn254>> {
+fn build_vk(vk: &SnarkJsVk) -> Result<VerifyingKey<Bn254>> {
     let alpha = parse_g1(&vk.vk_alpha_1)?;
-    let beta2 = parse_g2(&vk.vk_beta_2, mode)?;
-    let gamma2 = parse_g2(&vk.vk_gamma_2, mode)?;
-    let delta2 = parse_g2(&vk.vk_delta_2, mode)?;
+    let beta2 = parse_g2(&vk.vk_beta_2)?;
+    let gamma2 = parse_g2(&vk.vk_gamma_2)?;
+    let delta2 = parse_g2(&vk.vk_delta_2)?;
     let ic = vk
         .ic
         .iter()
         .map(parse_g1)
         .collect::<Result<Vec<_>>>()
         .context("failed to parse IC points")?;
-    if ic.is_empty() {
-        bail!("vk IC must not be empty");
+    if ic.len() != N_PUBLIC + 1 {
+        bail!(
+            "vk has {} IC points, the ballot circuit needs {}",
+            ic.len(),
+            N_PUBLIC + 1
+        );
+    }
+    if delta2 == gamma2 {
+        bail!("vk has delta == gamma (no phase-2 contribution)");
     }
     Ok(VerifyingKey {
         alpha_g1: alpha,
@@ -476,42 +437,12 @@ fn build_vk(vk: &SnarkJsVk, mode: G2Mode) -> Result<VerifyingKey<Bn254>> {
     })
 }
 
-fn build_proof(p: &SnarkJsProof, mode: G2Mode) -> Result<Proof<Bn254>> {
+fn build_proof(p: &SnarkJsProof) -> Result<Proof<Bn254>> {
     Ok(Proof {
         a: parse_g1(&p.pi_a)?,
-        b: parse_g2(&p.pi_b, mode)?,
+        b: parse_g2(&p.pi_b)?,
         c: parse_g1(&p.pi_c)?,
     })
-}
-
-fn detect_mode(
-    vk: &SnarkJsVk,
-    first_proof: &SnarkJsProof,
-    first_public: &[String],
-) -> Result<G2Mode> {
-    for mode in G2Mode::all() {
-        let try_vk = match build_vk(vk, mode) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let try_proof = match build_proof(first_proof, mode) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let pubs = match first_public
-            .iter()
-            .map(|s| fr_from_dec(s))
-            .collect::<Result<Vec<_>>>()
-        {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let pvk = prepare_verifying_key(&try_vk);
-        if Groth16::<Bn254>::verify_with_processed_vk(&pvk, &pubs, &try_proof).unwrap_or(false) {
-            return Ok(mode);
-        }
-    }
-    bail!("could not detect G2 coordinate ordering mode")
 }
 
 fn parse_index(name: &str, prefix: &str) -> Option<usize> {
@@ -559,9 +490,6 @@ fn collect_paths(dir: &Path, prefix: &str) -> Result<Vec<PathBuf>> {
 fn fq_to_u64x4(x: &Fq) -> [u64; 4] {
     x.into_bigint().0
 }
-fn fr_to_u64x4(x: &Fr) -> [u64; 4] {
-    x.into_bigint().0
-}
 
 fn g1_to_raw(p: &G1Affine) -> [u64; 8] {
     // Infinity is encoded as all-zeros, matching zisklib's G1_IDENTITY (the
@@ -594,14 +522,15 @@ fn write_u64_slice(buf: &mut Vec<u8>, words: &[u64]) {
     }
 }
 
-/// Generate ZisK binary input from a snarkjs VK and an array of proofs + public inputs.
-/// The `proofs` and `public_inputs` arrays must have the same length, between 1 and
-/// MAX_BATCH_SIZE.
+/// Generate ZisK binary input from a snarkjs VK, the ballot proofs and one
+/// ECDSA signature per proof; between 1 and MAX_BATCH_SIZE proofs. Points are
+/// parsed and curve-checked; the proofs themselves are not verified here: the
+/// guest derives their public inputs and checks the whole batch (a bad proof
+/// fails it with FAIL_PAIRING).
 /// Returns raw bytes suitable for writing to disk and passing to `cargo-zisk prove --input`.
 pub fn generate_input(
     vk: &SnarkJsVk,
     proofs_json: &[SnarkJsProof],
-    public_inputs_json: &[Vec<String>],
     sigs: &[EcdsaSig],
 ) -> Result<Vec<u8>> {
     let num_proofs = proofs_json.len();
@@ -612,9 +541,6 @@ pub fn generate_input(
             MAX_BATCH_SIZE
         );
     }
-    if proofs_json.len() != public_inputs_json.len() {
-        bail!("proofs and public_inputs must have the same length");
-    }
     if sigs.len() != num_proofs {
         bail!(
             "sigs length ({}) must equal num_proofs ({}); ECDSA signatures are mandatory",
@@ -623,35 +549,13 @@ pub fn generate_input(
         );
     }
 
-    // Detect G2 encoding mode from the first proof
-    let first_public_str: Vec<String> = public_inputs_json[0].clone();
-    let mode = detect_mode(vk, &proofs_json[0], &first_public_str)?;
-
-    let ark_vk = build_vk(vk, mode)?;
-    let pvk = prepare_verifying_key(&ark_vk);
+    let ark_vk = build_vk(vk)?;
     let n_public = ark_vk.gamma_abc_g1.len() - 1;
-
-    // Parse and verify each proof
-    let mut ark_proofs = Vec::with_capacity(num_proofs);
-    let mut ark_public_inputs = Vec::with_capacity(num_proofs);
-    for (i, (proof_json, pubs_json)) in proofs_json
+    let ark_proofs = proofs_json
         .iter()
-        .zip(public_inputs_json.iter())
         .enumerate()
-    {
-        let proof =
-            build_proof(proof_json, mode).with_context(|| format!("proof[{}] parse failed", i))?;
-        let pubs = pubs_json
-            .iter()
-            .map(|s| fr_from_dec(s))
-            .collect::<Result<Vec<_>>>()
-            .with_context(|| format!("public[{}] parse failed", i))?;
-        if !Groth16::<Bn254>::verify_with_processed_vk(&pvk, &pubs, &proof)? {
-            bail!("single-proof verification failed for proof[{}]", i);
-        }
-        ark_proofs.push(proof);
-        ark_public_inputs.push(pubs);
-    }
+        .map(|(i, p)| build_proof(p).with_context(|| format!("proof[{}] parse failed", i)))
+        .collect::<Result<Vec<_>>>()?;
 
     // Serialize to binary.
     // NOTE: no batch-verification hints are emitted — the guest computes the
@@ -673,15 +577,12 @@ pub fn generate_input(
     for p in &ark_vk.gamma_abc_g1 {
         write_u64_slice(&mut buf, &g1_to_raw(p));
     }
-    // Proofs
+    // Proofs: A, B, C only (the guest derives the public inputs).
     write_u64_slice(&mut buf, &[num_proofs as u64]);
-    for (proof, pubs) in ark_proofs.iter().zip(ark_public_inputs.iter()) {
+    for proof in &ark_proofs {
         write_u64_slice(&mut buf, &g1_to_raw(&proof.a));
         write_u64_slice(&mut buf, &g2_to_raw(&proof.b));
         write_u64_slice(&mut buf, &g1_to_raw(&proof.c));
-        for x in pubs {
-            write_u64_slice(&mut buf, &fr_to_u64x4(x));
-        }
     }
     // ECDSA signatures (one entry per proof): r[4] || s[4] || recid(u64 LE)
     // The public key is not shipped; the guest recovers it from
@@ -696,32 +597,18 @@ pub fn generate_input(
 }
 
 /// Load proofs from a directory following snarkjs naming convention.
-/// Reads `proof_1.json..proof_N.json` and `public_1.json..public_N.json`.
-pub fn load_proofs_from_dir(
-    dir: &Path,
-    num_proofs: usize,
-) -> Result<(Vec<SnarkJsProof>, Vec<Vec<String>>)> {
+/// Reads `proof_1.json..proof_N.json`.
+pub fn load_proofs_from_dir(dir: &Path, num_proofs: usize) -> Result<Vec<SnarkJsProof>> {
     let mut proof_paths = collect_paths(dir, "proof_")?;
-    let mut public_paths = collect_paths(dir, "public_")?;
-    if proof_paths.len() < num_proofs || public_paths.len() < num_proofs {
+    if proof_paths.len() < num_proofs {
         bail!(
-            "not enough proofs/publics in {} (need {})",
+            "not enough proofs in {} (need {})",
             dir.display(),
             num_proofs
         );
     }
     proof_paths.truncate(num_proofs);
-    public_paths.truncate(num_proofs);
-
-    let proofs = proof_paths
-        .iter()
-        .map(|p| read_json(p))
-        .collect::<Result<Vec<SnarkJsProof>>>()?;
-    let publics = public_paths
-        .iter()
-        .map(|p| read_json::<Vec<String>>(p))
-        .collect::<Result<Vec<_>>>()?;
-    Ok((proofs, publics))
+    proof_paths.iter().map(|p| read_json(p)).collect()
 }
 
 fn read_json<T: for<'de> serde::Deserialize<'de>>(path: &Path) -> Result<T> {
@@ -819,6 +706,18 @@ pub fn write_census_block(proofs: &[CensusProofData]) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// A census value on the wire: `0x` and exactly 64 hex digits (either case), read
+/// as a big-endian 256-bit integer into LE limbs and never reduced (R5).
+fn census_node_from_hex(s: &str) -> Result<[u64; 4]> {
+    let digits = s
+        .strip_prefix("0x")
+        .ok_or_else(|| anyhow!("census value must start with 0x: {s}"))?;
+    if digits.len() != 64 {
+        bail!("census value must have 64 hex digits: {s}");
+    }
+    hex32_to_u64x4(s)
+}
+
 /// Parse a 0x-prefixed hex big-endian string into CensusProofData.
 pub fn census_proof_from_hex(
     root: &str,
@@ -826,11 +725,11 @@ pub fn census_proof_from_hex(
     index: u64,
     siblings: &[String],
 ) -> Result<CensusProofData> {
-    let root = hex32_to_u64x4(root)?;
-    let leaf = hex32_to_u64x4(leaf)?;
+    let root = census_node_from_hex(root)?;
+    let leaf = census_node_from_hex(leaf)?;
     let mut sibs = Vec::with_capacity(siblings.len());
     for s in siblings {
-        sibs.push(hex32_to_u64x4(s)?);
+        sibs.push(census_node_from_hex(s)?);
     }
     Ok(CensusProofData {
         root,
@@ -1065,6 +964,75 @@ pub fn address_hex_to_fr_le(s: &str) -> Result<[u64; 4]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The dev ballot VK and a real proof from the rust-sdk vectors.
+    fn ballot_fixture() -> (SnarkJsVk, SnarkJsProof, EcdsaSig) {
+        let vk: SnarkJsVk =
+            serde_json::from_str(include_str!("../../rust-sdk/assets/ballot_proof_vkey.json"))
+                .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../rust-sdk/testdata/real_proof.json")).unwrap();
+        let mut proof = v["proof"].clone();
+        proof["curve"] = "bn128".into();
+        let sig = serde_json::from_value(serde_json::json!({
+            "public_key_x": format!("0x{}", "00".repeat(32)),
+            "public_key_y": format!("0x{}", "00".repeat(32)),
+            "signature_r": format!("0x{}", "11".repeat(32)),
+            "signature_s": format!("0x{}", "22".repeat(32)),
+            "signature_v": 1, "vote_id": 1u64 << 63, "address": "1",
+        }))
+        .unwrap();
+        (vk, serde_json::from_value(proof).unwrap(), sig)
+    }
+
+    #[test]
+    fn generate_input_writes_proofs_without_public_inputs() {
+        let (vk, proof, sig) = ballot_fixture();
+        let bin = generate_input(&vk, &[proof.clone(), proof], &[sig.clone(), sig]).unwrap();
+        let word = |i: usize| u64::from_le_bytes(bin[i * 8..i * 8 + 8].try_into().unwrap());
+        assert_eq!((word(0), word(2), word(3)), (MAGIC, 2, N_PUBLIC as u64));
+        // header 4 + VK (G1 + 3 G2 + len + 72 G1) + nproofs + 2 x (A B C) + 2 x sig
+        let vk_words = 8 + 3 * 16 + 1 + (N_PUBLIC + 1) * 8;
+        assert_eq!(
+            word(4 + vk_words - (N_PUBLIC + 1) * 8 - 1),
+            (N_PUBLIC + 1) as u64
+        );
+        assert_eq!(word(4 + vk_words), 2);
+        assert_eq!(bin.len(), (4 + vk_words + 1 + 2 * 32 + 2 * 9) * 8);
+    }
+
+    #[test]
+    fn generate_input_refuses_non_ballot_vks() {
+        let (vk, proof, sig) = ballot_fixture();
+        let (proofs, sigs) = (std::slice::from_ref(&proof), std::slice::from_ref(&sig));
+        let mut short = vk.clone();
+        short.ic.truncate(4); // the old three-input circuit
+        assert!(generate_input(&short, proofs, sigs).is_err());
+        let mut no_phase2 = vk.clone();
+        no_phase2.vk_delta_2 = no_phase2.vk_gamma_2.clone();
+        let err = generate_input(&no_phase2, proofs, sigs).unwrap_err();
+        assert!(err.to_string().contains("delta == gamma"), "{err}");
+        // A G2 point in another coordinate order is not a valid point.
+        let mut swapped = proof.clone();
+        swapped.pi_b[0].swap(0, 1);
+        assert!(generate_input(&vk, &[swapped], sigs).is_err());
+        assert!(generate_input(&vk, proofs, &[]).is_err());
+    }
+
+    #[test]
+    fn census_values_need_0x_and_64_digits() {
+        let ok = format!("0x{}", "ab".repeat(32));
+        assert!(census_proof_from_hex(&ok, &ok, 0, std::slice::from_ref(&ok)).is_ok());
+        assert!(census_proof_from_hex(&ok.to_uppercase().replace("0X", "0x"), &ok, 0, &[]).is_ok());
+        for bad in [
+            "ab".repeat(32),
+            format!("0x{}", "ab".repeat(31)),
+            format!("0X{}", "ab".repeat(32)),
+            "1234".to_string(),
+        ] {
+            assert!(census_proof_from_hex(&bad, &ok, 0, &[]).is_err(), "{bad}");
+        }
+    }
 
     fn zero_smt_entry(n_siblings: usize) -> SmtEntry {
         SmtEntry {

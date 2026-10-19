@@ -22,6 +22,12 @@ import {IZiskVerifier} from "./IZiskVerifier.sol";
 ///   [28..35]   blobs_digest           (256-bit; reg32(28))
 ///   [36]       n_blobs
 ///   [42]       occupied_before
+///   [46..53]   cells_digest           (256-bit D; reg32(46))
+///
+/// Blob i of n is opened at
+/// `z_i = sha256("davinci/point/v1" ‖ pid ‖ BE32(root_before) ‖ D ‖ u64_be(n) ‖ u64_be(i) ‖ C_i) mod r`,
+/// where D, the guest's hash of the cell stream, fixes the polynomials before
+/// any point exists.
 ///
 /// `reg32(k)` is the concatenation, for j = 0..7, of the low 4 bytes of
 /// word k+j in little-endian order — i.e. `publicValues[8*(k+j) .. 8*(k+j)+4]`.
@@ -35,6 +41,9 @@ contract DavinciSettlement {
 
     // Fixed field-element count the precompile echoes on success.
     uint256 internal constant KZG_FIELD_ELEMENTS = 4096;
+
+    // Domain tag of the evaluation points (circuit/src/kzg.rs POINT_TAG).
+    bytes16 internal constant POINT_TAG = "davinci/point/v1";
 
     struct Process {
         bytes32 stateRoot;
@@ -174,16 +183,18 @@ contract DavinciSettlement {
         bytes32[] calldata ys,
         bytes[] calldata kzgProofs
     ) internal view {
-        bytes32 rootBeforeBE = _reverseBytes32(_reg32(publicValues, 2));
+        // The point prefix is the same for every blob: tag, pid, root, D, n.
         uint256 n = _word(publicValues, 36);
+        bytes memory prefix = abi.encodePacked(
+            POINT_TAG, processId, _reverseBytes32(_reg32(publicValues, 2)), _reg32(publicValues, 46), uint64(n)
+        );
         for (uint256 i = 0; i < n; i++) {
-            _verifyOneOpening(processId, rootBeforeBE, commitments[i], ys[i], kzgProofs[i], i);
+            _verifyOneOpening(prefix, commitments[i], ys[i], kzgProofs[i], i);
         }
     }
 
     function _verifyOneOpening(
-        bytes32 processId,
-        bytes32 rootBeforeBE,
+        bytes memory prefix,
         bytes calldata commitment,
         bytes32 y,
         bytes calldata kzgProof,
@@ -193,7 +204,7 @@ contract DavinciSettlement {
         if (vh == bytes32(0)) revert MissingBlob();
 
         bytes32 z = bytes32(
-            uint256(sha256(abi.encodePacked(processId, rootBeforeBE, commitment))) % BLS_MODULUS
+            uint256(sha256(abi.encodePacked(prefix, uint64(idx), commitment))) % BLS_MODULUS
         );
         bytes memory input = abi.encodePacked(vh, z, y, commitment, kzgProof);
         (bool ok, bytes memory out) = KZG_PRECOMPILE.staticcall(input);

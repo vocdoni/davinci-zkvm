@@ -5,8 +5,9 @@
 //! Expected directory structure:
 //!   <proofs-dir>/verification_key.json: snarkjs verification key
 //!   <proofs-dir>/proof_1.json: Groth16 proof (1-indexed)
-//!   <proofs-dir>/public_1.json: public inputs
+//!   <proofs-dir>/sig_1.json: the voter's ECDSA signature
 //!   ...
+//! The ballot proofs' public inputs are derived in-guest, not read.
 
 use anyhow::Result;
 use davinci_zkvm_input_gen::{
@@ -51,14 +52,14 @@ fn main() -> Result<()> {
     )?;
 
     eprintln!("Loading {} proofs from {:?}", nproofs, proofs_dir);
-    let (proofs, public_inputs) = load_proofs_from_dir(&proofs_dir, nproofs)?;
+    let proofs = load_proofs_from_dir(&proofs_dir, nproofs)?;
     let sigs = load_signatures_from_dir(&proofs_dir, nproofs)?;
     if !sigs.is_empty() {
         eprintln!("Loaded {} ECDSA signatures", sigs.len());
     }
 
     eprintln!("Generating binary input...");
-    let bytes = generate_input(&vk, &proofs, &public_inputs, &sigs)?;
+    let bytes = generate_input(&vk, &proofs, &sigs)?;
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;
     }

@@ -54,15 +54,23 @@ pub const ONE: BnFr = [1, 0, 0, 0];
 #[inline]
 pub fn muladd(a: &BnFr, b: &BnFr, c: &BnFr) -> BnFr {
     let mut d = [0u64; 4];
+    muladd_into(&mut d, a, b, c);
+    d
+}
+
+/// `out = (a * b + c) mod p`, written in place: no zeroed temporary and no
+/// return copy. `out` cannot alias an input, so hot loops ping-pong their
+/// accumulators between two buffers.
+#[inline(always)]
+pub fn muladd_into(out: &mut BnFr, a: &BnFr, b: &BnFr, c: &BnFr) {
     let mut params = SyscallArith256ModParams {
         a,
         b,
         c,
         module: &BN254_FR_MOD,
-        d: &mut d,
+        d: out,
     };
     syscall_arith256_mod(&mut params);
-    d
 }
 
 // Derived operations
@@ -228,4 +236,34 @@ fn sub_256(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
     let (r3, _) = a[3].overflowing_sub(b[3]);
     let (r3, _) = r3.overflowing_sub(borrow2 as u64);
     [r0, r1, r2, r3]
+}
+
+/// `a < p`: `a` is the canonical encoding of a field element.
+#[inline]
+pub fn is_canonical(a: &BnFr) -> bool {
+    for i in (0..4).rev() {
+        if a[i] != BN254_FR_MOD[i] {
+            return a[i] < BN254_FR_MOD[i];
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod canonical_tests {
+    use super::*;
+
+    #[test]
+    fn is_canonical_bounds() {
+        assert!(is_canonical(&ZERO));
+        let mut pm1 = BN254_FR_MOD;
+        pm1[0] -= 1;
+        assert!(is_canonical(&pm1));
+        assert!(!is_canonical(&BN254_FR_MOD));
+        let mut hi = BN254_FR_MOD;
+        hi[3] += 1;
+        assert!(!is_canonical(&hi));
+        assert!(!is_canonical(&[u64::MAX; 4]));
+        assert!(is_canonical(&[u64::MAX, u64::MAX, u64::MAX, BN254_FR_MOD[3] - 1]));
+    }
 }

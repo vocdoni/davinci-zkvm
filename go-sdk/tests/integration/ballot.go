@@ -63,7 +63,8 @@ type BallotResult struct {
 	RawBallot *ballotRaw
 	// ProofJSON is the snarkjs Groth16 proof (JSON).
 	ProofJSON json.RawMessage
-	// PublicInputs is the array of public signals: [address, voteID, inputsHash].
+	// PublicInputs are the proof's 71 public signals as the circuit output
+	// them. The guest derives the same values; they are never sent.
 	PublicInputs []string
 	// SigJSON is the ECDSA signature in input-gen format (JSON).
 	SigJSON json.RawMessage
@@ -105,8 +106,8 @@ func GenerateBallotBatch(
 
 	for i, v := range voters {
 		seed := seedBase + int64(i)
-		res, err := ballotprooftest.DeterministicBallotProof(
-			v.AddressBytes, processID, encKey, seed)
+		res, err := ballotprooftest.DeterministicBallotProofWeight(
+			v.AddressBytes, processID, encKey, seed, v.Weight)
 		if err != nil {
 			return nil, fmt.Errorf("voter %d ballot proof: %w", i, err)
 		}
@@ -142,7 +143,7 @@ func GenerateBallotBatch(
 			return nil, fmt.Errorf("marshal sig %d: %w", i, err)
 		}
 
-		// Parse public signals: [address_dec, voteID_dec, inputsHash_dec].
+		// Parse the 71 public signals (kept for checks, never sent).
 		var pubSigs []string
 		if err := json.Unmarshal([]byte(res.PubInputs), &pubSigs); err != nil {
 			return nil, fmt.Errorf("parse public inputs %d: %w", i, err)
@@ -185,7 +186,7 @@ type BatchProveComponents struct {
 	VK json.RawMessage
 	// Proofs are the snarkjs Groth16 proof JSONs.
 	Proofs []json.RawMessage
-	// PublicInputs are the public signal arrays for each proof.
+	// PublicInputs are the circuit's public signals for each proof (not sent).
 	PublicInputs [][]string
 	// Sigs are the ECDSA signature JSONs for each voter.
 	Sigs []json.RawMessage
@@ -196,10 +197,9 @@ type BatchProveComponents struct {
 // ToProveRequest builds a davinci.ProveRequest from the batch components.
 func (b *BatchProveComponents) ToProveRequest() *davinci.ProveRequest {
 	return &davinci.ProveRequest{
-		VK:           b.VK,
-		Proofs:       b.Proofs,
-		PublicInputs: b.PublicInputs,
-		Sigs:         b.Sigs,
+		VK:     b.VK,
+		Proofs: b.Proofs,
+		Sigs:   b.Sigs,
 	}
 }
 

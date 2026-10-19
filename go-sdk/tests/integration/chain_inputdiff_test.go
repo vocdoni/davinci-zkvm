@@ -6,7 +6,6 @@ package integration
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -59,8 +58,6 @@ func TestChainInputDiff(t *testing.T) {
 	for i, res := range batch.Results {
 		idx := i + 1
 		os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("proof_%d.json", idx)), res.ProofJSON, 0o600)
-		pubBytes, _ := json.Marshal(res.PublicInputs)
-		os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("public_%d.json", idx)), pubBytes, 0o600)
 		os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("sig_%d.json", idx)), res.SigJSON, 0o600)
 	}
 	outBin := filepath.Join(tmpDir, "base.bin")

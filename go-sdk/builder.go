@@ -13,21 +13,20 @@ import (
 //
 //	req, err := davinci.NewProveRequestBuilder().
 //	    SetVerificationKey(vk).
-//	    AddProof(proof, pubInputs).
+//	    AddProof(proof).
 //	    AddEcdsaSignature(sig).
 //	    SetStateTransition(stateData).
 //	    Build()
 type ProveRequestBuilder struct {
-	vk           *VerificationKey
-	vkRaw        json.RawMessage // alternative: raw JSON from circom/snarkjs
-	proofs       []*Groth16Proof
-	proofsRaw    []json.RawMessage // alternative: raw JSON proofs
-	publicInputs []*PublicInput
-	sigs         []*EcdsaSignature
-	state        *StateTransitionData
-	census       []CensusProof
-	reenc        *ReencryptionData
-	kzg          *KZGRequest
+	vk        *VerificationKey
+	vkRaw     json.RawMessage // alternative: raw JSON from circom/snarkjs
+	proofs    []*Groth16Proof
+	proofsRaw []json.RawMessage // alternative: raw JSON proofs
+	sigs      []*EcdsaSignature
+	state     *StateTransitionData
+	census    []CensusProof
+	reenc     *ReencryptionData
+	kzg       *KZGRequest
 }
 
 // NewProveRequestBuilder creates a new empty builder.
@@ -50,21 +49,19 @@ func (b *ProveRequestBuilder) SetVerificationKeyJSON(vkJSON []byte) *ProveReques
 	return b
 }
 
-// AddProof adds a ballot proof with its public inputs to the batch.
-// Proofs must be added in the same order as their ECDSA signatures.
-func (b *ProveRequestBuilder) AddProof(proof *Groth16Proof, pubInputs *PublicInput) *ProveRequestBuilder {
+// AddProof adds a ballot proof to the batch. Proofs must be added in the same
+// order as their ECDSA signatures; the guest derives their public inputs.
+func (b *ProveRequestBuilder) AddProof(proof *Groth16Proof) *ProveRequestBuilder {
 	b.proofs = append(b.proofs, proof)
 	b.proofsRaw = append(b.proofsRaw, nil)
-	b.publicInputs = append(b.publicInputs, pubInputs)
 	return b
 }
 
-// AddProofJSON adds a ballot proof from raw snarkjs JSON bytes with its public inputs.
+// AddProofJSON adds a ballot proof from raw snarkjs JSON bytes.
 // Use this when you already have the proof in JSON format from circom/snarkjs.
-func (b *ProveRequestBuilder) AddProofJSON(proofJSON []byte, pubInputs *PublicInput) *ProveRequestBuilder {
+func (b *ProveRequestBuilder) AddProofJSON(proofJSON []byte) *ProveRequestBuilder {
 	b.proofs = append(b.proofs, nil)
 	b.proofsRaw = append(b.proofsRaw, json.RawMessage(proofJSON))
-	b.publicInputs = append(b.publicInputs, pubInputs)
 	return b
 }
 
@@ -81,7 +78,7 @@ func (b *ProveRequestBuilder) SetStateTransition(state *StateTransitionData) *Pr
 	return b
 }
 
-// SetCensusProofs sets the lean-IMT Poseidon census membership proofs.
+// SetCensusProofs sets the Keccak lean-IMT census membership proofs.
 func (b *ProveRequestBuilder) SetCensusProofs(proofs []CensusProof) *ProveRequestBuilder {
 	b.census = proofs
 	return b
@@ -110,10 +107,6 @@ func (b *ProveRequestBuilder) Build() (*ProveRequest, error) {
 	}
 	if len(b.proofs) > MaxBatchSize {
 		return nil, fmt.Errorf("batch size %d exceeds MaxBatchSize (%d)", len(b.proofs), MaxBatchSize)
-	}
-	if len(b.proofs) != len(b.publicInputs) {
-		return nil, fmt.Errorf("proofs count (%d) must match public inputs count (%d)",
-			len(b.proofs), len(b.publicInputs))
 	}
 	if len(b.sigs) != len(b.proofs) {
 		return nil, fmt.Errorf("signatures count (%d) must match proofs count (%d)",
@@ -146,12 +139,6 @@ func (b *ProveRequestBuilder) Build() (*ProveRequest, error) {
 		}
 	}
 
-	// Convert public inputs to [][]string
-	pubInputs := make([][]string, len(b.publicInputs))
-	for i, pi := range b.publicInputs {
-		pubInputs[i] = pi.toStrings()
-	}
-
 	// Serialize signatures
 	sigsJSON := make([]json.RawMessage, len(b.sigs))
 	for i, s := range b.sigs {
@@ -165,7 +152,6 @@ func (b *ProveRequestBuilder) Build() (*ProveRequest, error) {
 	return &ProveRequest{
 		VK:           vkJSON,
 		Proofs:       proofsJSON,
-		PublicInputs: pubInputs,
 		Sigs:         sigsJSON,
 		State:        b.state,
 		CensusProofs: b.census,

@@ -1,12 +1,12 @@
 //! Ballots, ballot mode, leaf hashes, the re-encryption chain, vote ids,
-//! inputs hash and Groth16 verification against the Go vectors.
+//! ballot public signals and Groth16 verification against the Go vectors.
 
 mod common;
 
 use common::*;
 use davinci_zkvm_sdk::ballot::*;
 use davinci_zkvm_sdk::crypto::field::{fr_from_be, fr_to_be, Fr};
-use davinci_zkvm_sdk::groth16::BallotVerifier;
+use davinci_zkvm_sdk::groth16::{BallotVerifier, N_PUBLIC};
 use davinci_zkvm_sdk::limits::*;
 use davinci_zkvm_sdk::reenc::{reencrypt_ballot, ReencChain};
 use davinci_zkvm_sdk::types::SnarkJsProof;
@@ -117,6 +117,10 @@ fn leaf_hashes_match_go() {
     assert_eq!(leaf_value_bytes(&d), r);
 }
 
+/// davinci-circom `artifacts/DEV_VK_HASH`: the development setup's ballot VK.
+/// The production ceremony replaces the asset and this pin together.
+const DEV_VK_HASH: &str = "e8e1e7377394b6600e7e31f2f2d012f148694d07c6088b205371a0fcc96418a9";
+
 #[test]
 fn ballot_vk_hash_matches_go() {
     let v = load("hashes.json");
@@ -127,9 +131,7 @@ fn ballot_vk_hash_matches_go() {
     .unwrap();
     let ver = BallotVerifier::from_snarkjs_json(&embedded).unwrap();
     assert_eq!(hex::encode(ver.vk_hash()), s(&v["ballot_vk_leaf"]));
-    let v1 = load("real_proof_v1.json");
-    let ver1 = BallotVerifier::from_snarkjs_json(&v1["vk"].to_string()).unwrap();
-    assert_eq!(hex::encode(ver1.vk_hash()), s(&v["ballot_vk_leaf_v1"]));
+    assert_eq!(hex::encode(ver.vk_hash()), DEV_VK_HASH);
 }
 
 #[test]
@@ -203,8 +205,9 @@ fn reencrypt_ballots_match_go() {
 }
 
 #[test]
-fn inputs_hash_and_vote_id_match_go() {
+fn public_signals_and_vote_id_match_go() {
     let v = load("ballots.json");
+    let mut nfs = Vec::new();
     for b in v.as_array().unwrap() {
         let pid = fr(&b["process_id"]);
         let address = address_to_fr(&hex20(&b["address"]));
@@ -216,29 +219,48 @@ fn inputs_hash_and_vote_id_match_go() {
         let fields: Vec<u64> = b["fields"].as_array().unwrap().iter().map(u64v).collect();
         let bal = encrypt_ballot(&pk, &fields, &k, bm.num_fields);
         assert_eq!(bal, ballot(&b["ballot"]));
-        let h = inputs_hash(&pid, &bm, &pk, &address, vid, &bal, &fr(&b["weight"])).unwrap();
-        assert_eq!(h, fr(&b["inputs_hash"]));
-        // The same 71 inputs the circuit hashes.
-        let ins = frs(&b["inputs"]);
-        assert_eq!(ins.len(), 71);
+        let w = fr(&b["weight"]);
+        let pubs = public_signals(&pid, &bm, &pk, &address, vid, &bal, &w).unwrap();
         assert_eq!(
-            davinci_zkvm_sdk::crypto::poseidon::multi_poseidon(&ins).unwrap(),
-            h
+            pubs.to_vec(),
+            frs(&b["public_signals"]),
+            "nf = {}",
+            bm.num_fields
         );
+        assert_eq!(
+            &pubs[..7],
+            &[
+                address,
+                Fr::from(vid),
+                pid,
+                bm.pack().unwrap(),
+                pk.x,
+                pk.y,
+                w
+            ]
+        );
+        // Padded fields are the TE identity (0, 1), (0, 1).
+        let (zero, one) = (Fr::from(0u64), Fr::from(1u64));
+        for f in bm.num_fields as usize..NUM_FIELDS {
+            assert_eq!(&pubs[7 + 4 * f..11 + 4 * f], &[zero, one, zero, one]);
+        }
+        nfs.push(bm.num_fields);
     }
+    nfs.sort();
+    assert_eq!(nfs, [1, 2, 6, 8, 16]);
 }
 
-fn real_proof(name: &str) -> (Value, BallotVerifier, SnarkJsProof, [Fr; 3]) {
-    let v = load(name);
+fn real_proof() -> (Value, BallotVerifier, SnarkJsProof, [Fr; N_PUBLIC]) {
+    let v = load("real_proof.json");
     let ver = BallotVerifier::from_snarkjs_json(&v["vk"].to_string()).unwrap();
     let proof: SnarkJsProof = serde_json::from_value(v["proof"].clone()).unwrap();
-    let pubs: [Fr; 3] = frs(&v["public_signals"]).try_into().unwrap();
+    let pubs: [Fr; N_PUBLIC] = frs(&v["public_signals"]).try_into().unwrap();
     (v, ver, proof, pubs)
 }
 
 #[test]
 fn real_proof_verifies_with_embedded_vk() {
-    let (v, ver, proof, pubs) = real_proof("real_proof.json");
+    let (v, ver, proof, pubs) = real_proof();
     let embedded = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/assets/ballot_proof_vkey.json"
@@ -252,11 +274,16 @@ fn real_proof_verifies_with_embedded_vk() {
     );
     assert_eq!(proof.curve, "bn128"); // defaulted: rapidsnark omits it
     assert!(ver.verify(&proof, &pubs));
-    for i in 0..3 {
+    for i in 0..N_PUBLIC {
         let mut bad = pubs;
         bad[i] += Fr::from(1u64);
         assert!(!ver.verify(&proof, &bad), "public input {i} changed");
     }
+    // Two fields swapped: same values, wrong positions.
+    let mut swapped = pubs;
+    swapped[7..11].copy_from_slice(&pubs[11..15]);
+    swapped[11..15].copy_from_slice(&pubs[7..11]);
+    assert!(!ver.verify(&proof, &swapped));
     let mut bad = proof.clone();
     bad.pi_a[0] = "1".into();
     assert!(!ver.verify(&bad, &pubs));
@@ -273,7 +300,7 @@ fn real_proof_verifies_with_embedded_vk() {
     let vid = vote_id(&pid, &address, &fr(&b["k"]));
     let bm = mode(&b["mode"]);
     let pk = point(&b["pk"]);
-    let h = inputs_hash(
+    let want = public_signals(
         &pid,
         &bm,
         &pk,
@@ -283,32 +310,26 @@ fn real_proof_verifies_with_embedded_vk() {
         &fr(&b["weight"]),
     )
     .unwrap();
-    assert_eq!(pubs, [address, Fr::from(vid), h]);
-}
-
-#[test]
-fn real_proof_v1_verifies_only_with_its_vk() {
-    let (_, ver, proof, pubs) = real_proof("real_proof_v1.json");
-    assert!(ver.verify(&proof, &pubs));
-    let embedded = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/assets/ballot_proof_vkey.json"
-    ))
-    .unwrap();
-    assert!(!BallotVerifier::from_snarkjs_json(&embedded)
-        .unwrap()
-        .verify(&proof, &pubs));
+    assert_eq!(pubs, want);
 }
 
 #[test]
 fn verifier_rejects_bad_vks() {
-    let (v, ..) = real_proof("real_proof.json");
+    let (v, ..) = real_proof();
     let mut vk = v["vk"].clone();
     vk["IC"].as_array_mut().unwrap().pop();
     assert!(BallotVerifier::from_snarkjs_json(&vk.to_string()).is_err());
     let mut vk = v["vk"].clone();
+    vk["IC"].as_array_mut().unwrap().truncate(4); // the old 3-input circuit
+    assert!(BallotVerifier::from_snarkjs_json(&vk.to_string()).is_err());
+    let mut vk = v["vk"].clone();
     vk["vk_alpha_1"][0] = "5".into();
     assert!(BallotVerifier::from_snarkjs_json(&vk.to_string()).is_err());
+    // No phase-2 contribution: delta == gamma.
+    let mut vk = v["vk"].clone();
+    vk["vk_delta_2"] = vk["vk_gamma_2"].clone();
+    let err = BallotVerifier::from_snarkjs_json(&vk.to_string()).unwrap_err();
+    assert!(err.to_string().contains("delta == gamma"), "{err}");
     assert!(BallotVerifier::from_snarkjs_json("{}").is_err());
 }
 

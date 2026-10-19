@@ -110,23 +110,10 @@ func makeBlob(seed byte) kzg4844.Blob {
 	return b
 }
 
-// computeZ returns z = sha256(pid || rootBeforeBE || commitment) mod BLS_MODULUS.
-func computeZ(pid, rootBeforeBE [32]byte, com kzg4844.Commitment) kzg4844.Point {
-	h := sha256.New()
-	h.Write(pid[:])
-	h.Write(rootBeforeBE[:])
-	h.Write(com[:])
-	sum := h.Sum(nil)
-	z := new(big.Int).SetBytes(sum)
-	z.Mod(z, blsModulus)
-	var pt kzg4844.Point
-	z.FillBytes(pt[:])
-	return pt
-}
-
 // buildBlobs returns a TransitionBlobs with commitments and opening proofs
-// bound to (pid, rootBefore). rootBefore is the LE-form root (as it lives
-// in the publics); we hash the reversed (BE) form, matching the guest.
+// bound to (pid, rootBefore, D). rootBefore is the LE-form root (as it lives
+// in the publics); we hash the reversed (BE) form, matching the guest. The
+// blobs are not a guest cell stream, so D is a stand-in the publics carry.
 func buildBlobs(pid, rootBefore [32]byte, seeds []byte) (*davinci.TransitionBlobs, error) {
 	rootBE := reverseBytes32(rootBefore)
 	out := &davinci.TransitionBlobs{
@@ -134,6 +121,7 @@ func buildBlobs(pid, rootBefore [32]byte, seeds []byte) (*davinci.TransitionBlob
 		Commitments: make([]kzg4844.Commitment, len(seeds)),
 		Ys:          make([][32]byte, len(seeds)),
 		Proofs:      make([]kzg4844.Proof, len(seeds)),
+		CellsDigest: sha256.Sum256(append([]byte("cells "), seeds...)),
 	}
 	digest := sha256.New()
 	for i, s := range seeds {
@@ -143,7 +131,7 @@ func buildBlobs(pid, rootBefore [32]byte, seeds []byte) (*davinci.TransitionBlob
 			return nil, fmt.Errorf("commit blob %d: %w", i, err)
 		}
 		out.Commitments[i] = com
-		z := computeZ(pid, rootBE, com)
+		z := kzg4844.Point(davinci.EvaluationPoint(pid, rootBE, out.CellsDigest, len(seeds), i, [48]byte(com)))
 		proof, claim, err := kzg4844.ComputeProof(&out.Blobs[i], z)
 		if err != nil {
 			return nil, fmt.Errorf("open blob %d: %w", i, err)
@@ -172,6 +160,7 @@ type publicsSpec struct {
 	blobsDigest    [32]byte
 	nBlobs         uint32
 	occupiedBefore uint32
+	cellsDigest    [32]byte
 }
 
 func makePublicValues(spec publicsSpec) []byte {
@@ -186,6 +175,7 @@ func makePublicValues(spec publicsSpec) []byte {
 	setReg32(&regs, 28, spec.blobsDigest)
 	regs[36] = spec.nBlobs
 	regs[42] = spec.occupiedBefore
+	setReg32(&regs, 46, spec.cellsDigest)
 	return publics(regs)
 }
 
@@ -242,6 +232,7 @@ func TestSettlement(t *testing.T) {
 			overwrites:     2,
 			censusRoot:     census,
 			blobsDigest:    blobs.Digest,
+			cellsDigest:    blobs.CellsDigest,
 			nBlobs:         1,
 			occupiedBefore: 0,
 		})
@@ -287,6 +278,7 @@ func TestSettlement(t *testing.T) {
 			overwrites:     0,
 			censusRoot:     census,
 			blobsDigest:    blobs.Digest,
+			cellsDigest:    blobs.CellsDigest,
 			nBlobs:         2,
 			occupiedBefore: 0,
 		})
@@ -326,6 +318,7 @@ func TestSettlement(t *testing.T) {
 			overwrites:     1,
 			censusRoot:     census,
 			blobsDigest:    blobs.Digest,
+			cellsDigest:    blobs.CellsDigest,
 			nBlobs:         1,
 			occupiedBefore: 0,
 		}
@@ -375,6 +368,14 @@ func TestSettlement(t *testing.T) {
 		spec.blobsDigest = tamperedDigest
 		if _, err := s.SubmitTransition(pid, snarkFrom(programVK, rootC, makePublicValues(spec)), &tampered); err == nil {
 			t.Error("tampered y: expected revert")
+		}
+
+		// D other than the one the openings were made for: the contract
+		// derives other points, so the openings fail.
+		spec = goodSpec
+		spec.cellsDigest[31] ^= 0x01
+		if _, err := s.SubmitTransition(pid, snarkFrom(programVK, rootC, makePublicValues(spec)), blobs); err == nil {
+			t.Error("wrong cells digest: expected revert")
 		}
 
 		// wrong commitment count (claim 2 blobs, only provide 1)

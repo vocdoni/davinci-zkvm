@@ -17,21 +17,18 @@ type CircomInputs struct {
 	EncryptionKey []*types.BigInt `json:"encryption_pubkey"`
 	K             *types.BigInt   `json:"k"`
 	Cipherfields  []*types.BigInt `json:"cipherfields"`
-	InputsHash    *types.BigInt   `json:"inputs_hash"`
 }
 
 // BallotProofInputsResult struct contains the result of composing the data to
 // generate the witness for a ballot proof using the circom circuit. Includes
 // the inputs for the circom circuit but also the required data to cast a vote
-// sending it to the sequencer API. It includes the BallotInputsHash, which is
-// used by the API to verify the resulting circom proof and the voteID, which
-// is signed by the user to prove the ownership of the vote.
+// sending it to the sequencer API, including the voteID, which is signed by
+// the user to prove the ownership of the vote.
 type BallotProofInputsResult struct {
-	ProcessID        types.ProcessID `json:"processId"`
-	Address          types.HexBytes  `json:"address"`
-	Weight           *types.BigInt   `json:"weight"`
-	Ballot           *elgamal.Ballot `json:"ballot"`
-	BallotInputsHash *types.BigInt   `json:"ballotInputsHash"`
-	VoteID           types.VoteID    `json:"voteId"`
-	CircomInputs     *CircomInputs   `json:"circomInputs"`
+	ProcessID    types.ProcessID `json:"processId"`
+	Address      types.HexBytes  `json:"address"`
+	Weight       *types.BigInt   `json:"weight"`
+	Ballot       *elgamal.Ballot `json:"ballot"`
+	VoteID       types.VoteID    `json:"voteId"`
+	CircomInputs *CircomInputs   `json:"circomInputs"`
 }

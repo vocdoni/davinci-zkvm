@@ -12,7 +12,7 @@
 //! **Sibling ordering**: index 0 = root level, index n-1 = leaf level (same as arbo).
 //! **Path bits**: LSB-first => `bit[level] = key_u256_le[level/64] >> (level%64) & 1`.
 
-use crate::hash::sha256_once;
+use crate::hash::{sha256_compress, sha256_state_to_fr_le, SHA256_IV};
 use crate::types::{FrRaw, SmtTransition, StateBlock, ZERO_FR,
     FAIL_SMT_VOTEID, FAIL_SMT_BALLOT, FAIL_SMT_RESULTS, FAIL_SMT_PROCESS,
     FAIL_REFRESH, MAX_REFRESH, REFRESH_MIN, REFRESH_TAU, REFRESH_KAPPA};
@@ -45,20 +45,26 @@ pub fn le_to_fr(b: &[u8; 32]) -> FrRaw {
 /// Arbo leaf hash: `SHA256(key_le8 || value_le32 || 0x01)` => 41 bytes.
 /// The tree has `SMT_LEVELS = 64` levels, so arbo keys are 8 bytes; only
 /// limb 0 of the key is ever hashed or walked.
+/// One padded block, as LE words: the LE fields are the words themselves,
+/// then 0x01, the 0x80 pad byte and the 328-bit length (big-endian).
 pub fn leaf_hash(key: &FrRaw, value: &FrRaw) -> FrRaw {
-    let mut input = [0u8; 41];
-    input[0..8].copy_from_slice(&key[0].to_le_bytes());
-    input[8..40].copy_from_slice(&fr_to_le(value));
-    input[40] = 0x01;
-    le_to_fr(&sha256_once(&input))
+    let block = [key[0], value[0], value[1], value[2], value[3], 0x8001, 0, (41u64 * 8).swap_bytes()];
+    let mut state = SHA256_IV;
+    sha256_compress(&mut state, &block);
+    sha256_state_to_fr_le(&state)
 }
 
+/// Padding block of a 64-byte message: 0x80, zeros, 512-bit length (big-endian).
+const NODE_PAD: [u64; 8] = [0x80, 0, 0, 0, 0, 0, 0, (64u64 * 8).swap_bytes()];
+
 /// Arbo internal node hash: `SHA256(left_le32 || right_le32)` => 64 bytes.
+/// Two compressions: the LE limbs are the first block's words as they stand.
 pub fn node_hash(left: &FrRaw, right: &FrRaw) -> FrRaw {
-    let mut input = [0u8; 64];
-    input[0..32].copy_from_slice(&fr_to_le(left));
-    input[32..64].copy_from_slice(&fr_to_le(right));
-    le_to_fr(&sha256_once(&input))
+    let block = [left[0], left[1], left[2], left[3], right[0], right[1], right[2], right[3]];
+    let mut state = SHA256_IV;
+    sha256_compress(&mut state, &block);
+    sha256_compress(&mut state, &NODE_PAD);
+    sha256_state_to_fr_le(&state)
 }
 
 // Path helpers
@@ -1094,5 +1100,55 @@ mod refresh_helper_tests {
         let mut m = 0u32;
         let _ = verify_state(Some(&s), &mut m);
         assert!(m & FAIL_SMT_RESULTS != 0, "mask={:#x}", m);
+    }
+}
+
+#[cfg(test)]
+mod hash_tests {
+    use super::*;
+    use crate::hash::sha256_once;
+
+    // Every byte distinct and high bits set, so a swapped limb, word half or
+    // byte changes the digest.
+    const VALS: [FrRaw; 3] = [
+        ZERO_FR,
+        [0x0102030405060708, 0x1112131415161718, 0xa1a2a3a4a5a6a7a8, 0xf1f2f3f4f5f6f7f8],
+        [u64::MAX; 4],
+    ];
+
+    #[test]
+    fn node_hash_matches_streaming_sha256() {
+        for l in &VALS {
+            for r in &VALS {
+                let mut input = [0u8; 64];
+                input[..32].copy_from_slice(&fr_to_le(l));
+                input[32..].copy_from_slice(&fr_to_le(r));
+                assert_eq!(node_hash(l, r), le_to_fr(&sha256_once(&input)));
+            }
+        }
+    }
+
+    #[test]
+    fn leaf_hash_matches_streaming_sha256() {
+        for k in &VALS {
+            for v in &VALS {
+                let mut input = [0u8; 41];
+                input[..8].copy_from_slice(&k[0].to_le_bytes());
+                input[8..40].copy_from_slice(&fr_to_le(v));
+                input[40] = 0x01;
+                assert_eq!(leaf_hash(k, v), le_to_fr(&sha256_once(&input)));
+            }
+        }
+    }
+
+    // sha256 of 64 zero bytes, independent of the precompile's word layout.
+    #[test]
+    fn node_hash_of_zeros_known_answer() {
+        let hex = "f5a5fd42d16a20302798ef6ed309979b43003d2320d9f0e8ea9831a92759fb4b";
+        let mut d = [0u8; 32];
+        for i in 0..32 {
+            d[i] = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
+        }
+        assert_eq!(node_hash(&ZERO_FR, &ZERO_FR), le_to_fr(&d));
     }
 }

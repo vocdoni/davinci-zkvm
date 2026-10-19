@@ -2,8 +2,9 @@
 //!
 //! # Algorithm
 //!
-//! Given `n` proofs `(A_i, B_i, C_i, pubs_i)` and a verification key `vk`, the batch
-//! check reduces to a single multi-pairing equation:
+//! Given `n` proofs `(A_i, B_i, C_i)` with public inputs `pubs_i` (derived
+//! in-guest, see `publics.rs`) and a verification key `vk`, the batch check
+//! reduces to a single multi-pairing equation:
 //!
 //! ```text
 //! e(-(Σrᵢ)·α, β) · e(-Σrᵢ·Lᵢ, γ) · e(-Σrᵢ·Cᵢ, δ) · Π e(rᵢ·Aᵢ, Bᵢ) = GT_ONE
@@ -11,24 +12,30 @@
 //!
 //! where `Lᵢ = γ_abc[0] + Σⱼ pubsᵢⱼ·γ_abc[j+1]` and the `rᵢ` are independent
 //! 128-bit Fiat-Shamir coefficients derived in-guest from SHA-256 of the full
-//! proof transcript (`r₀ = 1`).
+//! proof transcript (`r₀ = 1`), which covers every proof and all 71 of its
+//! public inputs.
 //!
 //! # Cost model
 //!
-//! Two structural optimisations keep the in-guest MSM cheap without touching
-//! soundness:
-//!
 //! - The γ-side term is aggregated across proofs instead of building each `Lᵢ`:
-//!   `Σᵢ rᵢ·Lᵢ = (Σᵢrᵢ)·γ_abc[0] + Σⱼ (Σᵢ rᵢ·pubsᵢⱼ)·γ_abc[j+1]`.
-//!   The inner sums are Fr muladds (one arith256_mod row each), leaving only
-//!   `n_public + 1` scalar muls for the whole batch instead of
-//!   `n·(n_public + 1)`. This is pure algebra — the resulting point is
-//!   identical.
+//!   `Σᵢ rᵢ·Lᵢ = (Σᵢrᵢ)·γ_abc[0] + Σⱼ (Σᵢ rᵢ·pubsᵢⱼ)·γ_abc[j+1]`. The inner
+//!   sums are Fr muladds (one arith256_mod row each).
+//! - Inputs that are the same for every proof (process id, ballot mode, the
+//!   encryption key, and the identity coordinates of padded fields) are folded
+//!   once per batch into
+//!   `IC₀' = γ_abc[0] + Σ_{j=2..5} cⱼ·γ_abc[j+1] + Σ_{f ≥ num_fields} (γ_abc[9+4f] + γ_abc[11+4f])`
+//!   (the identity is `(0, 1)`: x terms vanish, y terms are 1), so
+//!   `Σᵢ rᵢ·Lᵢ = (Σᵢrᵢ)·IC₀' + Σ_{j varying} (Σᵢ rᵢ·pubsᵢⱼ)·γ_abc[j+1]` over
+//!   the address, vote id, weight and the `4·num_fields` live coordinates: a
+//!   batch pays `8 + 4·num_fields` scalar muls on the γ side. Pure algebra:
+//!   the point is identical.
 //! - The coefficients are independent 128-bit values rather than 254-bit powers
 //!   `r_shiftⁱ`. `scalar_mul_bn254` starts its double-and-add at the scalar's
 //!   MSB, so the per-proof `rᵢ·Aᵢ` and `rᵢ·Cᵢ` muls cost half. The
 //!   small-exponents batch test (Bellare–Garay–Rabin) gives soundness error
 //!   2⁻¹²⁸ per Fiat-Shamir attempt — beyond BN254's own ~100-bit security.
+//! - The transcript is hashed as it is produced (`Sha256Words`), never
+//!   buffered (2.5 KB per proof).
 //!
 //! # Why the MSM is done in-guest
 //!
@@ -43,13 +50,20 @@
 
 use crate::bn254::{g1_identity, g1_is_valid, g2_is_valid, gt_eq, gt_one};
 use crate::bn254_fr;
-use crate::hash::sha256_once;
+use crate::hash::{sha256_once, Sha256Words};
 use crate::io::ParsedInput;
+use crate::publics::{Publics, PUB_ADDRESS, PUB_CONSTANTS, PUB_FIELDS, PUB_VOTE_ID, PUB_WEIGHT};
 use crate::types::*;
 use ziskos::zisklib::{
     add_bn254, is_on_curve_twist_bn254, neg_bn254, pairing_batch_bn254,
     scalar_mul_bn254,
 };
+
+/// Transcript domain tag, `b"groth16-batch-v3"` as two LE words.
+const TRANSCRIPT_TAG: [u64; 2] = [
+    u64::from_le_bytes(*b"groth16-"),
+    u64::from_le_bytes(*b"batch-v3"),
+];
 
 /// The i-th batch coefficient: `r₀ = 1`, `rᵢ = lo128(SHA256(digest ‖ i))`.
 ///
@@ -72,16 +86,40 @@ fn batch_coeff(digest: &[u8; 32], i: usize) -> FrRaw {
     [lo, hi, 0, 0]
 }
 
-/// Verify a Groth16 batch.  Returns `true` if the batch passes.
+/// `a + b` with 𝒪 handled: `add_bn254` needs non-𝒪 inputs (it handles `a = ±b`).
+fn g1_add(a: &G1, b: &G1) -> G1 {
+    if *a == g1_identity() {
+        *b
+    } else if *b == g1_identity() {
+        *a
+    } else {
+        add_bn254(a, b)
+    }
+}
+
+/// `acc += k·p` for a non-𝒪 `p`; `0·p = 𝒪` is skipped.
+fn g1_add_mul(acc: &mut G1, p: &G1, k: &FrRaw) {
+    if *k != ZERO_FR {
+        *acc = g1_add(acc, &scalar_mul_bn254(p, k));
+    }
+}
+
+/// Verify a Groth16 batch against the derived public inputs. Returns `true`
+/// if the batch passes. `publics` is `None` when the derivation failed
+/// (`FAIL_BINDING` is already set).
 ///
 /// # Fail-mask bits
-/// - `FAIL_CURVE` (bit 1): a curve/subgroup check failed on a VK or proof point
+/// - `FAIL_CURVE` (bit 1): a curve/subgroup check failed on a VK or proof
+///   point, or the VK has `delta == gamma` (no phase-2 contribution)
 /// - `FAIL_PAIRING` (bit 2): the batch pairing equation did not hold
-pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
+pub fn verify_batch(parsed: &ParsedInput, publics: Option<&Publics>, fail_mask: &mut u32) -> bool {
     // Skip expensive work if we already know the input is malformed.
     if *fail_mask & FAIL_PARSE != 0 {
         return false;
     }
+    let Some(publics) = publics else {
+        return false;
+    };
 
     // --- Validate curve points ---
     // VK G1 points, gamma_abc and the proof A/C points must be strictly
@@ -105,47 +143,42 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
         points_ok &= is_on_curve_twist_bn254(&parsed.proofs[i].b);
         points_ok &= g1_is_valid(&parsed.proofs[i].c);
     }
-    if !points_ok {
+    // A VK whose delta equals gamma has no phase-2 contribution: anyone who
+    // knows the phase-1 transcript can forge proofs under it.
+    if !points_ok || parsed.vk_delta_g2 == parsed.vk_gamma_g2 {
         *fail_mask |= FAIL_CURVE;
         return false;
     }
+    // io.rs flags FAIL_PARSE unless gamma_abc has N_PUBLIC + 1 points.
+    let ic = &parsed.vk_gamma_abc;
 
     // --- Fiat-Shamir transcript → per-proof coefficients ---
     //
-    // Pre-hash the full transcript to 32 bytes; each coefficient is then one
-    // 40-byte SHA-256 of (digest ‖ index).
+    // "groth16-batch-v3" ‖ (A ‖ B ‖ C ‖ pubs[71]) per proof, as LE words.
+    // Each coefficient is then one 40-byte SHA-256 of (digest ‖ index).
     let nproofs = parsed.nproofs;
-    let n_public = parsed.n_public;
-    let cap = 16 + nproofs * (64 + 128 + 64 + n_public * 32);
-    let mut transcript = Vec::<u8>::with_capacity(cap);
-    transcript.extend_from_slice(b"groth16-batch-v2");
+    let mut transcript = Sha256Words::new();
+    transcript.push_all(&TRANSCRIPT_TAG);
     for i in 0..nproofs {
-        for w in parsed.proofs[i].a.iter() {
-            transcript.extend_from_slice(&w.to_le_bytes());
-        }
-        for w in parsed.proofs[i].b.iter() {
-            transcript.extend_from_slice(&w.to_le_bytes());
-        }
-        for w in parsed.proofs[i].c.iter() {
-            transcript.extend_from_slice(&w.to_le_bytes());
-        }
-        for j in 0..n_public {
-            for w in parsed.proofs[i].public_inputs[j].iter() {
-                transcript.extend_from_slice(&w.to_le_bytes());
-            }
+        let proof = &parsed.proofs[i];
+        transcript.push_all(&proof.a);
+        transcript.push_all(&proof.b);
+        transcript.push_all(&proof.c);
+        for x in publics.proof(i).iter() {
+            transcript.push_all(x);
         }
     }
-    let digest = sha256_once(&transcript);
-    drop(transcript); // free ~36 KB before allocating pairing inputs
+    let digest = transcript.finish();
 
     // --- In-guest random linear combination ---
     //
     // Every scaled point is computed here in the guest; nothing proof-related
-    // is taken on trust from the host. The γ-side pub scalars are accumulated
-    // in Fr and applied to γ_abc once, after the loop (see module docs).
+    // is taken on trust from the host. Only the inputs that vary per proof
+    // get an Fr accumulator; the batch constants ride on IC₀'.
+    let live_end = PUB_FIELDS + 4 * publics.num_fields;
     let mut r_sum = ZERO_FR;
     let mut acc_c = g1_identity(); // Σ rᵢ·Cᵢ
-    let mut pub_coeffs = vec![ZERO_FR; n_public]; // Σᵢ rᵢ·pubsᵢⱼ per j
+    let mut coeffs = [ZERO_FR; N_PUBLIC]; // Σᵢ rᵢ·pubsᵢⱼ for the varying j
     let mut eq_g1 = Vec::<G1>::with_capacity(3 + nproofs);
     let mut eq_g2 = Vec::<G2>::with_capacity(3 + nproofs);
 
@@ -160,34 +193,34 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
         // acc_c += rᵢ·Cᵢ  (0 < rᵢ < r and Cᵢ ≠ 𝒪 on the cofactor-1 G1, so
         // terms are never 𝒪; a 2⁻²⁵⁴ Fiat-Shamir cancellation is handled by
         // the identity branch)
-        let rc = scalar_mul_bn254(&proof.c, &r_i);
-        acc_c = if acc_c == g1_identity() {
-            rc
-        } else {
-            add_bn254(&acc_c, &rc)
-        };
+        acc_c = g1_add(&acc_c, &scalar_mul_bn254(&proof.c, &r_i));
 
-        // muladd reduces mod r, so raw (non-canonical) pubs contribute their
-        // residue — same semantics scalar_mul_bn254 would give them.
-        for (j, coeff) in pub_coeffs.iter_mut().enumerate() {
-            *coeff = bn254_fr::muladd(&proof.public_inputs[j], &r_i, coeff);
+        let pubs = publics.proof(i);
+        for j in [PUB_ADDRESS, PUB_VOTE_ID, PUB_WEIGHT].into_iter().chain(PUB_FIELDS..live_end) {
+            coeffs[j] = bn254_fr::muladd(&pubs[j], &r_i, &coeffs[j]);
         }
         r_sum = bn254_fr::add(&r_sum, &r_i);
     }
 
-    // Σᵢ rᵢ·Lᵢ = (Σᵢrᵢ)·γ_abc[0] + Σⱼ pub_coeffs[j]·γ_abc[j+1].
-    // r_sum ∈ [1, n·2¹²⁸] is never 0 mod r, so the first term is non-𝒪.
-    let mut g_ic_acc = scalar_mul_bn254(&parsed.vk_gamma_abc[0], &r_sum);
-    for j in 0..n_public {
-        if pub_coeffs[j] == ZERO_FR {
-            continue; // 0·P = 𝒪; add_bn254 needs non-𝒪
-        }
-        let t = scalar_mul_bn254(&parsed.vk_gamma_abc[j + 1], &pub_coeffs[j]);
-        g_ic_acc = if g_ic_acc == g1_identity() {
-            t
-        } else {
-            add_bn254(&g_ic_acc, &t)
-        };
+    // IC₀' = γ_abc[0] + Σ_{j=2..5} cⱼ·γ_abc[j+1] + Σ_{f ≥ nf} (γ_abc[9+4f] + γ_abc[11+4f]).
+    let mut ic0 = ic[0];
+    for (k, c) in publics.constants.iter().enumerate() {
+        g1_add_mul(&mut ic0, &ic[PUB_CONSTANTS + k + 1], c);
+    }
+    for f in publics.num_fields..NUM_FIELDS {
+        let c1y = PUB_FIELDS + 4 * f + 1;
+        ic0 = g1_add(&ic0, &ic[c1y + 1]);
+        ic0 = g1_add(&ic0, &ic[c1y + 3]);
+    }
+
+    // Σᵢ rᵢ·Lᵢ = (Σᵢrᵢ)·IC₀' + Σ_{j varying} coeffs[j]·γ_abc[j+1].
+    // r_sum ∈ [1, n·2¹²⁸] is never 0 mod r.
+    let mut g_ic_acc = g1_identity();
+    if ic0 != g1_identity() {
+        g_ic_acc = scalar_mul_bn254(&ic0, &r_sum);
+    }
+    for j in [PUB_ADDRESS, PUB_VOTE_ID, PUB_WEIGHT].into_iter().chain(PUB_FIELDS..live_end) {
+        g1_add_mul(&mut g_ic_acc, &ic[j + 1], &coeffs[j]);
     }
 
     // VK-side aggregates, negated: e(-(Σrᵢ)α, β) · e(-ΣrᵢLᵢ, γ) · e(-ΣrᵢCᵢ, δ).

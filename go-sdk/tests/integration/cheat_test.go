@@ -10,7 +10,7 @@
 //
 // Prerequisites:
 //   - ziskemu in PATH
-//   - gen-input binary in PATH or at target/release/gen-input
+//   - gen-input, found via GEN_INPUT_BIN, then target/release, then PATH
 //   - CIRCUIT_ELF_PATH or the default circuit.elf location
 package integration
 
@@ -18,7 +18,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"math/big"
 	"os"
@@ -27,6 +26,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	arbo "github.com/vocdoni/arbo"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/circuits/ballotproof"
@@ -138,22 +138,14 @@ func buildCheatInputElection(t *testing.T, election *Election) (*cheatElectionIn
 		t.Fatalf("write vk: %v", err)
 	}
 
-	// Write proof_N.json, public_N.json, sig_N.json (1-indexed).
+	// Write proof_N.json and sig_N.json (1-indexed); the guest derives the
+	// public inputs.
 	for i, res := range batch.Results {
 		idx := i + 1
 
 		proofPath := filepath.Join(tmpDir, fmt.Sprintf("proof_%d.json", idx))
 		if err := os.WriteFile(proofPath, res.ProofJSON, 0600); err != nil {
 			t.Fatalf("write proof_%d: %v", idx, err)
-		}
-
-		pubBytes, err := json.Marshal(res.PublicInputs)
-		if err != nil {
-			t.Fatalf("marshal public_%d: %v", idx, err)
-		}
-		pubPath := filepath.Join(tmpDir, fmt.Sprintf("public_%d.json", idx))
-		if err := os.WriteFile(pubPath, pubBytes, 0600); err != nil {
-			t.Fatalf("write public_%d: %v", idx, err)
 		}
 
 		sigPath := filepath.Join(tmpDir, fmt.Sprintf("sig_%d.json", idx))
@@ -282,11 +274,8 @@ func findGenInputBin(t *testing.T) string {
 	if p := os.Getenv("GEN_INPUT_BIN"); p != "" {
 		return p
 	}
-	// Then PATH, then the workspace build.
-	if p, err := exec.LookPath("gen-input"); err == nil {
-		return p
-	}
-	// Derive from ELF path or cwd.
+	// Then the workspace build, then PATH: a stale copy on PATH must never
+	// shadow the tree's own build.
 	candidates := []string{
 		"../../../../target/release/gen-input",
 		"../../../target/release/gen-input",
@@ -295,6 +284,9 @@ func findGenInputBin(t *testing.T) string {
 		if _, err := os.Stat(c); err == nil {
 			return c
 		}
+	}
+	if p, err := exec.LookPath("gen-input"); err == nil {
+		return p
 	}
 	t.Skip("gen-input not found — build with 'cargo build --release -p davinci-zkvm-input-gen'")
 	return ""
@@ -366,11 +358,11 @@ func TestCheatSanity(t *testing.T) {
 // TestCheatWrongKZGCommitment observes that flipping a byte in a host
 // commitment changes the guest-emitted blobs digest. The guest cannot detect
 // a mismatched commitment (the on-chain point-evaluation precompile does that
-// via z = H(pid || root || commitment); a different commitment shifts z, and
-// y = P_cells(z) shifts with it), so overall_ok stays 1 — but the digest that
-// binds (commitment, y) pairs must diverge from the honest baseline. If it
-// does not, the digest is not covering the commitment and the on-chain check
-// is spoofable.
+// via z = H(tag || pid || root || D || n || b || commitment); a different
+// commitment shifts z, and y = P_cells(z) shifts with it), so overall_ok
+// stays 1 — but the digest that binds (commitment, y) pairs must diverge
+// from the honest baseline. If it does not, the digest is not covering the
+// commitment and the on-chain check is spoofable.
 func TestCheatWrongKZGCommitment(t *testing.T) {
 	base, election, _ := buildCheatInput(t)
 	honest, err := runZiskEmu(base.fullInput())
@@ -429,6 +421,103 @@ func TestCheatWrongKZGCommitment(t *testing.T) {
 	}
 	if same {
 		t.Errorf("blobs digest unchanged after flipping a commitment byte — digest does not bind the commitment")
+	}
+}
+
+// TestCheatTamperedBlobCommitment: the sequencer commits to a wrong blob 0
+// (one cell changed) and hands the guest that commitment C'. The guest cannot
+// see blob bytes, so it accepts, but it evaluates its own cells at a point
+// derived from its own D and C', and publishes (C', P(z')). The wrong blob
+// does not open to P(z') at z', so the settlement's point-evaluation check
+// (kzg4844.VerifyProof here) refuses the batch. D is fixed before z', so the
+// sequencer cannot fit the content to a point it already knows.
+func TestCheatTamperedBlobCommitment(t *testing.T) {
+	base, election, _ := buildCheatInput(t)
+	honest, err := runZiskEmu(base.fullInput())
+	if err != nil {
+		t.Fatalf("honest ziskemu: %v", err)
+	}
+	if honest[davinci.OutputOverallOk] != 1 {
+		t.Fatalf("honest input rejected: fail_mask=0x%08x", honest[davinci.OutputFailMask])
+	}
+	_, tb, err := election.BuildKZGBlock(base.oldRoot)
+	if err != nil {
+		t.Fatalf("BuildKZGBlock: %v", err)
+	}
+	regs32 := func(out []uint32, base int) (b [32]byte) {
+		for i := 0; i < 8; i++ {
+			binary.LittleEndian.PutUint32(b[4*i:], out[base+i])
+		}
+		return
+	}
+	if d := regs32(honest, davinci.OutputCellsDigest); d != tb.CellsDigest {
+		t.Fatalf("guest D %x, CellsDigest %x", d, tb.CellsDigest)
+	}
+
+	// Wrong blob 0: the last cell of the stream changed, still a field element.
+	bad := tb.Blobs[0]
+	last := len(tb.Cells) - 1
+	if last >= 4096 {
+		t.Fatalf("test assumes the last cell sits in blob 0, T = %d", len(tb.Cells))
+	}
+	bad[last*32+31] ^= 0x01
+	badCom, err := kzg4844.BlobToCommitment(&bad)
+	if err != nil {
+		t.Fatalf("BlobToCommitment: %v", err)
+	}
+	coms := make([][48]byte, len(tb.Commitments))
+	for i, c := range tb.Commitments {
+		coms[i] = [48]byte(c)
+	}
+	coms[0] = [48]byte(badCom)
+	pidBE, _ := hex.DecodeString(trimHex(election.ProcessIDHex()))
+	rootBE, _ := hex.DecodeString(trimHex(arboHexToBEHex(base.oldRoot)))
+	badKZG, err := davinci.EncodeKZGBlock(&davinci.KZGEvalData{ProcessID: pidBE, RootHashBefore: rootBE, Commitments: coms})
+	if err != nil {
+		t.Fatalf("EncodeKZGBlock: %v", err)
+	}
+	in := *base
+	in.kzgBlock = badKZG
+	got, err := runZiskEmu(in.fullInput())
+	if err != nil {
+		t.Fatalf("tampered ziskemu: %v", err)
+	}
+	if got[davinci.OutputOverallOk] != 1 || got[davinci.OutputFailMask] != 0 {
+		t.Fatalf("guest has no blob bytes and must still accept: ok=%d mask=0x%08x",
+			got[davinci.OutputOverallOk], got[davinci.OutputFailMask])
+	}
+	if regs32(got, davinci.OutputCellsDigest) != tb.CellsDigest {
+		t.Fatal("D moved with a commitment; it must depend on the cells only")
+	}
+
+	// The point the contract derives, and what the guest evaluated there.
+	z := kzg4844.Point(davinci.EvaluationPoint([32]byte(pidBE), [32]byte(rootBE), tb.CellsDigest, len(coms), 0, coms[0]))
+	_, yGuest, err := kzg4844.ComputeProof(&tb.Blobs[0], z)
+	if err != nil {
+		t.Fatalf("ComputeProof honest: %v", err)
+	}
+	var pairs []byte
+	pairs = append(pairs, coms[0][:]...)
+	pairs = append(pairs, yGuest[:]...)
+	for i := 1; i < len(coms); i++ {
+		pairs = append(pairs, coms[i][:]...)
+		pairs = append(pairs, tb.Ys[i][:]...)
+	}
+	if regs32(got, davinci.OutputBlobsDigest) != sha256.Sum256(pairs) {
+		t.Fatal("guest did not evaluate its cells at EvaluationPoint(D, C')")
+	}
+
+	// The wrong blob opens to another value at z, so no proof for C' meets
+	// the published y: settlement reverts.
+	badProof, yBad, err := kzg4844.ComputeProof(&bad, z)
+	if err != nil {
+		t.Fatalf("ComputeProof tampered: %v", err)
+	}
+	if yBad == yGuest {
+		t.Fatal("tampered blob evaluates to the guest's y at the bound point")
+	}
+	if err := kzg4844.VerifyProof(badCom, z, yGuest, badProof); err == nil {
+		t.Fatal("tampered blob opened to the published y")
 	}
 }
 
@@ -495,6 +584,12 @@ func TestCheatKZGBlobCount(t *testing.T) {
 			}
 			if digest != tb.Digest {
 				t.Fatalf("guest blobs digest %x, BuildTransitionBlobs %x", digest, tb.Digest)
+			}
+			for i := 0; i < 8; i++ {
+				binary.LittleEndian.PutUint32(digest[4*i:], outputs[davinci.OutputCellsDigest+i])
+			}
+			if digest != tb.CellsDigest {
+				t.Fatalf("guest cells digest %x, BuildTransitionBlobs %x", digest, tb.CellsDigest)
 			}
 			honest := int(binary.LittleEndian.Uint64(base.kzgBlock[72:80]))
 			for _, n := range []int{honest - 1, honest + 1} {
@@ -618,16 +713,17 @@ func TestCheatSlotPathDerived(t *testing.T) {
 }
 
 // shareAddress makes voter b a second census member for voter a's address:
-// same signer and weight, leaf PackAddressWeight(addr, w) + 2^248. The guest
-// reads the address as bits 88..247 and the weight as bits 0..87, so both
-// leaves bind the same voter and slot, yet they are distinct tree leaves.
-// That is the crafted census of spec 4.1.7.
+// same signer, weight w + 1, so the leaves PackAddressWeight(addr, w) and
+// PackAddressWeight(addr, w + 1) are distinct tree leaves that bind the same
+// voter and slot. That is the crafted census of spec 4.1.7 (the census
+// contract refuses it; the guest must too).
 func shareAddress(t *testing.T, e *Election, a, b int) {
 	t.Helper()
 	va, vb := e.Voters[a], e.Voters[b]
-	vb.Signer, vb.AddressBytes, vb.AddressBigInt, vb.Weight = va.Signer, va.AddressBytes, va.AddressBigInt, va.Weight
-	e.censusLeaves[b] = new(big.Int).Add(packAddressWeight(vb.AddressBigInt, vb.Weight), new(big.Int).Lsh(big.NewInt(1), 248))
-	imt, err := leanimt.New(poseidonHasher, bigIntEq, nil, nil, nil)
+	vb.Signer, vb.AddressBytes, vb.AddressBigInt = va.Signer, va.AddressBytes, va.AddressBigInt
+	vb.Weight = new(big.Int).Add(va.Weight, big.NewInt(1))
+	e.censusLeaves[b] = packAddressWeight(vb.AddressBigInt, vb.Weight)
+	imt, err := leanimt.New(davinci.KeccakHasher, bigIntEq, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("leanimt.New: %v", err)
 	}
@@ -663,8 +759,8 @@ func TestCheatDuplicateSlot(t *testing.T) {
 // TestCheatReencKeyNonCanonical commits the encryption key as (x + p, y), the
 // same point in a second encoding. The registry rejects that key at genesis,
 // but the guest must still not abort on it: the subgroup check and the
-// fixed-base table both use the reduced key, and Poseidon reduces it in the
-// ballot inputs hash, so the batch proves the same statement as with (x, y).
+// fixed-base table both use the reduced key, and the pairing reduces it as
+// public input 4, so the batch proves the same statement as with (x, y).
 // A guest that feeds the raw key to the precompile exits instead.
 func TestCheatReencKeyNonCanonical(t *testing.T) {
 	election, err := NewElection(2)
@@ -920,9 +1016,14 @@ func TestCheatInflatedResults(t *testing.T) {
 	assertCircuitFails(t, tampered, failResultAccum|failSMTResults, "inflated_results")
 }
 
+// proofRecordLen is one proof of the Proofs section: A(64) ‖ B(128) ‖ C(64).
+// The guest derives the public inputs; the input carries none.
+const proofRecordLen = 64 + 128 + 64
+
 // proofsSectionOffset parses the gen-input header/VK to locate the proofs
 // section of baseBin. Layout: header(32B) | alpha(64) beta(128) gamma(128)
 // delta(128) | gamma_abc_len(8) | gamma_abc(len*64) | nproofs_check(8).
+// nPublic is the header's count (71).
 func proofsSectionOffset(t *testing.T, baseBin []byte) (off, nproofs, nPublic int) {
 	t.Helper()
 	u64at := func(w int) uint64 { return binary.LittleEndian.Uint64(baseBin[w*8:]) }
@@ -936,38 +1037,158 @@ func proofsSectionOffset(t *testing.T, baseBin []byte) (off, nproofs, nPublic in
 	return off, nproofs, nPublic
 }
 
-// TestCheatForgedPubs tampers a ballot proof's inputsHash public input and
-// verifies the batch pairing equation fails (FAIL_PAIRING). Regression guard
-// for the Groth16 hint bypass: public inputs must be bound into the pairing
-// check by the in-guest MSM, not taken on trust from host hints.
-func TestCheatForgedPubs(t *testing.T) {
+// reencOriginalOff is the offset of reencBlock entry i, original field f, in
+// the REENCBLK: magic(8) n(8) key x(32) key y(32) seed(32), then per entry 16
+// original and 16 re-encrypted ciphertexts of 4 LE words each.
+func reencOriginalOff(i, f int) int { return 112 + i*2*16*128 + f*128 }
+
+// TestCheatTamperedOriginal flips one bit of a live original ciphertext
+// coordinate of voter 0 (public input 7). The guest derives the proof's public
+// inputs from these ciphertexts, so the batch pairing must fail; the
+// re-encryption check trips as well.
+func TestCheatTamperedOriginal(t *testing.T) {
 	base, _, _ := buildCheatInput(t)
-	off, _, nPublic := proofsSectionOffset(t, base.baseBin)
-	full := base.fullInput()
-	// pubs of proof 0 start after a(64)+b(128)+c(64); flip one byte of the
-	// last public input (inputsHash) so all curve checks still pass but the
-	// pairing equation (and the inputsHash binding) break.
-	pubsOff := off + 64 + 128 + 64 + (nPublic-1)*32
-	full[pubsOff] ^= 0x01
-	assertCircuitFails(t, full, failPairing, "forged-pubs")
+	base.reencBlock = append([]byte(nil), base.reencBlock...)
+	base.reencBlock[reencOriginalOff(0, 0)] ^= 0x01 // c1.x, low bit: stays canonical
+	assertCircuitFails(t, base.fullInput(), failPairing, "tampered-original")
 }
 
-// TestCheatSwappedProofs swaps the first two proof records (a, b, c, pubs).
-// Both remain individually valid proofs, so the pairing still passes — the
-// rejection must come from the per-index bindings (ECDSA address, census /
-// consistency, inputsHash) that align proof i with voter i.
+// TestCheatSwappedFieldOrder swaps fields 0 and 1 of voter 0, in both the
+// original and the re-encrypted ballot. The values are the voter's, in the
+// wrong positions of the public-input vector.
+func TestCheatSwappedFieldOrder(t *testing.T) {
+	base, election, _ := buildCheatInput(t)
+	if election.NumFields < 2 {
+		t.Skipf("NumFields=%d has no second field", election.NumFields)
+	}
+	blk := append([]byte(nil), base.reencBlock...)
+	for _, off := range []int{reencOriginalOff(0, 0), reencOriginalOff(0, 16)} {
+		f0 := append([]byte(nil), blk[off:off+128]...)
+		copy(blk[off:off+128], blk[off+128:off+256])
+		copy(blk[off+128:off+256], f0)
+	}
+	base.reencBlock = blk
+	assertCircuitFails(t, base.fullInput(), failPairing, "swapped-field-order")
+}
+
+// TestCheatOriginalNonCanonical ships voter 0's c1.x as x + r, the same field
+// element in a second encoding. Re-encryption reduces it and the pairing sees
+// its residue, so only the canonical-encoding rule rejects it.
+func TestCheatOriginalNonCanonical(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+	blk := append([]byte(nil), base.reencBlock...)
+	off := reencOriginalOff(0, 0)
+	le := make([]byte, 32)
+	copy(le, blk[off:off+32])
+	for i, j := 0, 31; i < j; i, j = i+1, j-1 {
+		le[i], le[j] = le[j], le[i]
+	}
+	v := new(big.Int).SetBytes(le)
+	v.Add(v, bn254R)
+	if v.BitLen() > 256 {
+		t.Skip("x + r does not fit in 256 bits")
+	}
+	v.FillBytes(le)
+	for i, j := 0, 31; i < j; i, j = i+1, j-1 {
+		le[i], le[j] = le[j], le[i]
+	}
+	copy(blk[off:off+32], le)
+	base.reencBlock = blk
+	assertCircuitFailsExactly(t, base.fullInput(), failBinding, "original-plus-r")
+}
+
+// TestCheatSwappedProofs swaps the first two proof records (A, B, C). Both
+// remain valid proofs, of the other voter's public inputs, which the guest
+// derives per index: the pairing fails and nothing else does.
 func TestCheatSwappedProofs(t *testing.T) {
 	base, _, _ := buildCheatInput(t)
-	off, nproofs, nPublic := proofsSectionOffset(t, base.baseBin)
+	off, nproofs, _ := proofsSectionOffset(t, base.baseBin)
 	if nproofs < 2 {
 		t.Fatalf("need >= 2 proofs, got %d", nproofs)
 	}
-	recLen := 64 + 128 + 64 + nPublic*32
 	full := base.fullInput()
-	rec0 := append([]byte(nil), full[off:off+recLen]...)
-	copy(full[off:off+recLen], full[off+recLen:off+2*recLen])
-	copy(full[off+recLen:off+2*recLen], rec0)
-	assertCircuitFails(t, full, failECDSA|failBinding, "swapped-proofs")
+	rec0 := append([]byte(nil), full[off:off+proofRecordLen]...)
+	copy(full[off:off+proofRecordLen], full[off+proofRecordLen:off+2*proofRecordLen])
+	copy(full[off+proofRecordLen:off+2*proofRecordLen], rec0)
+	assertCircuitFailsExactly(t, full, failPairing, "swapped-proofs")
+}
+
+// TestCheatCensusSiblingFlipped flips one bit of voter 0's first census
+// sibling: the Keccak walk no longer reaches the root.
+func TestCheatCensusSiblingFlipped(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+	census := append([]byte(nil), base.censusBlock...)
+	// magic(8) n(8), proof 0: root(32) leaf(32) index(8) n_siblings(8) siblings.
+	census[16+32+32+8+8] ^= 0x01
+	assertCircuitFailsExactly(t, base.assembleWith(census), failCensus, "census-sibling-flipped")
+}
+
+// TestCheatCensusLeafIsInternalNode presents the level-1 node above voter 0
+// as a leaf, one level shorter: the walk reaches the root, and only the
+// leaf bound (check 3A.6, leaf < 2^248) tells it from a member. Address and
+// weight read from the node are garbage, so other checks fail too.
+func TestCheatCensusLeafIsInternalNode(t *testing.T) {
+	base, election, _ := buildCheatInputN(t, 4)
+	proofs, err := election.BuildCensusProofs(election.Voters)
+	if err != nil {
+		t.Fatalf("BuildCensusProofs: %v", err)
+	}
+	p := proofs[0]
+	if p.Index&1 != 0 || len(p.Siblings) < 2 {
+		t.Fatalf("voter 0 should be a left leaf with 2 siblings, got path %b, %d siblings", p.Index, len(p.Siblings))
+	}
+	leaf, _ := new(big.Int).SetString(trimHex(p.Leaf), 16)
+	sib, _ := new(big.Int).SetString(trimHex(p.Siblings[0]), 16)
+	node := davinci.KeccakHasher(leaf, sib)
+	if node.BitLen() <= 248 {
+		t.Skip("the internal node happens to be below 2^248")
+	}
+	proofs[0] = davinci.CensusProof{Root: p.Root, Leaf: bigIntToFr32(node), Index: p.Index >> 1, Siblings: p.Siblings[1:]}
+	census, err := davinci.EncodeCensusBlock(proofs)
+	if err != nil {
+		t.Fatalf("EncodeCensusBlock: %v", err)
+	}
+	assertCircuitFails(t, base.assembleWith(census), failCensus, "census-leaf-internal-node")
+}
+
+// TestCheatVKDeltaEqualsGamma copies the VK's gamma into delta: a VK
+// without a phase-2 contribution, under which anyone can forge proofs. The
+// guest refuses it outright (the VK hash no longer matches leaf 0x07 either).
+func TestCheatVKDeltaEqualsGamma(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+	full := base.fullInput()
+	// Layout: header(32B) | alpha(64) | beta(128) | gamma(128) | delta(128) | ...
+	gammaOff := 32 + 64 + 128
+	copy(full[gammaOff+128:gammaOff+256], full[gammaOff:gammaOff+128])
+	assertCircuitFails(t, full, failCurve, "vk-delta-equals-gamma")
+}
+
+// TestCheatNPublicNot71 declares the old circuit's three public inputs in
+// the header. The guest only verifies BallotProof(16) proofs (71 inputs).
+func TestCheatNPublicNot71(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+	full := base.fullInput()
+	binary.LittleEndian.PutUint64(full[24:], 3)
+	assertCircuitFails(t, full, failParse, "n-public-3")
+}
+
+// TestCheatNPublic3ShapedVK is TestCheatNPublicNot71 with a VK of the old
+// shape too: gamma_abc cut to 4 points and gamma_abc_len = 4, so the length
+// check holds and only the n_public rule (FAIL_PARSE) refuses it. Without
+// that rule the verifier would index gamma_abc past its end.
+func TestCheatNPublic3ShapedVK(t *testing.T) {
+	base, _, _ := buildCheatInput(t)
+	full := base.fullInput()
+	// header(32) | alpha(64) beta(128) gamma(128) delta(128) | gamma_abc_len(8) | gamma_abc
+	const lenOff = 32 + 448
+	icOff := lenOff + 8
+	if n := binary.LittleEndian.Uint64(full[lenOff:]); n != 72 {
+		t.Fatalf("gamma_abc_len = %d, want 72", n)
+	}
+	binary.LittleEndian.PutUint64(full[24:], 3)
+	binary.LittleEndian.PutUint64(full[lenOff:], 4)
+	cut := append(append([]byte(nil), full[:icOff+4*64]...), full[icOff+72*64:]...)
+	assertCircuitFails(t, cut, failParse, "n-public-3-vk-4-ic")
 }
 
 // TestCheatZeroedVKGamma zeroes the VK gamma G2 point (the all-zero encoding
@@ -1014,9 +1235,8 @@ func TestCheatTamperGammaAbc(t *testing.T) {
 // then yields a different (or no) address, breaking the address binding.
 func TestCheatTamperedSignature(t *testing.T) {
 	base, _, _ := buildCheatInput(t)
-	off, nproofs, nPublic := proofsSectionOffset(t, base.baseBin)
-	recLen := 64 + 128 + 64 + nPublic*32
-	sigOff := off + nproofs*recLen // ECDSA block: nproofs × (r32 ‖ s32 ‖ recid8)
+	off, nproofs, _ := proofsSectionOffset(t, base.baseBin)
+	sigOff := off + nproofs*proofRecordLen // ECDSA block: nproofs × (r32 ‖ s32 ‖ recid8)
 	full := base.fullInput()
 	full[sigOff] ^= 0x01
 	assertCircuitFails(t, full, failECDSA, "tampered-signature")
@@ -1152,13 +1372,6 @@ func buildCheatInputBatchesHook(t *testing.T, election *Election, batch1Voters, 
 		idx := i + 1
 		if err := os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("proof_%d.json", idx)), res.ProofJSON, 0600); err != nil {
 			t.Fatalf("write proof_%d: %v", idx, err)
-		}
-		pubBytes, err := json.Marshal(res.PublicInputs)
-		if err != nil {
-			t.Fatalf("marshal public_%d: %v", idx, err)
-		}
-		if err := os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("public_%d.json", idx)), pubBytes, 0600); err != nil {
-			t.Fatalf("write public_%d: %v", idx, err)
 		}
 		if err := os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("sig_%d.json", idx)), res.SigJSON, 0600); err != nil {
 			t.Fatalf("write sig_%d: %v", idx, err)

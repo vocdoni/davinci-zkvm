@@ -12,11 +12,19 @@ use chrono::Utc;
 use dashmap::DashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::process::{Output, Stdio};
 use std::sync::Arc;
-use std::time::Instant;
-use tokio::process::Command;
+use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
+use tokio::process::{Child, Command};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use uuid::Uuid;
+
+/// Error text of a cancelled job (`DELETE /jobs/:id`).
+pub const CANCELLED: &str = "cancelled";
+/// How long a cancelled prover group gets between SIGTERM and SIGKILL.
+const KILL_GRACE: Duration = Duration::from_secs(5);
 
 /// Handle held by the HTTP layer; submits new jobs and exposes their status.
 pub struct ProverHandle {
@@ -34,6 +42,8 @@ struct ProveTask {
     /// Ballot proofs in the batch (0 for fold/finalize jobs); decides
     /// whether the first attempt already runs with --minimal-memory.
     proof_count: usize,
+    /// The job's cancel token (shared with its `Job`).
+    cancel: CancellationToken,
 }
 
 impl ProverHandle {
@@ -82,14 +92,23 @@ impl ProverHandle {
         proof_count: usize,
     ) -> anyhow::Result<Uuid> {
         let job_id = Uuid::new_v4();
-        self.jobs
-            .insert(job_id, Job::new(job_id, kind, parent_job_ids));
+        let job = Job::new(job_id, kind, parent_job_ids);
+        let cancel = job.cancel.clone();
+        self.jobs.insert(job_id, job);
 
         // A rejected job must not stay Queued in the map (it inflates
         // queue_len forever) nor leave its witness on disk.
         let job_dir = proof_output_dir.join(job_id.to_string());
         let res = self
-            .enqueue(input_bytes, &job_dir, kind, elf_path, job_id, proof_count)
+            .enqueue(
+                input_bytes,
+                &job_dir,
+                kind,
+                elf_path,
+                job_id,
+                proof_count,
+                cancel,
+            )
             .await;
         if res.is_err() {
             self.jobs.remove(&job_id);
@@ -102,6 +121,7 @@ impl ProverHandle {
         res.map(|()| job_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn enqueue(
         &self,
         input_bytes: Vec<u8>,
@@ -110,6 +130,7 @@ impl ProverHandle {
         elf_path: PathBuf,
         job_id: Uuid,
         proof_count: usize,
+        cancel: CancellationToken,
     ) -> anyhow::Result<()> {
         tokio::fs::create_dir_all(job_dir).await?;
 
@@ -132,10 +153,41 @@ impl ProverHandle {
             elf_path,
             plonk: kind.is_plonk(),
             proof_count,
+            cancel,
         };
         self.sender
             .try_send(task)
             .map_err(|e| anyhow::anyhow!("queue is full or closed: {}", e))
+    }
+
+    /// Cancels a job: a queued one fails now and never starts, a running one
+    /// once its prover process group is dead. A finished job is left as is.
+    /// Returns the job after the change, `None` for an unknown id.
+    pub async fn cancel(&self, id: Uuid, proof_output_dir: &Path) -> Option<Job> {
+        let (job, queued) = {
+            let mut job = self.jobs.get_mut(&id)?;
+            let queued = job.status == JobStatus::Queued;
+            match job.status {
+                JobStatus::Queued => {
+                    // Under the map lock: the worker checks the token under it
+                    // too, so the job either starts or is skipped, never both.
+                    job.cancel.cancel();
+                    job.status = JobStatus::Failed;
+                    job.error = Some(CANCELLED.to_string());
+                    job.finished_at = Some(Utc::now());
+                }
+                JobStatus::Running => job.cancel.cancel(),
+                JobStatus::Done | JobStatus::Failed => {}
+            }
+            (job.clone(), queued)
+        };
+        if queued {
+            info!("Job {} cancelled while queued", id);
+            remove_job_dir(&proof_output_dir.join(id.to_string()), id).await;
+        } else if job.status == JobStatus::Running {
+            info!("Job {} cancel requested while running", id);
+        }
+        Some(job)
     }
 
     /// Number of jobs currently waiting for the worker (not yet started).
@@ -171,13 +223,26 @@ async fn worker_loop<F, Fut>(
     info!("Prover worker started");
     while let Some(task) = receiver.recv().await {
         let job_id = task.job_id;
-        info!("Starting proof for job {}", job_id);
+        let cancel = task.cancel.clone();
+        let job_dir = config.proof_output_dir.join(job_id.to_string());
 
-        // Mark job as running
-        if let Some(mut job) = jobs.get_mut(&job_id) {
-            job.status = JobStatus::Running;
-            job.started_at = Some(Utc::now());
+        // Mark job as running, unless it was cancelled while queued (checked
+        // under the map lock `ProverHandle::cancel` fires it under).
+        let skip = match jobs.get_mut(&job_id) {
+            Some(mut job) if !cancel.is_cancelled() => {
+                job.status = JobStatus::Running;
+                job.started_at = Some(Utc::now());
+                false
+            }
+            Some(_) => true,
+            None => cancel.is_cancelled(),
+        };
+        if skip {
+            info!("Skipping cancelled job {}", job_id);
+            remove_job_dir(&job_dir, job_id).await;
+            continue;
         }
+        info!("Starting proof for job {}", job_id);
 
         // Each job runs in its own task so a panic fails that job only
         // instead of taking the worker, and with it the queue, down.
@@ -190,14 +255,15 @@ async fn worker_loop<F, Fut>(
             )),
         };
         let elapsed_ms = start.elapsed().as_millis() as u64;
+        let cancelled = cancel.is_cancelled();
 
         // The input is the private witness (seed, overwrite and refresh sets);
-        // once the proof exists it must not linger on disk.
-        if !config.keep_inputs {
-            let input_path = config
-                .proof_output_dir
-                .join(job_id.to_string())
-                .join("input.bin");
+        // once the proof exists it must not linger on disk. A cancelled job
+        // leaves nothing behind.
+        if cancelled {
+            remove_job_dir(&job_dir, job_id).await;
+        } else if !config.keep_inputs {
+            let input_path = job_dir.join("input.bin");
             if let Err(e) = tokio::fs::remove_file(&input_path).await {
                 if e.kind() != std::io::ErrorKind::NotFound {
                     error!("Job {}: could not delete input.bin: {}", job_id, e);
@@ -209,6 +275,11 @@ async fn worker_loop<F, Fut>(
             job.finished_at = Some(Utc::now());
             job.elapsed_ms = Some(elapsed_ms);
             match result {
+                _ if cancelled => {
+                    job.status = JobStatus::Failed;
+                    job.error = Some(CANCELLED.to_string());
+                    info!("Job {} cancelled after {}ms", job_id, elapsed_ms);
+                }
                 Ok(()) => {
                     job.status = JobStatus::Done;
                     info!("Job {} completed in {}ms", job_id, elapsed_ms);
@@ -222,6 +293,14 @@ async fn worker_loop<F, Fut>(
         }
     }
     info!("Prover worker stopped");
+}
+
+async fn remove_job_dir(dir: &Path, job_id: Uuid) {
+    if let Err(e) = tokio::fs::remove_dir_all(dir).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            error!("Job {}: could not remove job dir: {}", job_id, e);
+        }
+    }
 }
 
 fn join_error_message(e: tokio::task::JoinError) -> String {
@@ -318,6 +397,9 @@ fn exit_signal(msg: &str, num: &str) -> bool {
 async fn run_prove_with_retry(config: &Config, task: &ProveTask) -> anyhow::Result<()> {
     let mut last_err = anyhow::anyhow!("prove never attempted");
     for attempt in 1..=MAX_PROVE_RETRIES + 1 {
+        if task.cancel.is_cancelled() {
+            anyhow::bail!(CANCELLED);
+        }
         // Retries escalate to --minimal-memory: it lowers peak memory and
         // proves the same statement, so it cannot weaken a result. The first
         // attempt stays fast unless the operator forces it. Large batches go
@@ -329,13 +411,18 @@ async fn run_prove_with_retry(config: &Config, task: &ProveTask) -> anyhow::Resu
             || task.proof_count >= config.zisk_minimal_memory_from;
         match run_prove(config, task, minimal_memory).await {
             Ok(()) => return Ok(()),
+            // A killed group can exit with `signal: 9`: never retry a cancel.
+            Err(e) if task.cancel.is_cancelled() => return Err(e),
             Err(e) if attempt <= MAX_PROVE_RETRIES && is_transient_prover_error(&e.to_string()) => {
                 warn!(
                     "Job {} hit a transient prover error (attempt {}/{}); retrying in {}s with --minimal-memory",
                     task.job_id, attempt, MAX_PROVE_RETRIES, PROVE_RETRY_DELAY_SECS
                 );
                 last_err = e;
-                tokio::time::sleep(tokio::time::Duration::from_secs(PROVE_RETRY_DELAY_SECS)).await;
+                tokio::select! {
+                    _ = task.cancel.cancelled() => anyhow::bail!(CANCELLED),
+                    _ = tokio::time::sleep(Duration::from_secs(PROVE_RETRY_DELAY_SECS)) => {}
+                }
             }
             Err(e) => return Err(e),
         }
@@ -391,15 +478,11 @@ async fn run_prove(config: &Config, task: &ProveTask, minimal_memory: bool) -> a
 
         cmd.arg(&config.cargo_zisk_bin);
         cmd.args(&zisk_args);
-        cmd.output()
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to spawn mpirun: {}", e))?
+        output_or_cancel(cmd, "mpirun", &task.cancel, KILL_GRACE).await?
     } else {
         let mut cmd = Command::new(&config.cargo_zisk_bin);
         cmd.args(&zisk_args);
-        cmd.output()
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to spawn cargo-zisk: {}", e))?
+        output_or_cancel(cmd, "cargo-zisk", &task.cancel, KILL_GRACE).await?
     };
 
     if !output.status.success() {
@@ -453,6 +536,72 @@ async fn run_prove(config: &Config, task: &ProveTask, minimal_memory: bool) -> a
     }
 
     Ok(())
+}
+
+/// `cmd.output()` that runs `cmd` in its own process group, so a cancel can
+/// kill the whole group (mpirun and its ranks), not only the direct child:
+/// SIGTERM, then SIGKILL after `grace`. Fails with [`CANCELLED`] once the
+/// group is dead, so the next job never shares the GPU with it.
+async fn output_or_cancel(
+    mut cmd: Command,
+    what: &str,
+    cancel: &CancellationToken,
+    grace: Duration,
+) -> anyhow::Result<Output> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .process_group(0);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to spawn {}: {}", what, e))?;
+    // The group id is the child's pid. Read it now: it is gone once the
+    // child is reaped, while a grandchild may still hold the group. Never
+    // pid 1: kill(-1) would signal every process we may signal.
+    let pgid = child
+        .id()
+        .and_then(|p| i32::try_from(p).ok())
+        .filter(|p| *p > 1)
+        .and_then(rustix::process::Pid::from_raw);
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let run = async { tokio::join!(child.wait(), read_pipe(stdout), read_pipe(stderr)) };
+    let (status, stdout, stderr) = tokio::select! {
+        r = run => r,
+        _ = cancel.cancelled() => {
+            kill_group(&mut child, pgid, grace).await;
+            anyhow::bail!(CANCELLED);
+        }
+    };
+    Ok(Output {
+        status: status.map_err(|e| anyhow::anyhow!("failed to wait for {}: {}", what, e))?,
+        stdout,
+        stderr,
+    })
+}
+
+async fn read_pipe(pipe: Option<impl tokio::io::AsyncRead + Unpin>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    if let Some(mut p) = pipe {
+        let _ = p.read_to_end(&mut buf).await;
+    }
+    buf
+}
+
+/// SIGTERM the child's group, SIGKILL it after `grace`, then reap the child.
+async fn kill_group(child: &mut Child, pgid: Option<rustix::process::Pid>, grace: Duration) {
+    use rustix::process::{kill_process_group, Signal};
+    let Some(pgid) = pgid else {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return;
+    };
+    let _ = kill_process_group(pgid, Signal::TERM);
+    let _ = tokio::time::timeout(grace, child.wait()).await;
+    // Ranks can outlive their launcher: SIGKILL whatever is left.
+    let _ = kill_process_group(pgid, Signal::KILL);
+    let _ = child.wait().await;
 }
 
 #[cfg(test)]
@@ -569,6 +718,224 @@ pub(crate) mod tests {
         assert!(h.jobs.is_empty());
         // No per-job dir (and no witness) survives the rejection.
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Handle whose prove holds every job until a permit is added; records the
+    // proof_count of each job it starts.
+    pub(crate) fn gated_handle(
+        config: Config,
+    ) -> (
+        ProverHandle,
+        Arc<tokio::sync::Semaphore>,
+        Arc<std::sync::Mutex<Vec<usize>>>,
+    ) {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let ran = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (g, r) = (gate.clone(), ran.clone());
+        let h = ProverHandle::spawn(config, move |_, task| {
+            let (g, r) = (g.clone(), r.clone());
+            async move {
+                r.lock().unwrap().push(task.proof_count);
+                g.acquire().await.unwrap().forget();
+                Ok(())
+            }
+        });
+        (h, gate, ran)
+    }
+
+    pub(crate) async fn wait_status(h: &ProverHandle, id: Uuid, want: JobStatus) {
+        for _ in 0..500 {
+            if h.jobs.get(&id).is_some_and(|j| j.status == want) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("job {} never reached {:?}", id, want);
+    }
+
+    // Alive and not a zombie.
+    fn alive(pid: &str) -> bool {
+        match std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())) {
+            Ok(stat) => stat
+                .rsplit_once(") ")
+                .is_some_and(|(_, rest)| !rest.starts_with('Z')),
+            Err(_) => false,
+        }
+    }
+
+    async fn wait_dead(pid: &str) {
+        for _ in 0..300 {
+            if !alive(pid) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("process {} survived the cancel", pid.trim());
+    }
+
+    async fn read_when_written(path: &Path) -> String {
+        for _ in 0..500 {
+            if let Ok(s) = std::fs::read_to_string(path) {
+                if s.ends_with('\n') {
+                    return s;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("{} never written", path.display());
+    }
+
+    #[tokio::test]
+    async fn cancelled_queued_job_never_proves() {
+        let config = test_config("cancel-queued");
+        let dir = config.proof_output_dir.clone();
+        let (h, gate, ran) = gated_handle(config);
+        let elf = PathBuf::from("unused.elf");
+        let a = h
+            .submit(vec![1], &dir, JobKind::Batch, elf.clone(), vec![], 1)
+            .await
+            .unwrap();
+        wait_status(&h, a, JobStatus::Running).await;
+        let b = h
+            .submit(vec![2], &dir, JobKind::Batch, elf.clone(), vec![], 2)
+            .await
+            .unwrap();
+        assert!(dir.join(b.to_string()).join("input.bin").exists());
+
+        let job = h.cancel(b, &dir).await.unwrap();
+        assert_eq!(job.status, JobStatus::Failed);
+        assert_eq!(job.error.as_deref(), Some(CANCELLED));
+        assert_eq!(h.queue_len(), 0);
+        // The witness goes at once, not when the worker reaches the job.
+        assert!(!dir.join(b.to_string()).exists());
+        // Repeats and unknown ids change nothing.
+        assert_eq!(h.cancel(b, &dir).await.unwrap().status, JobStatus::Failed);
+        assert!(h.cancel(Uuid::new_v4(), &dir).await.is_none());
+
+        // The worker skips b and proves c next.
+        let c = h
+            .submit(vec![3], &dir, JobKind::Batch, elf, vec![], 3)
+            .await
+            .unwrap();
+        gate.add_permits(2);
+        assert_eq!(wait_finished(&h, a).await.status, JobStatus::Done);
+        assert_eq!(wait_finished(&h, c).await.status, JobStatus::Done);
+        assert_eq!(*ran.lock().unwrap(), vec![1, 3]);
+        let jb = h.jobs.get(&b).unwrap().clone();
+        assert_eq!(jb.error.as_deref(), Some(CANCELLED));
+        assert!(jb.started_at.is_none());
+        // A finished job is left alone.
+        let ja = h.cancel(a, &dir).await.unwrap();
+        assert_eq!((ja.status, ja.error), (JobStatus::Done, None));
+        assert!(h.worker_running());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn cancelled_running_job_kills_its_process_group() {
+        let config = test_config("cancel-running");
+        let dir = config.proof_output_dir.clone();
+        // A real subprocess in its own group: the leader and a background
+        // child that outlives it unless the whole group is killed.
+        let h = ProverHandle::spawn(config, |_, task| async move {
+            let script = format!(
+                "echo $$ > {d}/leader.pid; sleep 60 & echo $! > {d}/child.pid; wait",
+                d = task.output_dir.display()
+            );
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(script);
+            output_or_cancel(cmd, "sh", &task.cancel, KILL_GRACE)
+                .await
+                .map(|_| ())
+        });
+        let id = h
+            .submit(vec![1], &dir, JobKind::Batch, PathBuf::new(), vec![], 1)
+            .await
+            .unwrap();
+        let job_dir = dir.join(id.to_string());
+        let leader = read_when_written(&job_dir.join("leader.pid")).await;
+        let child = read_when_written(&job_dir.join("child.pid")).await;
+        assert!(alive(&leader) && alive(&child));
+
+        let t0 = Instant::now();
+        assert_eq!(h.cancel(id, &dir).await.unwrap().status, JobStatus::Running);
+        let job = wait_finished(&h, id).await;
+        assert_eq!(job.status, JobStatus::Failed);
+        assert_eq!(job.error.as_deref(), Some(CANCELLED));
+        // SIGTERM sufficed: no wait for the SIGKILL grace.
+        assert!(t0.elapsed() < KILL_GRACE, "{:?}", t0.elapsed());
+        wait_dead(&leader).await;
+        wait_dead(&child).await;
+        assert!(!job_dir.exists());
+        assert!(h.worker_running());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A group that ignores SIGTERM is SIGKILLed after the grace.
+    #[tokio::test]
+    async fn term_ignoring_group_is_killed() {
+        let dir = test_config("cancel-kill").proof_output_dir;
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid = dir.join("child.pid");
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "trap '' TERM; sleep 60 & echo $! > {}; wait",
+            pid.display()
+        ));
+        let cancel = CancellationToken::new();
+        let run = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { output_or_cancel(cmd, "sh", &cancel, Duration::from_millis(300)).await }
+        });
+        let child = read_when_written(&pid).await;
+        let t0 = Instant::now();
+        cancel.cancel();
+        let err = run.await.unwrap().unwrap_err();
+        assert_eq!(err.to_string(), CANCELLED);
+        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+        wait_dead(&child).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A cancel during the retry delay ends the job: no further attempt.
+    #[tokio::test]
+    async fn cancel_stops_transient_retries() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut config = test_config("cancel-retry");
+        let dir = config.proof_output_dir.clone();
+        std::fs::create_dir_all(&dir).unwrap();
+        let attempts = dir.join("attempts");
+        let bin = dir.join("fake-zisk");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\necho x >> {}\necho 'cudaGetLastError: context is destroyed' >&2\nexit 1\n",
+                attempts.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        config.cargo_zisk_bin = bin.display().to_string();
+        let task = ProveTask {
+            job_id: Uuid::new_v4(),
+            input_path: dir.join("input.bin"),
+            output_dir: dir.clone(),
+            elf_path: PathBuf::new(),
+            plonk: false,
+            proof_count: 0,
+            cancel: CancellationToken::new(),
+        };
+        let cancel = task.cancel.clone();
+        let run = tokio::spawn(async move { run_prove_with_retry(&config, &task).await });
+        read_when_written(&attempts).await;
+        let t0 = Instant::now();
+        cancel.cancel();
+        let err = run.await.unwrap().unwrap_err();
+        assert_eq!(err.to_string(), CANCELLED);
+        // At once, not after the retry delay.
+        assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+        assert_eq!(std::fs::read_to_string(&attempts).unwrap(), "x\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

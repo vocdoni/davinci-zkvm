@@ -31,7 +31,7 @@ func TestBigIntToHex32BE(t *testing.T) {
 
 func TestParseOutputs(t *testing.T) {
 	// Construct a synthetic output register array from known values.
-	outputs := make([]uint32, 46)
+	outputs := make([]uint32, OutputRegisters)
 
 	// overall_ok = 1, fail_mask = 0
 	outputs[OutputOverallOk] = 1
@@ -53,6 +53,8 @@ func TestParseOutputs(t *testing.T) {
 	// BlobsDigest: 32 bytes = 8 × u32 LE. Word 0 = 42 gives digest[0..4] = 42 00 00 00.
 	outputs[OutputBlobsDigest] = 42
 	outputs[OutputNBlobs] = 2
+	// CellsDigest: last word 0x04030201 gives D[28..32] = 01 02 03 04.
+	outputs[OutputCellsDigest+7] = 0x04030201
 
 	// Diagnostics
 	outputs[OutputBatchOk] = 1
@@ -99,13 +101,16 @@ func TestParseOutputs(t *testing.T) {
 	if po.NBlobs != 2 {
 		t.Errorf("NBlobs = %d, want 2", po.NBlobs)
 	}
+	if want := [32]byte{28: 1, 29: 2, 30: 3, 31: 4}; po.CellsDigest != want {
+		t.Errorf("CellsDigest = %x, want %x", po.CellsDigest, want)
+	}
 	if po.NProofs != 128 {
 		t.Errorf("NProofs = %d, want 128", po.NProofs)
 	}
 }
 
 func TestParseOutputsFailure(t *testing.T) {
-	outputs := make([]uint32, 46)
+	outputs := make([]uint32, OutputRegisters)
 	outputs[OutputOverallOk] = 0
 	outputs[OutputFailMask] = FailSMTVoteID | FailSMTBallot
 
@@ -309,8 +314,6 @@ func TestProveRequestBuilder(t *testing.T) {
 		Protocol: "groth16",
 	}
 
-	pubInputs := &PublicInput{Values: []*big.Int{big.NewInt(0xDEAD), big.NewInt(0xBEEF)}}
-
 	sig := &EcdsaSignature{
 		R:       big.NewInt(1),
 		S:       big.NewInt(2),
@@ -322,7 +325,7 @@ func TestProveRequestBuilder(t *testing.T) {
 
 	req, err := NewProveRequestBuilder().
 		SetVerificationKey(vk).
-		AddProof(proof, pubInputs).
+		AddProof(proof).
 		AddEcdsaSignature(sig).
 		Build()
 	if err != nil {
@@ -331,12 +334,6 @@ func TestProveRequestBuilder(t *testing.T) {
 
 	if len(req.Proofs) != 1 {
 		t.Errorf("len(Proofs) = %d, want 1", len(req.Proofs))
-	}
-	if len(req.PublicInputs) != 1 {
-		t.Errorf("len(PublicInputs) = %d, want 1", len(req.PublicInputs))
-	}
-	if req.PublicInputs[0][0] != "57005" { // 0xDEAD = 57005
-		t.Errorf("PublicInputs[0][0] = %s, want '57005'", req.PublicInputs[0][0])
 	}
 	if len(req.Sigs) != 1 {
 		t.Errorf("len(Sigs) = %d, want 1", len(req.Sigs))
@@ -355,11 +352,10 @@ func TestProveRequestBuilder(t *testing.T) {
 func TestProveRequestBuilderValidation(t *testing.T) {
 	vk := &VerificationKey{Protocol: "groth16", Curve: "bn128"}
 	proof := &Groth16Proof{Protocol: "groth16"}
-	pubIn := &PublicInput{Values: []*big.Int{big.NewInt(1)}}
 	sig := &EcdsaSignature{R: big.NewInt(1), S: big.NewInt(2), PubKeyX: big.NewInt(3), PubKeyY: big.NewInt(4)}
 
 	// Missing VK
-	_, err := NewProveRequestBuilder().AddProof(proof, pubIn).AddEcdsaSignature(sig).Build()
+	_, err := NewProveRequestBuilder().AddProof(proof).AddEcdsaSignature(sig).Build()
 	if err == nil {
 		t.Error("expected error for missing VK")
 	}
@@ -371,7 +367,7 @@ func TestProveRequestBuilderValidation(t *testing.T) {
 	}
 
 	// Mismatched sig count
-	_, err = NewProveRequestBuilder().SetVerificationKey(vk).AddProof(proof, pubIn).Build()
+	_, err = NewProveRequestBuilder().SetVerificationKey(vk).AddProof(proof).Build()
 	if err == nil {
 		t.Error("expected error for missing signature")
 	}
@@ -382,12 +378,11 @@ func TestProveRequestBuilderJSON(t *testing.T) {
 	vkJSON := []byte(`{"protocol":"groth16","curve":"bn128","nPublic":1,"vk_alpha_1":["1","2","1"],"vk_beta_2":[["3","4"],["5","6"],["1","0"]],"vk_gamma_2":[["7","8"],["9","10"],["1","0"]],"vk_delta_2":[["11","12"],["13","14"],["1","0"]],"IC":[["15","16","1"],["17","18","1"]]}`)
 	proofJSON := []byte(`{"pi_a":["1","2","1"],"pi_b":[["3","4"],["5","6"],["1","0"]],"pi_c":["7","8","1"],"protocol":"groth16"}`)
 
-	pubIn := &PublicInput{Values: []*big.Int{big.NewInt(42)}}
 	sig := &EcdsaSignature{R: big.NewInt(1), S: big.NewInt(2), PubKeyX: big.NewInt(3), PubKeyY: big.NewInt(4)}
 
 	req, err := NewProveRequestBuilder().
 		SetVerificationKeyJSON(vkJSON).
-		AddProofJSON(proofJSON, pubIn).
+		AddProofJSON(proofJSON).
 		AddEcdsaSignature(sig).
 		Build()
 	if err != nil {

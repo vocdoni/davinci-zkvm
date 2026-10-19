@@ -1,6 +1,8 @@
 package davinci
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"math/big"
 	"strings"
 	"testing"
@@ -47,12 +49,29 @@ func TestErrBodyTruncate(t *testing.T) {
 	}
 }
 
-func vkJSONWithAlpha(x string) []byte {
-	return []byte(`{"vk_alpha_1":["` + x + `","2","1"],` +
+func vkJSON(alpha, delta string, nIC int) []byte {
+	ic := strings.TrimSuffix(strings.Repeat(`["1","2","1"],`, nIC), ",")
+	return []byte(`{"vk_alpha_1":["` + alpha + `","2","1"],` +
 		`"vk_beta_2":[["1","2"],["3","4"],["1","0"]],` +
 		`"vk_gamma_2":[["1","2"],["3","4"],["1","0"]],` +
-		`"vk_delta_2":[["1","2"],["3","4"],["1","0"]],` +
-		`"IC":[["1","2","1"],["3","4","1"]]}`)
+		`"vk_delta_2":[["` + delta + `","2"],["3","4"],["1","0"]],` +
+		`"IC":[` + ic + `]}`)
+}
+
+func vkJSONWithAlpha(x string) []byte { return vkJSON(x, "5", BallotPublicInputs+1) }
+
+func TestBallotVKLeafRefusesBadShape(t *testing.T) {
+	if _, err := BallotVKLeaf(vkJSON("1", "1", BallotPublicInputs+1)); err == nil {
+		t.Error("delta == gamma: want error")
+	}
+	if _, err := BallotVKLeaf(vkJSON("1", "01", BallotPublicInputs+1)); err == nil {
+		t.Error("delta == gamma written differently: want error")
+	}
+	for _, n := range []int{4, BallotPublicInputs, BallotPublicInputs + 2} {
+		if _, err := BallotVKLeaf(vkJSON("1", "5", n)); err == nil {
+			t.Errorf("%d IC points: want error", n)
+		}
+	}
 }
 
 func TestBallotVKLeaf(t *testing.T) {
@@ -84,10 +103,45 @@ func TestBallotVKLeafBadCoordinate(t *testing.T) {
 func TestProveRequestBuilderMaxBatchSize(t *testing.T) {
 	b := NewProveRequestBuilder().SetVerificationKeyJSON([]byte(`{}`))
 	for i := 0; i <= MaxBatchSize; i++ {
-		b.AddProofJSON([]byte(`{}`), NewPublicInput(big.NewInt(1))).
+		b.AddProofJSON([]byte(`{}`)).
 			AddEcdsaSignature(&EcdsaSignature{})
 	}
 	if _, err := b.Build(); err == nil || !strings.Contains(err.Error(), "MaxBatchSize") {
 		t.Errorf("want MaxBatchSize error, got %v", err)
+	}
+}
+
+// An identity VK point hashes as zeros, like rust-sdk put_g1, input-gen
+// g1_to_raw and the TS SDK write it.
+func TestBallotVKLeafIdentityPointIsZeros(t *testing.T) {
+	n := BallotPublicInputs + 1
+	raw := vkJSON("1", "5", n)
+	i := strings.LastIndex(string(raw), `["1","2","1"]`)
+	raw = []byte(string(raw)[:i] + `["1","2","0"]` + string(raw)[i+len(`["1","2","1"]`):])
+
+	le := func(v uint64) []byte { b := make([]byte, 32); binary.LittleEndian.PutUint64(b, v); return b }
+	var w []byte
+	for _, v := range []uint64{1, 2} { // alpha
+		w = append(w, le(v)...)
+	}
+	for _, g2 := range [][]uint64{{1, 2, 3, 4}, {1, 2, 3, 4}, {5, 2, 3, 4}} { // beta, gamma, delta
+		for _, v := range g2 {
+			w = append(w, le(v)...)
+		}
+	}
+	w = binary.LittleEndian.AppendUint64(w, uint64(n))
+	for range n - 1 {
+		w = append(w, le(1)...)
+		w = append(w, le(2)...)
+	}
+	w = append(w, make([]byte, 64)...)
+	sum := sha256.Sum256(w)
+
+	got, err := BallotVKLeaf(raw)
+	if err != nil {
+		t.Fatalf("BallotVKLeaf: %v", err)
+	}
+	if want := new(big.Int).SetBytes(sum[:]); got.Cmp(want) != 0 {
+		t.Errorf("leaf = %x, want %x (identity point as 64 zero bytes)", got, want)
 	}
 }

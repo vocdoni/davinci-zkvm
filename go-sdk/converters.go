@@ -150,28 +150,6 @@ func (vk *VerificationKey) MarshalJSON() ([]byte, error) {
 	)), nil
 }
 
-// Public Inputs
-
-// PublicInput holds the public inputs for a single Groth16 ballot proof.
-// The circuit expects Fr elements as decimal strings.
-type PublicInput struct {
-	// Values holds the public signal values in order: [address, voteID, ballotInputsHash, ...]
-	Values []*big.Int
-}
-
-// toStrings converts the public input values to decimal strings for JSON.
-func (pi *PublicInput) toStrings() []string {
-	result := make([]string, len(pi.Values))
-	for i, v := range pi.Values {
-		if v == nil {
-			result[i] = "0"
-		} else {
-			result[i] = v.Text(10)
-		}
-	}
-	return result
-}
-
 // SMT Converters
 
 // ArboTransition holds an Arbo SMT state transition in native Go types,
@@ -282,9 +260,9 @@ func ReencryptionEntryFromBigInts(original, reencrypted []*big.Int) (Reencryptio
 
 // Census Proof Converter
 
-// CensusProofFromBigInts creates a CensusProof from native Go types.
-// root and leaf are BN254 Fr elements. siblings are the non-empty
-// Merkle path siblings in the lean-IMT.
+// CensusProofFromBigInts creates a CensusProof from native Go types. root,
+// leaf and siblings are 256-bit integers (Keccak nodes, often above the BN254
+// modulus); siblings are the non-empty Merkle path siblings in the lean-IMT.
 func CensusProofFromBigInts(root, leaf *big.Int, index uint64, siblings []*big.Int) CensusProof {
 	sibs := make([]string, len(siblings))
 	for i, s := range siblings {

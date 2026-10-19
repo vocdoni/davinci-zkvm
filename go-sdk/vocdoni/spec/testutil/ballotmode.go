@@ -40,7 +40,7 @@ func FixedBallotMode() spec.BallotMode {
 	maxValueSum := uint64(BallotMaxValue) * uint64(BallotMaxValue) * uint64(nf) // MaxValue^CostExponent * numFields
 	return spec.BallotMode{
 		NumFields:    uint8(nf),
-		GroupSize:    BallotGroupSize,
+		GroupSize:    uint8(min(BallotGroupSize, nf)), // groupSize <= numFields
 		UniqueValues: BallotUniqueValues == 1,
 		MaxValue:     BallotMaxValue,
 		MinValue:     BallotMinValue,

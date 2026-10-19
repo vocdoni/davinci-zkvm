@@ -6,7 +6,7 @@
 // Prerequisites:
 //   - ziskemu in PATH
 //   - gen-results-input (cargo build --release -p davinci-zkvm-input-gen),
-//     found via GEN_RESULTS_INPUT_BIN, target/release or PATH
+//     found via GEN_RESULTS_INPUT_BIN, then target/release, then PATH
 //   - RESULTS_ELF_PATH or the default circuit-results/elf/results.elf
 package integration
 

@@ -3,18 +3,22 @@
 //! `g1_to_raw`, guest `hash_vk_bytes`). snarkjs G2 ordering is assumed:
 //! `[[x_c0, x_c1], [y_c0, y_c1], [1, 0]]`.
 
-use ark_bn254::{Bn254, Fq, Fq2, G1Affine, G2Affine};
-use ark_ec::AffineRepr;
+use ark_bn254::{Bn254, Fq, Fq2, G1Affine, G1Projective, G2Affine};
+use ark_ec::{AffineRepr, VariableBaseMSM};
 use ark_ff::{BigInteger, PrimeField};
 use ark_groth16::{prepare_verifying_key, Groth16, PreparedVerifyingKey, Proof, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use crate::crypto::field::{biguint_from_dec, biguint_to_u256, Fr};
+use crate::limits::BALLOT_COORDS;
 use crate::types::{SnarkJsProof, SnarkJsVk};
 use crate::Error;
 
-/// Public signals per ballot proof: `[address, vote_id, inputs_hash]`.
-pub const N_PUBLIC: usize = 3;
+/// Public signals per ballot proof: address, vote id, process id, packed
+/// ballot mode, encryption key x and y, weight, then the 64 ballot
+/// coordinates (see [`crate::ballot::public_signals`]).
+pub const N_PUBLIC: usize = 7 + BALLOT_COORDS;
+const _: () = assert!(N_PUBLIC == 71);
 
 pub struct BallotVerifier {
     pvk: PreparedVerifyingKey<Bn254>,
@@ -81,20 +85,24 @@ fn put_g2(buf: &mut Vec<u8>, p: &G2Affine) {
 }
 
 impl BallotVerifier {
-    /// Parses a snarkjs `verification_key.json`; it must have 3 public inputs.
+    /// Parses a snarkjs `verification_key.json`; see [`Self::from_snarkjs`].
     pub fn from_snarkjs_json(vk: &str) -> Result<Self, Error> {
         let vk: SnarkJsVk = serde_json::from_str(vk)?;
         Self::from_snarkjs(&vk)
     }
 
+    /// Refuses a VK the batch guest would reject: not groth16/bn128, without
+    /// `N_PUBLIC + 1` IC points, or with `delta == gamma` (no phase-2
+    /// contribution, so anyone can forge proofs).
     pub fn from_snarkjs(vk: &SnarkJsVk) -> Result<Self, Error> {
         if vk.protocol != "groth16" || vk.curve != "bn128" {
             return Err(Error::Input("vk is not groth16/bn128".into()));
         }
         if vk.ic.len() != N_PUBLIC + 1 {
             return Err(Error::Input(format!(
-                "vk has {} IC points, want 4",
-                vk.ic.len()
+                "vk has {} IC points, want {}",
+                vk.ic.len(),
+                N_PUBLIC + 1
             )));
         }
         let ark = VerifyingKey::<Bn254> {
@@ -104,6 +112,11 @@ impl BallotVerifier {
             delta_g2: parse_g2(&vk.vk_delta_2)?,
             gamma_abc_g1: vk.ic.iter().map(parse_g1).collect::<Result<_, _>>()?,
         };
+        if ark.delta_g2 == ark.gamma_g2 {
+            return Err(Error::Input(
+                "vk has delta == gamma (no phase-2 contribution)".into(),
+            ));
+        }
         let mut wire = Vec::with_capacity(64 + 3 * 128 + 8 + 64 * ark.gamma_abc_g1.len());
         put_g1(&mut wire, &ark.alpha_g1);
         put_g2(&mut wire, &ark.beta_g2);
@@ -135,7 +148,15 @@ impl BallotVerifier {
         if a.is_zero() || b.is_zero() || c.is_zero() {
             return false;
         }
-        Groth16::<Bn254>::verify_proof(&self.pvk, &Proof { a, b, c }, pubs).unwrap_or(false)
+        // vk_x = IC[0] + MSM(IC[1..], pubs): ark-groth16's per-input loop is
+        // about 4x slower at 71 inputs.
+        let ic = &self.pvk.vk.gamma_abc_g1;
+        let Ok(acc) = G1Projective::msm(&ic[1..], pubs) else {
+            return false;
+        };
+        let vk_x = acc + ic[0];
+        Groth16::<Bn254>::verify_proof_with_prepared_inputs(&self.pvk, &Proof { a, b, c }, &vk_x)
+            .unwrap_or(false)
     }
 
     /// sha256 of the VK wire bytes (guest `hash_vk_bytes`); config leaf 0x07

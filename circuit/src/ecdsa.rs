@@ -14,15 +14,17 @@
 //! `ecdsa_verify_secp256k1(pk, z, r, s)`, we use the recovery form
 //! `ecdsa_recover_secp256k1(r, s, z, recid) -> pk`. The recovered point is
 //! guaranteed on-curve by the precompile; we then derive the Ethereum
-//! address and bind it to the matching ballot proof's `pubs[0]`:
+//! address and bind it to the matching ballot proof's public input 0 (the
+//! census address, see `publics.rs`):
 //!
 //! ```text
 //! address = keccak256(pk.x_BE32 || pk.y_BE32)[12..]   // 20-byte Ethereum address
-//! assert address == pubs[0]
+//! assert address == public input 0
 //! ```
 
 use crate::hash::keccak256_short;
 use crate::io::ParsedInput;
+use crate::publics::Publics;
 use crate::types::{FrRaw, FAIL_ECDSA};
 use ziskos::zisklib::ecdsa_recover_secp256k1;
 
@@ -67,21 +69,21 @@ fn address_matches(addr_bytes: &[u8; 20], pubs_addr: &FrRaw) -> bool {
     addr_bytes == &expected
 }
 
-/// Verify all ECDSA signatures in `parsed.ecdsa` via public-key recovery.
+/// Verify all ECDSA signatures in `parsed.ecdsa` via public-key recovery,
+/// each over the vote id the guest derived for its proof.
 ///
 /// Returns `ecdsa_ok = false` when any signature or address binding check fails.
 ///
 /// # Fail-mask bits
 /// - `FAIL_ECDSA` (bit 3): signature recovery or address-binding check failed,
-///   or the ECDSA block is absent.
-pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
-    if parsed.ecdsa.is_empty() {
-        // ECDSA block is mandatory; treat absence as failure.
+///   the ECDSA block is absent, or the public inputs could not be derived.
+pub fn verify_batch(parsed: &ParsedInput, publics: Option<&Publics>, fail_mask: &mut u32) -> bool {
+    let Some(publics) = publics else {
         *fail_mask |= FAIL_ECDSA;
         return false;
-    }
-    // Public input layout: pubs[0] = address (uint160), pubs[1] = vote_id (uint64)
-    if parsed.n_public < 2 {
+    };
+    if parsed.ecdsa.is_empty() {
+        // ECDSA block is mandatory; treat absence as failure.
         *fail_mask |= FAIL_ECDSA;
         return false;
     }
@@ -91,16 +93,7 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
         return false;
     }
     for (i, sig) in parsed.ecdsa.iter().enumerate() {
-        let pubs = &parsed.proofs[i].public_inputs;
-        // VoteID is a uint64; upper limbs must be zero.  An attacker who crafts
-        // a proof with non-zero upper limbs would bypass the ECDSA binding, so we
-        // reject explicitly rather than silently truncating.
-        if pubs[1][1] != 0 || pubs[1][2] != 0 || pubs[1][3] != 0 {
-            *fail_mask |= FAIL_ECDSA;
-            return false;
-        }
-        let vote_id = pubs[1][0];
-        let z = eth_message_hash(vote_id);
+        let z = eth_message_hash(publics.vote_id(i));
 
         // Recover the public key. ecdsa_recover_secp256k1 returns Err for invalid
         // r/s/recid, point-not-on-curve, etc. — all collapse to FAIL_ECDSA.
@@ -112,7 +105,7 @@ pub fn verify_batch(parsed: &ParsedInput, fail_mask: &mut u32) -> bool {
             }
         };
         let addr = eth_address_from_recovered_pk(&pk_le);
-        if !address_matches(&addr, &pubs[0]) {
+        if !address_matches(&addr, &publics.address(i)) {
             *fail_mask |= FAIL_ECDSA;
             return false;
         }

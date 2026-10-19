@@ -24,14 +24,10 @@ type VoterBallot struct {
 	// with Proof.
 	ProofJSON json.RawMessage
 
-	// PublicInputs are the ballot proof's public signals.
-	// Expected order: [address, voteID, inputsHash].
-	PublicInputs *PublicInput
-
 	// Signature is the voter's ECDSA secp256k1 signature.
 	Signature *EcdsaSignature
 
-	// Census is the lean-IMT Poseidon membership proof for this voter.
+	// Census is the Keccak lean-IMT membership proof for this voter.
 	// Used when censusOrigin is Merkle (1-3). Ignored when Csp is set.
 	Census CensusProof
 
@@ -148,7 +144,6 @@ func (b *ProveBatch) toRequest() (*ProveRequest, error) {
 
 	// Flatten per-voter data into parallel arrays
 	proofs := make([]json.RawMessage, len(b.Voters))
-	pubInputs := make([][]string, len(b.Voters))
 	sigs := make([]json.RawMessage, len(b.Voters))
 	var censusProofs []CensusProof
 	var cspProofs []CspProof
@@ -170,12 +165,6 @@ func (b *ProveBatch) toRequest() (*ProveRequest, error) {
 			}
 			proofs[i] = raw
 		}
-
-		// Public inputs
-		if v.PublicInputs == nil {
-			return nil, fmt.Errorf("voter[%d]: public inputs are required", i)
-		}
-		pubInputs[i] = v.PublicInputs.toStrings()
 
 		// Signature
 		if v.Signature == nil {
@@ -207,13 +196,12 @@ func (b *ProveBatch) toRequest() (*ProveRequest, error) {
 	}
 
 	req := &ProveRequest{
-		VK:           vkJSON,
-		Proofs:       proofs,
-		PublicInputs: pubInputs,
-		Sigs:         sigs,
-		State:        b.State,
-		KZG:          b.KZG,
-		Output:       b.Output,
+		VK:     vkJSON,
+		Proofs: proofs,
+		Sigs:   sigs,
+		State:  b.State,
+		KZG:    b.KZG,
+		Output: b.Output,
 	}
 
 	// Census proofs (Merkle): only when not using CSP
@@ -306,12 +294,6 @@ func (c *Client) Prove(ctx context.Context, batch *ProveBatch) (*ProveResult, er
 		case <-time.After(3 * time.Second):
 		}
 	}
-}
-
-// NewPublicInput creates a PublicInput from variadic big.Int values.
-// Expected order: [address, voteID, ballotInputsHash].
-func NewPublicInput(values ...*big.Int) *PublicInput {
-	return &PublicInput{Values: values}
 }
 
 // PackAddressWeight packs an Ethereum address and voter weight into the

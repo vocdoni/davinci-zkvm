@@ -245,7 +245,7 @@ func NewElection(nVoters int) (*Election, error) {
 	}
 
 	// Census lean-IMT
-	imt, err := leanimt.New(poseidonHasher, bigIntEq, nil, nil, nil)
+	imt, err := leanimt.New(davinci.KeccakHasher, bigIntEq, nil, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("leanimt.New: %w", err)
 	}
@@ -730,7 +730,7 @@ func (e *Election) slotKey(v *Voter) (uint64, error) {
 	return davinci.SlotKey([20]byte(v.AddressBytes)), nil
 }
 
-// BuildCensusProofs builds lean-IMT Poseidon membership proofs for batchVoters.
+// BuildCensusProofs builds Keccak lean-IMT membership proofs for batchVoters.
 func (e *Election) BuildCensusProofs(batchVoters []*Voter) ([]davinci.CensusProof, error) {
 	root, ok := e.Census.Root()
 	if !ok {
@@ -876,8 +876,8 @@ func identityCiphertext() *elgamal.Ciphertext {
 // BuildKZGBlock builds the DA blob binding for the batch that BuildStateBlock
 // just applied. It rebuilds the exact cell stream the guest constructs from
 // verified state (vote ids, batch ballot updates and silent-refresh updates),
-// splits it into EIP-4844 blobs, commits and opens
-// each at z_b = SHA-256(processID || rootBefore || commitment_b) mod r_bls.
+// splits it into EIP-4844 blobs, commits and opens each at the point
+// davinci.EvaluationPoint derives from the cell digest D and commitment_b.
 // Returns the commitments-only KZGRequest plus the full TransitionBlobs so
 // settlement tests can feed the on-chain point-evaluation precompile.
 // oldRoot is the state root BEFORE the batch (rootHashBefore for z).

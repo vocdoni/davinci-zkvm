@@ -31,14 +31,14 @@ in one execution:
 
 | Check | What it covers |
 |---|---|
-| Ballot proofs | Batched Groth16 (BN254) verification of every voter's ballot proof, with the random linear combination computed in-guest. |
+| Ballot proofs | Batched Groth16 (BN254) verification of every voter's ballot proof against 71 public inputs the guest derives itself (census address and weight, vote ID, process config, original ciphertexts), with the random linear combination computed in-guest. |
 | Signatures | secp256k1 recovery of each voter's signature over its vote ID, bound to the address in the ballot proof. |
-| Eligibility | lean-IMT Poseidon census proofs, or signatures from a Credential Service Provider (CSP census). |
+| Eligibility | Keccak lean-IMT census proofs, or signatures from a Credential Service Provider (CSP census). |
 | State transition | Arbo SHA-256 sparse Merkle tree updates for vote IDs, ballots and the results leaf, plus read proofs of the process configuration. |
 | Re-encryption | Every stored ballot is the voter's ballot re-encrypted with scalars derived in-guest from one secret seed per batch. |
 | Silent revoting | Occupied slots the batch did not write are re-randomized too, so an overwrite looks like a routine refresh. |
 | Tally | The encrypted results accumulator is updated homomorphically: new ballots added, overwritten ballots subtracted, refresh deltas added. |
-| Data availability | The guest lays out the EIP-4844 blob contents itself, evaluates each blob polynomial at a bound point and publishes a digest of the commitments and evaluations. |
+| Data availability | The guest lays out the EIP-4844 blob contents itself, hashes them into a cell digest, evaluates each blob polynomial at a point derived from that digest and publishes both the cell digest and a digest of the commitments and evaluations. |
 | Cross-block binding | Process ID, state root and keys agree across the input blocks. |
 
 A failed check sets a bit in `fail_mask`, the remaining checks still run, and
@@ -46,9 +46,10 @@ the batch is proved with `ok = 0`. A finished job can therefore hold a
 rejected batch: the consumer must read the public outputs and require
 `ok == 1`.
 
-The public outputs (46 registers, see CIRCUIT.md section 3) carry the state
+The public outputs (54 registers, see CIRCUIT.md section 3) carry the state
 roots before and after, the census root, the vote and overwrite counts, the
-occupied-slot count before the batch, the blob digest and the blob count. The
+occupied-slot count before the batch, the blob digest, the blob count and the
+cell digest the evaluation points derive from. The
 guest proves a transition from whatever root and census it is given, so the
 verifier must also check:
 
@@ -58,7 +59,8 @@ verifier must also check:
 - the census root equals the process census root;
 - the occupied-slot count equals the running `votes - overwrites`;
 - every blob commitment and evaluation against the blob transaction's
-  versioned hashes, with the EIP-4844 point-evaluation precompile.
+  versioned hashes, with the EIP-4844 point-evaluation precompile, at the
+  points derived from the published cell digest.
 
 `solidity/DavinciSettlement.sol` is a reference contract that does exactly
 this. The production contracts live in

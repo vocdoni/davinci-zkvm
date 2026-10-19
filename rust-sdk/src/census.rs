@@ -1,19 +1,43 @@
-//! Census: the lean-IMT (iden3 Poseidon2) Merkle census, CSP attestations,
-//! vote-id signatures and the ballot slot of each voter.
+//! Census: the Keccak lean-IMT Merkle census, CSP attestations, vote-id
+//! signatures and the ballot slot of each voter.
 
 use k256::ecdsa::{RecoveryId, Signature, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sha3::{Digest, Keccak256};
 
-use crate::crypto::field::{fr_from_le, fr_to_be, Fr};
-use crate::crypto::poseidon::poseidon;
+use crate::crypto::field::{fr_to_be, Fr};
 use crate::limits::{BALLOT_MAX, BALLOT_MIN, MAX_CENSUS_DEPTH};
 use crate::Error;
 
-fn hash2(a: &Fr, b: &Fr) -> Fr {
-    // Two inputs is always a valid Poseidon width.
-    poseidon(&[*a, *b]).unwrap_or_default()
+/// A census value (root, sibling, leaf): a 256-bit big-endian integer. Never a
+/// field element: Keccak nodes are uniform 256-bit values, most of them above
+/// the BN254 modulus.
+pub type Node = [u8; 32];
+
+/// Census lean-IMT node hash: `keccak256(left || right)` over the big-endian
+/// values, Solidity's `keccak256(abi.encode(left, right))`.
+pub fn hash2(l: &Node, r: &Node) -> Node {
+    keccak(&[l, r])
+}
+
+/// Parses a census value from its wire form: `0x` and exactly 64 hex digits
+/// (either case).
+pub fn node_from_hex(s: &str) -> Result<Node, Error> {
+    let digits = s
+        .strip_prefix("0x")
+        .ok_or(Error::Census("census value must start with 0x"))?;
+    if digits.len() != 64 {
+        return Err(Error::Census("census value must have 64 hex digits"));
+    }
+    let mut out = [0u8; 32];
+    hex::decode_to_slice(digits, &mut out).map_err(|_| Error::Census("census value is not hex"))?;
+    Ok(out)
+}
+
+/// The wire form of a census value: `0x` and 64 lowercase hex digits.
+pub fn node_to_hex(n: &Node) -> String {
+    format!("0x{}", hex::encode(n))
 }
 
 /// Append-only lean incremental Merkle tree, same shape as `lean-imt-go`:
@@ -21,7 +45,7 @@ fn hash2(a: &Fr, b: &Fr) -> Fr {
 #[derive(Clone, Debug, Default)]
 pub struct LeanImt {
     // levels[0] = leaves, last level = [root] once non-empty.
-    levels: Vec<Vec<Fr>>,
+    levels: Vec<Vec<Node>>,
 }
 
 impl LeanImt {
@@ -45,7 +69,7 @@ impl LeanImt {
 
     /// Builds the tree bottom-up with n - 1 hashes; same levels (root and
     /// proofs) as inserting `leaves` one by one.
-    pub fn from_leaves(leaves: Vec<Fr>) -> Self {
+    pub fn from_leaves(leaves: Vec<Node>) -> Self {
         let mut levels = vec![leaves];
         while let Some(l) = levels.last().filter(|l| l.len() > 1) {
             // A lone right-most node moves up unhashed.
@@ -61,7 +85,7 @@ impl LeanImt {
         LeanImt { levels }
     }
 
-    pub fn insert(&mut self, leaf: Fr) {
+    pub fn insert(&mut self, leaf: Node) {
         if self.levels.is_empty() {
             self.levels.push(Vec::new());
         }
@@ -84,7 +108,7 @@ impl LeanImt {
     }
 
     /// Root; zero for an empty tree.
-    pub fn root(&self) -> Fr {
+    pub fn root(&self) -> Node {
         self.levels
             .last()
             .and_then(|l| l.first())
@@ -120,28 +144,28 @@ impl LeanImt {
     }
 }
 
-fn set(v: &mut Vec<Fr>, i: usize, x: Fr) {
+fn set(v: &mut Vec<Node>, i: usize, x: Node) {
     if i < v.len() {
         v[i] = x;
     } else {
-        v.resize(i, Fr::default());
+        v.resize(i, Node::default());
         v.push(x);
     }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CensusProof {
-    pub root: Fr,
-    pub leaf: Fr,
+    pub root: Node,
+    pub leaf: Node,
     pub path_bits: u64,
-    pub siblings: Vec<Fr>,
+    pub siblings: Vec<Node>,
 }
 
-/// Guest rules: at most 61 siblings, no path bit above the sibling count,
-/// and the Poseidon2 walk reaches the root.
+/// Guest rules: the leaf is below 2^248, at most 61 siblings, no path bit
+/// above the sibling count, and the Keccak walk reaches the root.
 pub fn verify_census_proof(p: &CensusProof) -> bool {
     let n = p.siblings.len();
-    if n > MAX_CENSUS_DEPTH || p.path_bits >> n != 0 {
+    if p.leaf[0] != 0 || n > MAX_CENSUS_DEPTH || p.path_bits >> n != 0 {
         return false;
     }
     let mut node = p.leaf;
@@ -155,33 +179,30 @@ pub fn verify_census_proof(p: &CensusProof) -> bool {
     node == p.root
 }
 
-/// Merkle census leaf `(address << 88) | weight`, weight below 2^88.
-pub fn census_leaf(address: &[u8; 20], weight: u128) -> Result<Fr, Error> {
+/// Merkle census leaf `(address << 88) | weight`, weight below 2^88; always
+/// below 2^248, the bound the guest enforces.
+pub fn census_leaf(address: &[u8; 20], weight: u128) -> Result<Node, Error> {
     if weight >> 88 != 0 {
         return Err(Error::Census("weight does not fit in 88 bits"));
     }
-    // 248 bits, always below p.
     let mut be = [0u8; 32];
     be[1..21].copy_from_slice(address);
     be[21..].copy_from_slice(&weight.to_be_bytes()[5..]);
-    be.reverse();
-    fr_from_le(&be)
+    Ok(be)
 }
 
 /// Weight part of a census leaf (its low 88 bits), as the guest binds it.
-pub fn census_leaf_weight(leaf: &Fr) -> u128 {
-    let be = fr_to_be(leaf);
+pub fn census_leaf_weight(leaf: &Node) -> u128 {
     let mut w = [0u8; 16];
-    w[5..].copy_from_slice(&be[21..]);
+    w[5..].copy_from_slice(&leaf[21..]);
     u128::from_be_bytes(w)
 }
 
 /// Address part of a census leaf (bits 88..247), the 20 bytes the guest
 /// binds to the ballot proof and hashes into the slot.
-pub fn census_leaf_address(leaf: &Fr) -> [u8; 20] {
-    let be = fr_to_be(leaf);
+pub fn census_leaf_address(leaf: &Node) -> [u8; 20] {
     let mut a = [0u8; 20];
-    a.copy_from_slice(&be[1..21]);
+    a.copy_from_slice(&leaf[1..21]);
     a
 }
 

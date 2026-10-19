@@ -19,20 +19,3 @@ func PoseidonHash(inputs ...*big.Int) (*big.Int, error) {
 	}
 	return poseidon.Hash(inputs)
 }
-
-// PoseidonMultiHash matches the multiposeidon logic used in circuits (16-wide chunks).
-func PoseidonMultiHash(inputs []*big.Int) (*big.Int, error) {
-	if len(inputs) <= 16 {
-		return PoseidonHash(inputs...)
-	}
-	var intermediate []*big.Int
-	for i := 0; i < len(inputs); i += 16 {
-		end := min(i+16, len(inputs))
-		h, err := PoseidonHash(inputs[i:end]...)
-		if err != nil {
-			return nil, err
-		}
-		intermediate = append(intermediate, h)
-	}
-	return PoseidonHash(intermediate...)
-}

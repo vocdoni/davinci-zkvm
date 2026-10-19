@@ -37,7 +37,7 @@
 //! membership check still uses the `arith256_mod`-backed `bn254_fr` field ops.
 
 use crate::bn254_fr::{self, BnFr};
-use crate::hash::sha256_once;
+use crate::hash::{sha256_compress, sha256_once, sha256_state_to_fr_be, SHA256_IV};
 use crate::types::{
     BallotData, BjjCiphertext, FrRaw, ReencEntry, BALLOT_FIELDS, FAIL_REENC, FAIL_REFRESH,
     NUM_FIELDS,
@@ -71,10 +71,23 @@ fn fr_to_be32(k: &FrRaw) -> [u8; 32] {
     buf
 }
 
-/// One step of the offset-scalar chain: `H(be32(k))`. Runs on the `sha256f`
-/// precompile and closes with a single `arith256_mod` reduction.
+/// One step of the offset-scalar chain: `H(be32(k))`. One padded `sha256f`
+/// block (be32 = limbs high to low, each byte-swapped, as LE words) and a
+/// single `arith256_mod` reduction.
 fn sha256_to_scalar(k: &FrRaw) -> FrRaw {
-    sha256_to_scalar_bytes(&fr_to_be32(k))
+    let block = [
+        k[3].swap_bytes(),
+        k[2].swap_bytes(),
+        k[1].swap_bytes(),
+        k[0].swap_bytes(),
+        0x80,
+        0,
+        0,
+        (32u64 * 8).swap_bytes(),
+    ];
+    let mut state = SHA256_IV;
+    sha256_compress(&mut state, &block);
+    bn254_fr::reduce(&sha256_state_to_fr_be(&state))
 }
 
 /// Domain tag for the re-encryption chain start. 16 bytes; keep in sync with
@@ -134,12 +147,36 @@ pub const BJJ_SUBGROUP_L: FrRaw = [
 /// Coordinates must be on-curve and in Fr range; the result is canonical affine.
 fn affine_add(a: &BjjAffine, b: &BjjAffine) -> BjjAffine {
     let mut p1 = SyscallPoint256 { x: a.0, y: a.1 };
-    let p2 = SyscallPoint256 { x: b.0, y: b.1 };
-    {
-        let mut params = SyscallBabyJubJubAddParams { p1: &mut p1, p2: &p2 };
-        syscall_babyjubjub_add(&mut params);
-    }
+    add_assign(&mut p1, &SyscallPoint256 { x: b.0, y: b.1 });
     (p1.x, p1.y)
+}
+
+/// `acc += p` in place (same contract as `affine_add`). Hot loops keep their
+/// accumulators as `SyscallPoint256` and pass table entries by reference, so
+/// an add is one syscall with no point copies.
+#[inline(always)]
+fn add_assign(acc: &mut SyscallPoint256, p: &SyscallPoint256) {
+    let mut params = SyscallBabyJubJubAddParams { p1: acc, p2: p };
+    syscall_babyjubjub_add(&mut params);
+}
+
+/// `acc += acc`. The precompile takes `p1` mutably, so `p2` is a copy.
+#[inline(always)]
+fn double_assign(acc: &mut SyscallPoint256) {
+    let p = *acc;
+    add_assign(acc, &p);
+}
+
+const IDENTITY: SyscallPoint256 = SyscallPoint256 { x: bn254_fr::ZERO, y: bn254_fr::ONE };
+
+/// Canonical copy of an untrusted point, reduced straight into the syscall
+/// layout (see `canon`).
+#[inline(always)]
+fn canon_point(x: &FrRaw, y: &FrRaw) -> SyscallPoint256 {
+    let mut p = IDENTITY;
+    bn254_fr::muladd_into(&mut p.x, x, &bn254_fr::ONE, &bn254_fr::ZERO);
+    bn254_fr::muladd_into(&mut p.y, y, &bn254_fr::ONE, &bn254_fr::ZERO);
+    p
 }
 
 /// Canonicalize an untrusted affine point. The precompile requires both
@@ -162,33 +199,34 @@ fn scalar_mult(point: &BjjAffine, scalar: &FrRaw) -> BjjAffine {
         None => return bjj_identity(),
         Some(t) => t,
     };
-    let mut result = bjj_identity();
-    let mut exp = *point;
+    let mut result = IDENTITY;
+    let mut exp = SyscallPoint256 { x: point.0, y: point.1 };
     for i in 0..=top {
         let mut word = scalar[i];
         let bits = if i == top { 64 - word.leading_zeros() } else { 64 };
         for _ in 0..bits {
             if (word & 1) == 1 {
-                result = affine_add(&result, &exp);
+                add_assign(&mut result, &exp);
             }
-            exp = affine_add(&exp, &exp);
+            double_assign(&mut exp);
             word >>= 1;
         }
     }
-    result
+    (result.x, result.y)
 }
 
 /// Precomputed window table for a fixed base point (4- or 8-bit windows).
 ///
-/// `windows[w][v-1] = (v << bits*w) * P`, so a 256-bit scalar mul is at most
-/// `256/bits - 1` point additions (zero windows skipped) with no doublings.
+/// `points[w * (2^bits - 1) + v - 1] = (v << bits*w) * P`, so a 256-bit scalar
+/// mul is at most `256/bits - 1` point additions (zero windows skipped) with no
+/// doublings.
 /// 4-bit: 64x15 table, ~960 point ops to build, ~60 adds per mul.
 /// 8-bit: 32x255 table, ~8160 point ops to build, ~32 adds per mul.
 /// Breakeven is ~256 muls per table, so `new` picks the width from the
 /// expected mul count for the batch.
 struct BjjFixedBase {
     bits: u32,
-    windows: Vec<Vec<BjjAffine>>,
+    points: Vec<SyscallPoint256>,
 }
 
 impl BjjFixedBase {
@@ -197,56 +235,79 @@ impl BjjFixedBase {
         let bits: u32 = if expected_muls >= 256 { 8 } else { 4 };
         let vmax = (1usize << bits) - 1;
         let nwin = 256 / bits as usize;
-        let mut windows = Vec::with_capacity(nwin);
-        let mut base: BjjAffine = (*x, *y);
+        let mut points = Vec::with_capacity(nwin * vmax);
+        let mut base = SyscallPoint256 { x: *x, y: *y };
         for w in 0..nwin {
             // The precompile costs one syscall per op, so doubling is no cheaper
             // than adding: build the entries with a running sum.
-            let mut entries: Vec<BjjAffine> = Vec::with_capacity(vmax);
-            let mut acc = bjj_identity();
+            let mut acc = IDENTITY;
             for _ in 1..=vmax {
-                acc = affine_add(&acc, &base);
-                entries.push(acc);
+                add_assign(&mut acc, &base);
+                points.push(acc);
             }
-            windows.push(entries);
             if w + 1 < nwin {
                 for _ in 0..bits {
-                    base = affine_add(&base, &base);
+                    double_assign(&mut base);
                 }
             }
         }
-        BjjFixedBase { bits, windows }
+        BjjFixedBase { bits, points }
     }
 
-    fn mul(&self, scalar: &FrRaw) -> BjjAffine {
-        let mask = (1u64 << self.bits) - 1;
-        let per_limb = (64 / self.bits) as usize;
-        let mut result = bjj_identity();
+    fn mul(&self, scalar: &FrRaw) -> SyscallPoint256 {
+        if self.bits == 8 {
+            self.mul_w::<8>(scalar)
+        } else {
+            self.mul_w::<4>(scalar)
+        }
+    }
+
+    /// The window walk with the width fixed at compile time: constant shifts
+    /// and a running offset to the current window's entries.
+    #[inline(always)]
+    fn mul_w<const BITS: u32>(&self, scalar: &FrRaw) -> SyscallPoint256 {
+        let mask = (1u64 << BITS) - 1;
+        let vmax = mask as usize;
+        let mut result = IDENTITY;
+        let mut win = 0;
         for i in 0..4 {
             let mut word = scalar[i];
-            for j in 0..per_limb {
+            for _ in 0..64 / BITS {
                 let v = (word & mask) as usize;
                 if v != 0 {
-                    result = affine_add(&result, &self.windows[i * per_limb + j][v - 1]);
+                    add_assign(&mut result, &self.points[win + v - 1]);
                 }
-                word >>= self.bits;
+                word >>= BITS;
+                win += vmax;
             }
         }
         result
     }
 }
 
+/// `B8_WINDOWS` in the syscall's point layout, converted at compile time so
+/// `b8_mul` passes entries by reference.
+static B8_POINTS: [SyscallPoint256; 8160] = {
+    let t = &crate::b8_table::B8_WINDOWS;
+    let mut out = [IDENTITY; 8160];
+    let mut i = 0;
+    while i < 8160 {
+        out[i] = SyscallPoint256 { x: t[i][0], y: t[i][1] };
+        i += 1;
+    }
+    out
+};
+
 /// Fixed-base mul `scalar * B8` via the compile-time 8-bit affine window
 /// table (`b8_table.rs`): zero windows skipped, no runtime table build.
-fn b8_mul(scalar: &FrRaw) -> BjjAffine {
-    let mut result = bjj_identity();
+fn b8_mul(scalar: &FrRaw) -> SyscallPoint256 {
+    let mut result = IDENTITY;
     for i in 0..4 {
         let mut word = scalar[i];
         for j in 0..8 {
             let v = (word & 0xFF) as usize;
             if v != 0 {
-                let e = &crate::b8_table::B8_WINDOWS[(i * 8 + j) * 255 + v - 1];
-                result = affine_add(&result, &(e[0], e[1]));
+                add_assign(&mut result, &B8_POINTS[(i * 8 + j) * 255 + v - 1]);
             }
             word >>= 8;
         }
@@ -307,13 +368,15 @@ fn verify_reencryption(
         // newC = origC + delta; compare against the claimed affine point. The
         // precompile returns canonical coordinates, and the producer emits
         // canonical TE coords, so a direct equality is exact.
-        let expected1 = affine_add(&canon(&(original[i].c1x, original[i].c1y)), &delta1);
-        if expected1 != (reencrypted[i].c1x, reencrypted[i].c1y) {
+        let mut c1 = canon_point(&original[i].c1x, &original[i].c1y);
+        add_assign(&mut c1, &delta1);
+        if c1.x != reencrypted[i].c1x || c1.y != reencrypted[i].c1y {
             return false;
         }
 
-        let expected2 = affine_add(&canon(&(original[i].c2x, original[i].c2y)), &delta2);
-        if expected2 != (reencrypted[i].c2x, reencrypted[i].c2y) {
+        let mut c2 = canon_point(&original[i].c2x, &original[i].c2y);
+        add_assign(&mut c2, &delta2);
+        if c2.x != reencrypted[i].c2x || c2.y != reencrypted[i].c2y {
             return false;
         }
 
@@ -339,6 +402,16 @@ fn identity_ballot() -> BallotData {
     b
 }
 
+/// Per-ciphertext points (c1, c2 of each field) flattened into `BallotData`.
+fn points_to_ballot(points: &[SyscallPoint256; 2 * NUM_FIELDS]) -> BallotData {
+    let mut b: BallotData = [bn254_fr::ZERO; BALLOT_FIELDS];
+    for (i, p) in points.iter().enumerate() {
+        b[i * 2] = p.x;
+        b[i * 2 + 1] = p.y;
+    }
+    b
+}
+
 /// Re-encrypt one refresh entry in-guest. For each active field: draw the next
 /// chain element, add `chain*B8` and `chain*pubKey` to the old ciphertexts, and
 /// fold the same two deltas into `refresh_delta[i]`. For padded slots the old
@@ -351,7 +424,7 @@ fn refresh_one(
     num_fields: usize,
     old: &BallotData,
     new: &mut BallotData,
-    refresh_delta: &mut BallotData,
+    refresh_delta: &mut [SyscallPoint256; 2 * NUM_FIELDS],
 ) -> bool {
     for i in 0..NUM_FIELDS {
         let base = i * 4;
@@ -371,24 +444,18 @@ fn refresh_one(
         }
         let delta1 = b8_mul(chain);
         let delta2 = pk_table.mul(chain);
-        let old_c1 = canon(&(old[base], old[base + 1]));
-        let old_c2 = canon(&(old[base + 2], old[base + 3]));
-        let new_c1 = affine_add(&old_c1, &delta1);
-        let new_c2 = affine_add(&old_c2, &delta2);
-        new[base] = new_c1.0;
-        new[base + 1] = new_c1.1;
-        new[base + 2] = new_c2.0;
-        new[base + 3] = new_c2.1;
+        let mut new_c1 = canon_point(&old[base], &old[base + 1]);
+        let mut new_c2 = canon_point(&old[base + 2], &old[base + 3]);
+        add_assign(&mut new_c1, &delta1);
+        add_assign(&mut new_c2, &delta2);
+        new[base] = new_c1.x;
+        new[base + 1] = new_c1.y;
+        new[base + 2] = new_c2.x;
+        new[base + 3] = new_c2.y;
         // Fold the deltas into the accumulator. The initial value is identity,
         // so the first add is `identity + delta = delta`.
-        let d1 = (refresh_delta[base], refresh_delta[base + 1]);
-        let d2 = (refresh_delta[base + 2], refresh_delta[base + 3]);
-        let acc1 = affine_add(&d1, &delta1);
-        let acc2 = affine_add(&d2, &delta2);
-        refresh_delta[base] = acc1.0;
-        refresh_delta[base + 1] = acc1.1;
-        refresh_delta[base + 2] = acc2.0;
-        refresh_delta[base + 3] = acc2.1;
+        add_assign(&mut refresh_delta[i * 2], &delta1);
+        add_assign(&mut refresh_delta[i * 2 + 1], &delta2);
         *chain = sha256_to_scalar(chain);
     }
     true
@@ -423,7 +490,7 @@ pub fn verify_batch_from_parsed(
     num_fields: usize,
     fail_mask: &mut u32,
 ) -> (bool, Vec<BallotData>, BallotData) {
-    let mut refresh_delta = identity_ballot();
+    let refresh_delta = identity_ballot();
     let (pub_key_x, pub_key_y) = match reenc_pub_key {
         None => {
             *fail_mask |= crate::types::FAIL_MISSING_BLOCK;
@@ -468,15 +535,16 @@ pub fn verify_batch_from_parsed(
 
     // Silent refreshes continue the SAME chain so no scalar repeats.
     let mut refreshed_new: Vec<BallotData> = Vec::with_capacity(refreshed_old.len());
+    let mut delta_acc = [IDENTITY; 2 * NUM_FIELDS];
     for old in refreshed_old {
         let mut new: BallotData = [bn254_fr::ZERO; BALLOT_FIELDS];
-        if !refresh_one(&mut chain, &pk_table, num_fields, old, &mut new, &mut refresh_delta) {
+        if !refresh_one(&mut chain, &pk_table, num_fields, old, &mut new, &mut delta_acc) {
             *fail_mask |= FAIL_REFRESH;
-            return (false, Vec::new(), refresh_delta);
+            return (false, Vec::new(), points_to_ballot(&delta_acc));
         }
         refreshed_new.push(new);
     }
-    (true, refreshed_new, refresh_delta)
+    (true, refreshed_new, points_to_ballot(&delta_acc))
 }
 
 // Affine point API (TE coordinates) for the Chaum-Pedersen verifier.
@@ -510,26 +578,26 @@ pub fn bjj_neg(p: &BjjAffine) -> BjjAffine {
     (bn254_fr::neg(&p.0), bn254_fr::reduce(&p.1))
 }
 
-/// Running affine point sum. Each step is one precompile add.
-pub struct BjjAccumulator(BjjAffine);
+/// Running affine point sum, held in place. Each step is one precompile add.
+pub struct BjjAccumulator(SyscallPoint256);
 
 impl BjjAccumulator {
     pub fn new(p: &BjjAffine) -> Self {
-        BjjAccumulator(canon(p))
+        BjjAccumulator(canon_point(&p.0, &p.1))
     }
 
     pub fn add(&mut self, p: &BjjAffine) {
-        self.0 = affine_add(&self.0, &canon(p));
+        add_assign(&mut self.0, &canon_point(&p.0, &p.1));
     }
 
     /// Homomorphic subtraction: add the group inverse `(-x, y)`.
     pub fn sub(&mut self, p: &BjjAffine) {
         let n = bjj_neg(p);
-        self.0 = affine_add(&self.0, &n);
+        add_assign(&mut self.0, &SyscallPoint256 { x: n.0, y: n.1 });
     }
 
     pub fn finish(&self) -> BjjAffine {
-        self.0
+        (self.0.x, self.0.y)
     }
 }
 
@@ -541,6 +609,14 @@ pub fn bjj_on_curve(p: &BjjAffine) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn xy(p: SyscallPoint256) -> BjjAffine {
+        (p.x, p.y)
+    }
+
+    fn b8p(s: &FrRaw) -> BjjAffine {
+        xy(b8_mul(s))
+    }
 
     const SCALARS: [[u64; 4]; 4] = [
         [1, 0, 0, 0],
@@ -572,7 +648,7 @@ mod tests {
         for expected in [0usize, 4096] {
             let table = BjjFixedBase::new(&B8X_LE, &B8Y_LE, expected);
             for s in &SCALARS {
-                assert_eq!(table.mul(s), scalar_mult(&b8, s));
+                assert_eq!(xy(table.mul(s)), scalar_mult(&b8, s));
             }
         }
     }
@@ -583,7 +659,7 @@ mod tests {
         for w in 0..32 {
             for v in 1..=255usize {
                 let e = &crate::b8_table::B8_WINDOWS[w * 255 + v - 1];
-                assert_eq!(table.windows[w][v - 1], (e[0], e[1]), "w={w} v={v}");
+                assert_eq!(xy(table.points[w * 255 + v - 1]), (e[0], e[1]), "w={w} v={v}");
             }
         }
     }
@@ -592,7 +668,7 @@ mod tests {
     fn b8_mul_matches_double_and_add() {
         let b8 = bjj_generator();
         for s in &SCALARS {
-            assert_eq!(b8_mul(s), scalar_mult(&b8, s));
+            assert_eq!(b8p(s), scalar_mult(&b8, s));
         }
     }
 
@@ -637,7 +713,7 @@ mod tests {
         // Public key = 7 * B8 (small, valid on-curve point in the prime-order
         // subgroup, since B8 generates the subgroup).
         let pk_scalar: FrRaw = [7, 0, 0, 0];
-        let pk = b8_mul(&pk_scalar);
+        let pk = b8p(&pk_scalar);
         assert!(bjj_on_curve(&pk));
 
         // Two entries, num_fields = 3 (so field slots 3..NUM_FIELDS are padded).
@@ -662,12 +738,12 @@ mod tests {
                     // Pick distinct originals: c1 = (10 + e*100 + i)*B8, c2 = (20 + e*100 + i)*B8.
                     let s1: FrRaw = [10 + e * 100 + i as u64, 0, 0, 0];
                     let s2: FrRaw = [20 + e * 100 + i as u64, 0, 0, 0];
-                    let c1 = b8_mul(&s1);
-                    let c2 = b8_mul(&s2);
+                    let c1 = b8p(&s1);
+                    let c2 = b8p(&s2);
                     original[i] = BjjCiphertext { c1x: c1.0, c1y: c1.1, c2x: c2.0, c2y: c2.1 };
 
-                    let delta1 = b8_mul(&chain);
-                    let delta2 = pk_table.mul(&chain);
+                    let delta1 = b8p(&chain);
+                    let delta2 = xy(pk_table.mul(&chain));
                     let new_c1 = affine_add(&canon(&c1), &delta1);
                     let new_c2 = affine_add(&canon(&c2), &delta2);
                     reencrypted[i] = BjjCiphertext {
@@ -735,7 +811,7 @@ mod tests {
         let seed: FrRaw = [0x1234, 0, 0, 0];
         let old_root: FrRaw = [0xabcd, 0, 0, 0];
         let pk_scalar: FrRaw = [11, 0, 0, 0];
-        let pk = b8_mul(&pk_scalar);
+        let pk = b8p(&pk_scalar);
         assert!(bjj_on_curve(&pk));
 
         let num_fields = 3usize;
@@ -754,8 +830,8 @@ mod tests {
                 if i < num_fields {
                     let s1: FrRaw = [500 + e * 50 + i as u64, 0, 0, 0];
                     let s2: FrRaw = [600 + e * 50 + i as u64, 0, 0, 0];
-                    let c1 = b8_mul(&s1);
-                    let c2 = b8_mul(&s2);
+                    let c1 = b8p(&s1);
+                    let c2 = b8p(&s2);
                     b[i * 4] = c1.0; b[i * 4 + 1] = c1.1;
                     b[i * 4 + 2] = c2.0; b[i * 4 + 3] = c2.1;
                 } else {
@@ -781,8 +857,8 @@ mod tests {
                         new[base + 2] = bn254_fr::ZERO; new[base + 3] = bn254_fr::ONE;
                         continue;
                     }
-                    let d1 = b8_mul(&chain);
-                    let d2 = pk_table.mul(&chain);
+                    let d1 = b8p(&chain);
+                    let d2 = xy(pk_table.mul(&chain));
                     let nc1 = affine_add(&canon(&(old[base], old[base + 1])), &d1);
                     let nc2 = affine_add(&canon(&(old[base + 2], old[base + 3])), &d2);
                     new[base] = nc1.0; new[base + 1] = nc1.1;
@@ -857,7 +933,7 @@ mod tests {
         use crate::types::{BjjCiphertext, NUM_FIELDS, ReencEntry};
         let seed: FrRaw = [7, 0, 0, 0];
         let old_root: FrRaw = [11, 0, 0, 0];
-        let pk = b8_mul(&[13, 0, 0, 0]);
+        let pk = b8p(&[13, 0, 0, 0]);
         let identity_ct = BjjCiphertext {
             c1x: bn254_fr::ZERO, c1y: bn254_fr::ONE,
             c2x: bn254_fr::ZERO, c2y: bn254_fr::ONE,
@@ -883,7 +959,7 @@ mod tests {
         use crate::types::{BALLOT_FIELDS, NUM_FIELDS};
         let seed: FrRaw = [1, 0, 0, 0];
         let old_root: FrRaw = [2, 0, 0, 0];
-        let pk = b8_mul(&[3, 0, 0, 0]);
+        let pk = b8p(&[3, 0, 0, 0]);
         let num_fields = 2usize;
 
         // Padded slot 2 carries a non-identity ciphertext.
@@ -893,7 +969,7 @@ mod tests {
             b[i * 4 + 2] = bn254_fr::ZERO; b[i * 4 + 3] = bn254_fr::ONE;
         }
         // Poison field 2 (which is padded because num_fields=2).
-        let p = b8_mul(&[5, 0, 0, 0]);
+        let p = b8p(&[5, 0, 0, 0]);
         b[2 * 4] = p.0; b[2 * 4 + 1] = p.1;
 
         let mut mask = 0u32;
@@ -919,7 +995,8 @@ mod tests {
              pub static B8_WINDOWS: [[[u64; 4]; 2]; 8160] = [\n",
         );
         for w in 0..32 {
-            for (x, y) in &table.windows[w] {
+            for p in &table.points[w * 255..(w + 1) * 255] {
+                let (x, y) = (&p.x, &p.y);
                 writeln!(
                     out,
                     "[[{:#x},{:#x},{:#x},{:#x}],[{:#x},{:#x},{:#x},{:#x}]],",

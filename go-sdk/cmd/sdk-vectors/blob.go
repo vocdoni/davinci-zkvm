@@ -57,6 +57,7 @@ type blobVec struct {
 	Ys              []string     `json:"ys"`
 	Proofs          []string     `json:"proofs"`
 	Digest          string       `json:"digest"`
+	CellsDigest     string       `json:"cells_digest"`
 }
 
 // blobVectors covers V + U = 2, 0, 1 and 3 (mod 4), so every fill of the last
@@ -88,7 +89,7 @@ func blobVectors() []blobVec {
 		tb, err := davinci.BuildTransitionBlobs(c.nf, pidBE, rootBE, vids, updates)
 		must(err)
 		v := blobVec{Nf: c.nf, ProcessID: dec(pid), RootBefore: hex.EncodeToString(root), VoteIDs: vids,
-			Digest: hex.EncodeToString(tb.Digest[:])}
+			Digest: hex.EncodeToString(tb.Digest[:]), CellsDigest: hex.EncodeToString(tb.CellsDigest[:])}
 		for _, u := range updates {
 			v.Updates = append(v.Updates, blobUpdate{u.Key, u.Ballot})
 		}
@@ -143,6 +144,11 @@ func wireProveFixture() json.RawMessage {
 		return davinci.SmtEntry{OldRoot: le(), NewRoot: le(), OldKey: le(), OldValue: le(), IsOld0: 1,
 			NewKey: le(), NewValue: le(), Fnc0: 1, Fnc1: 0, Siblings: sibs(64)}
 	}
+	above := func() string {
+		b := randBytes(32)
+		b[0] |= 0x80
+		return "0x" + hex.EncodeToString(b)
+	}
 	results := entry()
 	var ct [davinci.NumFields]davinci.BjjCiphertext
 	for i := range ct {
@@ -150,10 +156,9 @@ func wireProveFixture() json.RawMessage {
 		ct[i] = davinci.BjjCiphertext{C1: davinci.BjjPoint{X: b[0], Y: b[1]}, C2: davinci.BjjPoint{X: b[2], Y: b[3]}}
 	}
 	req := davinci.ProveRequest{
-		VK:           vk,
-		Proofs:       []json.RawMessage{proof},
-		PublicInputs: [][]string{rp.PublicSignals},
-		Sigs:         []json.RawMessage{sig},
+		VK:     vk,
+		Proofs: []json.RawMessage{proof},
+		Sigs:   []json.RawMessage{sig},
 		State: &davinci.StateTransitionData{
 			VotersCount: 1, OverwrittenCount: 0, OccupiedBefore: 3,
 			ProcessID: le(), OldStateRoot: le(), NewStateRoot: le(),
@@ -165,7 +170,9 @@ func wireProveFixture() json.RawMessage {
 				OverwrittenBallots: [][]string{}, RefreshedBallots: [][]string{teBallotHex(1), teBallotHex(1)},
 			},
 		},
-		CensusProofs: []davinci.CensusProof{{Root: "0x" + hex32(randField()), Leaf: "0x" + hex32(randField()), Index: 5, Siblings: []string{"0x" + hex32(randField()), "0x" + hex32(randField()), "0x" + hex32(randField())}}},
+		// Keccak census values are 256-bit integers: root and siblings above
+		// the BN254 modulus, the leaf below 2^248.
+		CensusProofs: []davinci.CensusProof{{Root: above(), Leaf: "0x00" + hex.EncodeToString(randBytes(31)), Index: 5, Siblings: []string{above(), above(), above()}}},
 		Reencryption: &davinci.ReencryptionData{
 			EncryptionKeyX: "0x" + hex32(randField()), EncryptionKeyY: "0x" + hex32(randField()), Seed: "0x" + hex32(randField()),
 			Entries: []davinci.ReencryptionEntry{{Original: ct, Reencrypted: ct}},

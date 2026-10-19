@@ -95,15 +95,22 @@ pub fn to_be32(a: &BlsFrRaw) -> [u8; 32] {
 #[inline]
 pub fn muladd(a: &BlsFrRaw, b: &BlsFrRaw, c: &BlsFrRaw) -> BlsFrRaw {
     let mut d = [0u64; 4];
+    muladd_into(&mut d, a, b, c);
+    d
+}
+
+/// `out = (a * b + c) mod p`, written in place: no zeroed temporary and no
+/// return copy. `out` cannot alias an input, so loops ping-pong accumulators.
+#[inline(always)]
+pub fn muladd_into(out: &mut BlsFrRaw, a: &BlsFrRaw, b: &BlsFrRaw, c: &BlsFrRaw) {
     let mut params = SyscallArith256ModParams {
         a,
         b,
         c,
         module: &BLS_FR_MOD,
-        d: &mut d,
+        d: out,
     };
     syscall_arith256_mod(&mut params);
-    d
 }
 
 // Derived operations

@@ -122,6 +122,7 @@ curl -s localhost:8080/jobs/3f0c…/snark   # the proof, once done
 | `POST /results` | Prove the decrypted tally of an election. |
 | `POST /fold`, `POST /finalize`, `POST /jobs/import` | Chained mode. |
 | `GET /jobs/{id}` | Job status. |
+| `DELETE /jobs/{id}` | Cancel a queued or running job. |
 | `GET /jobs/{id}/snark` | `program_vk`, `root_c_vadcop_final`, `public_values`, `proof_bytes`: the arguments of `ZiskVerifier.verifySnarkProof`. |
 | `GET /jobs/{id}/publics` | The guest's public outputs. |
 | `GET /health` | Liveness and queue length. |

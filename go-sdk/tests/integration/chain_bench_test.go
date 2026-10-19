@@ -170,7 +170,6 @@ func (c *ballotCache) batchRequest(t *testing.T, a, b int) (*davinci.ProveReques
 	req := &davinci.ProveRequest{
 		VK:           json.RawMessage(c.VK),
 		Proofs:       make([]json.RawMessage, n),
-		PublicInputs: make([][]string, n),
 		Sigs:         make([]json.RawMessage, n),
 		CensusProofs: make([]davinci.CensusProof, n),
 	}
@@ -178,7 +177,6 @@ func (c *ballotCache) batchRequest(t *testing.T, a, b int) (*davinci.ProveReques
 	for i := 0; i < n; i++ {
 		v := c.Voters[a+i]
 		req.Proofs[i] = json.RawMessage(v.Proof)
-		req.PublicInputs[i] = v.PublicInputs
 		req.Sigs[i] = json.RawMessage(v.Sig)
 		req.CensusProofs[i] = v.CensusProof
 		ballot := elgamal.NewBallot(bjjgnark.New())

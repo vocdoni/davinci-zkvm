@@ -23,8 +23,8 @@
 //! rows for software Montgomery multiplication.  The `muladd` primitive also fuses
 //! multiply + add into a single precompile call (used by `mix` and sparse matrix).
 //!
-//! The custom implementation is verified by the end-to-end census proof tests,
-//! which check against the Go lean-imt-go output directly.
+//! Verified against go-iden3-crypto reference values (tests below) and, for
+//! t=13, the davinci-node Chaum-Pedersen vectors (chaum_pedersen.rs).
 
 use crate::bn254_fr::{self, BnFr};
 use crate::types::FrRaw;
@@ -427,78 +427,12 @@ fn exp5(x: &BnFr) -> BnFr {
     bn254_fr::exp5(x)
 }
 
-/// Add-round-key: `state[i] += C[it + i]` for all `i`.
-fn ark(state: &mut [BnFr; T], it: usize) {
-    for i in 0..T {
-        state[i] = bn254_fr::add(&state[i], &POSEIDON_C[it + i]);
-    }
-}
-
-/// Matrix multiply using fused multiply-add: `newState[i] = sum_j( M[j][i] * state[j] )`.
-///
-/// Each `muladd` call computes `(constant * state_element + accumulator) mod p` in
-/// a single precompile row, halving the number of calls versus separate mul + add.
-fn mix(state: &mut [BnFr; T], m: &[[[u64; 4]; T]; T]) {
-    let mut ns = [bn254_fr::ZERO; T];
-    for i in 0..T {
-        for j in 0..T {
-            ns[i] = bn254_fr::muladd(&m[j][i], &state[j], &ns[i]);
-        }
-    }
-    *state = ns;
-}
-
 /// iden3 Poseidon hash of 2 BN254 Fr elements (t=3, nRoundsF=8, nRoundsP=57).
 ///
 /// Compatible with `go-iden3-crypto/poseidon.Hash([]*big.Int{a, b})`.
 /// `initState = 0`.
 pub fn poseidon2(a: &FrRaw, b: &FrRaw) -> FrRaw {
-    let mut state: [BnFr; T] = [bn254_fr::ZERO, *a, *b];
-
-    // Initial ARK at offset 0
-    ark(&mut state, 0);
-
-    // nRoundsF/2 - 1 = 3 full rounds
-    for i in 0..(N_ROUNDS_F / 2 - 1) {
-        for j in 0..T { state[j] = exp5(&state[j]); }
-        ark(&mut state, (i + 1) * T);
-        mix(&mut state, &POSEIDON_M);
-    }
-
-    // One more full round + mix with P
-    for j in 0..T { state[j] = exp5(&state[j]); }
-    ark(&mut state, (N_ROUNDS_F / 2) * T);
-    mix(&mut state, &POSEIDON_P);
-
-    // nRoundsP = 57 partial rounds (sparse matrix S)
-    for i in 0..N_ROUNDS_P {
-        state[0] = exp5(&state[0]);
-        state[0] = bn254_fr::add(&state[0], &POSEIDON_C[(N_ROUNDS_F / 2 + 1) * T + i]);
-
-        // Sparse matrix multiply using S
-        let base = (T * 2 - 1) * i;
-        let mut new0 = bn254_fr::ZERO;
-        for j in 0..T {
-            new0 = bn254_fr::muladd(&POSEIDON_S[base + j], &state[j], &new0);
-        }
-        for k in 1..T {
-            state[k] = bn254_fr::muladd(&POSEIDON_S[base + T + k - 1], &state[0], &state[k]);
-        }
-        state[0] = new0;
-    }
-
-    // nRoundsF/2 - 1 = 3 final full rounds
-    for i in 0..(N_ROUNDS_F / 2 - 1) {
-        for j in 0..T { state[j] = exp5(&state[j]); }
-        ark(&mut state, (N_ROUNDS_F / 2 + 1) * T + N_ROUNDS_P + i * T);
-        mix(&mut state, &POSEIDON_M);
-    }
-
-    // Last full round (no ARK)
-    for j in 0..T { state[j] = exp5(&state[j]); }
-    mix(&mut state, &POSEIDON_M);
-
-    state[0]
+    poseidon_wide::<T>(&[*a, *b], &POSEIDON_C, &POSEIDON_S, &POSEIDON_M, &POSEIDON_P, N_ROUNDS_P)
 }
 
 // t=2 (1 input): nRoundsF=8, nRoundsP=56
@@ -832,94 +766,83 @@ use crate::poseidon13_constants::{POSEIDON13_C, POSEIDON13_M, POSEIDON13_P, POSE
 const T13: usize = 13;
 const N_ROUNDS_P13: usize = 65;
 
-fn ark13(state: &mut [BnFr; T13], it: usize) {
-    for i in 0..T13 {
-        state[i] = bn254_fr::add(&state[i], &POSEIDON13_C[it + i]);
-    }
-}
-
-fn mix13(state: &mut [BnFr; T13], m: &[[[u64; 4]; T13]; T13]) {
-    let mut ns = [bn254_fr::ZERO; T13];
-    for i in 0..T13 {
-        for j in 0..T13 {
-            ns[i] = bn254_fr::muladd(&m[j][i], &state[j], &ns[i]);
-        }
-    }
-    *state = ns;
-}
-
 /// iden3 Poseidon hash of 12 BN254 Fr elements (t=13, nRoundsF=8, nRoundsP=65).
 ///
 /// Compatible with `go-iden3-crypto/poseidon.Hash` on 12 inputs. `initState = 0`.
 pub fn poseidon12(inputs: &[FrRaw; 12]) -> FrRaw {
-    let mut state = [bn254_fr::ZERO; T13];
-    state[1..].copy_from_slice(inputs);
-
-    ark13(&mut state, 0);
-
-    for i in 0..(N_ROUNDS_F / 2 - 1) {
-        for j in 0..T13 { state[j] = exp5(&state[j]); }
-        ark13(&mut state, (i + 1) * T13);
-        mix13(&mut state, &POSEIDON13_M);
-    }
-
-    for j in 0..T13 { state[j] = exp5(&state[j]); }
-    ark13(&mut state, (N_ROUNDS_F / 2) * T13);
-    mix13(&mut state, &POSEIDON13_P);
-
-    for i in 0..N_ROUNDS_P13 {
-        state[0] = exp5(&state[0]);
-        state[0] = bn254_fr::add(&state[0], &POSEIDON13_C[(N_ROUNDS_F / 2 + 1) * T13 + i]);
-
-        let base = (T13 * 2 - 1) * i;
-        let mut new0 = bn254_fr::ZERO;
-        for j in 0..T13 {
-            new0 = bn254_fr::muladd(&POSEIDON13_S[base + j], &state[j], &new0);
-        }
-        for k in 1..T13 {
-            state[k] = bn254_fr::muladd(&POSEIDON13_S[base + T13 + k - 1], &state[0], &state[k]);
-        }
-        state[0] = new0;
-    }
-
-    for i in 0..(N_ROUNDS_F / 2 - 1) {
-        for j in 0..T13 { state[j] = exp5(&state[j]); }
-        ark13(&mut state, (N_ROUNDS_F / 2 + 1) * T13 + N_ROUNDS_P13 + i * T13);
-        mix13(&mut state, &POSEIDON13_M);
-    }
-
-    for j in 0..T13 { state[j] = exp5(&state[j]); }
-    mix13(&mut state, &POSEIDON13_M);
-
-    state[0]
+    poseidon_wide::<T13>(inputs, &POSEIDON13_C, &POSEIDON13_S, &POSEIDON13_M, &POSEIDON13_P, N_ROUNDS_P13)
 }
 
-// -- Generic width (t=17, t=8, t=6) -------------------------------------------
-// Same optimized iden3 algorithm as poseidon12, parameterized over the state
-// width. Used by the ballot inputs hash (MultiPoseidon with 16-wide chunks).
+// -- Generic width ---------------------------------------------------------------
+// The optimized iden3 algorithm parameterized over the state width (all but
+// poseidon1 run through it): poseidon2 (t=3) and the Chaum-Pedersen challenge
+// (t=13).
 
-use crate::poseidon_wide_constants::{
-    POSEIDON17_C, POSEIDON17_M, POSEIDON17_P, POSEIDON17_S,
-    POSEIDON8_C, POSEIDON8_M, POSEIDON8_P, POSEIDON8_S,
-    POSEIDON6_C, POSEIDON6_M, POSEIDON6_P, POSEIDON6_S,
-};
+/// `out = sum_j coef(j) * v_j mod p` with `v_0 = first` and `v_j = src[j]`
+/// after. The running sum ping-pongs between `t0` and `t1` (an in-place call
+/// cannot read the word it writes); the last term lands in `out`. TW >= 2.
+#[inline(always)]
+fn dot_into<'a, const TW: usize>(
+    out: &mut BnFr,
+    coef: impl Fn(usize) -> &'a BnFr,
+    first: &BnFr,
+    src: &[BnFr; TW],
+    t0: &mut BnFr,
+    t1: &mut BnFr,
+) {
+    bn254_fr::muladd_into(t0, coef(0), first, &bn254_fr::ZERO);
+    let mut j = 1;
+    while j + 2 < TW {
+        bn254_fr::muladd_into(t1, coef(j), &src[j], t0);
+        bn254_fr::muladd_into(t0, coef(j + 1), &src[j + 1], t1);
+        j += 2;
+    }
+    if j + 2 == TW {
+        bn254_fr::muladd_into(t1, coef(j), &src[j], t0);
+        bn254_fr::muladd_into(out, coef(j + 1), &src[j + 1], t1);
+    } else {
+        bn254_fr::muladd_into(out, coef(j), &src[j], t0);
+    }
+}
 
-fn ark_w<const TW: usize>(state: &mut [BnFr; TW], c: &[[u64; 4]], it: usize) {
+/// `dst = M^T src`: `dst[i] = sum_j m[j][i] * src[j]`.
+#[inline(always)]
+fn mix_w<const TW: usize>(
+    src: &[BnFr; TW],
+    dst: &mut [BnFr; TW],
+    m: &[[[u64; 4]; TW]; TW],
+    t0: &mut BnFr,
+    t1: &mut BnFr,
+) {
     for i in 0..TW {
-        state[i] = bn254_fr::add(&state[i], &c[it + i]);
+        dot_into(&mut dst[i], |j| &m[j][i], &src[0], src, t0, t1);
     }
 }
 
-fn mix_w<const TW: usize>(state: &mut [BnFr; TW], m: &[[[u64; 4]; TW]; TW]) {
-    let mut ns = [bn254_fr::ZERO; TW];
-    for i in 0..TW {
-        for j in 0..TW {
-            ns[i] = bn254_fr::muladd(&m[j][i], &state[j], &ns[i]);
-        }
+/// `dst[j] = src[j]^5 + k[j]`, or `src[j]^5` for the last round (`k = None`).
+/// The S-box's last multiply carries the round constant: one row, not two.
+#[inline(always)]
+fn sbox_w<const TW: usize>(
+    src: &[BnFr; TW],
+    dst: &mut [BnFr; TW],
+    k: Option<&[[u64; 4]]>,
+    t0: &mut BnFr,
+    t1: &mut BnFr,
+) {
+    for j in 0..TW {
+        bn254_fr::muladd_into(t0, &src[j], &src[j], &bn254_fr::ZERO);
+        bn254_fr::muladd_into(t1, t0, t0, &bn254_fr::ZERO);
+        let kj = match k {
+            Some(k) => &k[j],
+            None => &bn254_fr::ZERO,
+        };
+        bn254_fr::muladd_into(&mut dst[j], t1, &src[j], kj);
     }
-    *state = ns;
 }
 
+/// Every field op writes its destination in place (`muladd_into`): the state
+/// alternates between two buffers, full rounds go `cur -> nxt` (S-box, ARK)
+/// and back (mix), partial rounds go `cur -> nxt` and swap.
 fn poseidon_wide<const TW: usize>(
     inputs: &[FrRaw],
     c: &[[u64; 4]],
@@ -929,184 +852,61 @@ fn poseidon_wide<const TW: usize>(
     n_rounds_p: usize,
 ) -> FrRaw {
     debug_assert_eq!(inputs.len(), TW - 1);
-    let mut state = [bn254_fr::ZERO; TW];
-    state[1..].copy_from_slice(inputs);
+    let mut a = [bn254_fr::ZERO; TW];
+    let mut b = [bn254_fr::ZERO; TW];
+    let (mut t0, mut t1, mut y0) = (bn254_fr::ZERO, bn254_fr::ZERO, bn254_fr::ZERO);
+    let (mut cur, mut nxt) = (&mut a, &mut b);
 
-    ark_w(&mut state, c, 0);
-
-    for i in 0..(N_ROUNDS_F / 2 - 1) {
-        for j in 0..TW { state[j] = exp5(&state[j]); }
-        ark_w(&mut state, c, (i + 1) * TW);
-        mix_w(&mut state, m);
+    // Initial ARK over [0, inputs..].
+    bn254_fr::muladd_into(&mut cur[0], &bn254_fr::ZERO, &bn254_fr::ONE, &c[0]);
+    for i in 1..TW {
+        bn254_fr::muladd_into(&mut cur[i], &inputs[i - 1], &bn254_fr::ONE, &c[i]);
     }
 
-    for j in 0..TW { state[j] = exp5(&state[j]); }
-    ark_w(&mut state, c, (N_ROUNDS_F / 2) * TW);
-    mix_w(&mut state, p);
+    for i in 0..(N_ROUNDS_F / 2 - 1) {
+        sbox_w(cur, nxt, Some(&c[(i + 1) * TW..]), &mut t0, &mut t1);
+        mix_w(nxt, cur, m, &mut t0, &mut t1);
+    }
 
+    sbox_w(cur, nxt, Some(&c[(N_ROUNDS_F / 2) * TW..]), &mut t0, &mut t1);
+    mix_w(nxt, cur, p, &mut t0, &mut t1);
+
+    // Partial rounds, sparse matrix S: nxt[0] = sum_j S[j] * cur'[j] and
+    // nxt[k] = cur[k] + S[TW+k-1] * cur'[0], with cur' = cur after the S-box.
     for i in 0..n_rounds_p {
-        state[0] = exp5(&state[0]);
-        state[0] = bn254_fr::add(&state[0], &c[(N_ROUNDS_F / 2 + 1) * TW + i]);
-
+        let k = &c[(N_ROUNDS_F / 2 + 1) * TW + i];
+        bn254_fr::muladd_into(&mut t0, &cur[0], &cur[0], &bn254_fr::ZERO);
+        bn254_fr::muladd_into(&mut t1, &t0, &t0, &bn254_fr::ZERO);
+        bn254_fr::muladd_into(&mut y0, &t1, &cur[0], k);
         let base = (TW * 2 - 1) * i;
-        let mut new0 = bn254_fr::ZERO;
-        for j in 0..TW {
-            new0 = bn254_fr::muladd(&s[base + j], &state[j], &new0);
-        }
+        dot_into(&mut nxt[0], |j| &s[base + j], &y0, cur, &mut t0, &mut t1);
         for k in 1..TW {
-            state[k] = bn254_fr::muladd(&s[base + TW + k - 1], &state[0], &state[k]);
+            bn254_fr::muladd_into(&mut nxt[k], &s[base + TW + k - 1], &y0, &cur[k]);
         }
-        state[0] = new0;
+        core::mem::swap(&mut cur, &mut nxt);
     }
 
     for i in 0..(N_ROUNDS_F / 2 - 1) {
-        for j in 0..TW { state[j] = exp5(&state[j]); }
-        ark_w(&mut state, c, (N_ROUNDS_F / 2 + 1) * TW + n_rounds_p + i * TW);
-        mix_w(&mut state, m);
+        let off = (N_ROUNDS_F / 2 + 1) * TW + n_rounds_p + i * TW;
+        sbox_w(cur, nxt, Some(&c[off..]), &mut t0, &mut t1);
+        mix_w(nxt, cur, m, &mut t0, &mut t1);
     }
 
-    for j in 0..TW { state[j] = exp5(&state[j]); }
-    mix_w(&mut state, m);
+    // Last full round (no ARK)
+    sbox_w(cur, nxt, None, &mut t0, &mut t1);
+    mix_w(nxt, cur, m, &mut t0, &mut t1);
 
-    state[0]
-}
-
-/// iden3 Poseidon hash of 16 BN254 Fr elements (t=17, nRoundsF=8, nRoundsP=68).
-pub fn poseidon16(inputs: &[FrRaw; 16]) -> FrRaw {
-    poseidon_wide::<17>(inputs, &POSEIDON17_C, &POSEIDON17_S, &POSEIDON17_M, &POSEIDON17_P, 68)
-}
-
-/// iden3 Poseidon hash of 7 BN254 Fr elements (t=8, nRoundsF=8, nRoundsP=64).
-pub fn poseidon7(inputs: &[FrRaw; 7]) -> FrRaw {
-    poseidon_wide::<8>(inputs, &POSEIDON8_C, &POSEIDON8_S, &POSEIDON8_M, &POSEIDON8_P, 64)
-}
-
-/// iden3 Poseidon hash of 5 BN254 Fr elements (t=6, nRoundsF=8, nRoundsP=60).
-pub fn poseidon5(inputs: &[FrRaw; 5]) -> FrRaw {
-    poseidon_wide::<6>(inputs, &POSEIDON6_C, &POSEIDON6_S, &POSEIDON6_M, &POSEIDON6_P, 60)
-}
-
-/// poseidon16 of the pattern [0,1,0,1,...]: the value of any 16-input chunk
-/// whose ballot coords all come from TE-identity-padded fields ((0,1),(0,1)).
-/// Chunks 1-3 of the multihash start on an x coord, so all three collapse to
-/// this one constant. Pinned as a literal (guarded by
-/// `padded_chunk_constant_matches`) so fully-padded chunks skip the
-/// permutation entirely.
-const PADDED_CHUNK_HASH: FrRaw =
-    [0x680ddcafcc64f35b, 0x0c7e3629ade546ad, 0x62d4d7bcbe417f2f, 0x163bca3fea04438d];
-
-/// davinci-node `BallotInputsHash`: the third public signal of the ballot
-/// proof circuit. Poseidon multihash (16-wide chunks, matching
-/// `spec/hash.PoseidonMultiHash`) over
-/// `[processID, ballotModePacked, encKeyX_TE, encKeyY_TE, address, voteID,
-///   64 ballot ciphertext TE coords (c1x,c1y,c2x,c2y per field), weight]`
-/// = 71 inputs -> 4x poseidon16 + 1x poseidon7 -> poseidon5.
-///
-/// Chunk i (1..4) covers ballot fields starting at 4i-2; when
-/// `num_fields <= 4i-2` every coord in it belongs to an identity-padded
-/// field, so `PADDED_CHUNK_HASH` substitutes for the permutation. Sound only
-/// because `verify_reencryption` asserts padded slots of the original ballot
-/// are identity — a non-identity padded slot trips FAIL_REENC and the batch
-/// fails regardless of this hash.
-pub fn ballot_inputs_hash(
-    process_id: &FrRaw,
-    ballot_mode: &FrRaw,
-    enc_x: &FrRaw,
-    enc_y: &FrRaw,
-    address: &FrRaw,
-    vote_id: &FrRaw,
-    ballot: &[FrRaw; 64],
-    weight: &FrRaw,
-    num_fields: usize,
-) -> FrRaw {
-    let mut inputs = [bn254_fr::ZERO; 71];
-    inputs[0] = *process_id;
-    inputs[1] = *ballot_mode;
-    inputs[2] = *enc_x;
-    inputs[3] = *enc_y;
-    inputs[4] = *address;
-    inputs[5] = *vote_id;
-    inputs[6..70].copy_from_slice(ballot);
-    inputs[70] = *weight;
-
-    let mut inter = [bn254_fr::ZERO; 5];
-    inter[0] = poseidon16(inputs[0..16].try_into().unwrap());
-    for i in 1..4 {
-        inter[i] = if num_fields <= 4 * i - 2 {
-            PADDED_CHUNK_HASH
-        } else {
-            poseidon16(inputs[i * 16..(i + 1) * 16].try_into().unwrap())
-        };
-    }
-    inter[4] = poseidon7(inputs[64..71].try_into().unwrap());
-    poseidon5(&inter)
+    cur[0]
 }
 
 #[cfg(test)]
-mod wide_tests {
+mod tests {
     use super::*;
 
-    fn seq(n: usize) -> std::vec::Vec<FrRaw> {
-        (1..=n as u64).map(|v| [v, 0, 0, 0]).collect()
-    }
-
-    // Reference values from go-iden3-crypto v0.0.17 poseidon.Hash(1..n).
+    // Reference value from go-iden3-crypto v0.0.17 poseidon.Hash(1, 2).
     #[test]
-    fn poseidon16_matches_reference() {
-        let expected: FrRaw = [0xde2ffb96b919b765, 0xae08afd7f1f2ec06, 0x8281a48099fff949, 0x16159a551cbb6610];
-        assert_eq!(poseidon16(seq(16).as_slice().try_into().unwrap()), expected);
-    }
-
-    #[test]
-    fn poseidon7_matches_reference() {
-        let expected: FrRaw = [0x2e9df45b4921c318, 0x4a9a85fcfc6533ec, 0xebb9ada49abdbc37, 0x1c2f3482dbb140c4];
-        assert_eq!(poseidon7(seq(7).as_slice().try_into().unwrap()), expected);
-    }
-
-    #[test]
-    fn poseidon5_matches_reference() {
-        let expected: FrRaw = [0x18125f8feeb123c0, 0x8b2174d305a316c9, 0x15224c0b15a49d59, 0x0dab9449e4a1398a];
-        assert_eq!(poseidon5(seq(5).as_slice().try_into().unwrap()), expected);
-    }
-
-    // PoseidonMultiHash(1..71) from go-iden3-crypto (16-wide chunking).
-    #[test]
-    fn ballot_inputs_hash_matches_multihash() {
-        let all = seq(71);
-        let ballot: [FrRaw; 64] = all[6..70].try_into().unwrap();
-        let h = ballot_inputs_hash(&all[0], &all[1], &all[2], &all[3], &all[4], &all[5], &ballot, &all[70], 16);
-        let expected: FrRaw = [0x766291e2382e3ef5, 0x2c3d2b8c7b372e69, 0x0fdddd04802ddbe4, 0x057bfc2b042c3647];
-        assert_eq!(h, expected);
-    }
-
-    #[test]
-    fn padded_chunk_constant_matches() {
-        let mut pat = [bn254_fr::ZERO; 16];
-        for i in (1..16).step_by(2) {
-            pat[i] = bn254_fr::ONE;
-        }
-        assert_eq!(PADDED_CHUNK_HASH, poseidon16(&pat), "PADDED_CHUNK_HASH literal is stale");
-    }
-
-    // Skip path == full path on an identity-padded ballot, for every nf.
-    #[test]
-    fn ballot_inputs_hash_skip_equals_full() {
-        let all = seq(71);
-        for nf in 1..=16usize {
-            let mut ballot = [bn254_fr::ZERO; 64];
-            for f in 0..16 {
-                if f < nf {
-                    for c in 0..4 {
-                        ballot[f * 4 + c] = all[6 + f * 4 + c];
-                    }
-                } else {
-                    ballot[f * 4 + 1] = bn254_fr::ONE;
-                    ballot[f * 4 + 3] = bn254_fr::ONE;
-                }
-            }
-            let skip = ballot_inputs_hash(&all[0], &all[1], &all[2], &all[3], &all[4], &all[5], &ballot, &all[70], nf);
-            let full = ballot_inputs_hash(&all[0], &all[1], &all[2], &all[3], &all[4], &all[5], &ballot, &all[70], 16);
-            assert_eq!(skip, full, "nf={nf}");
-        }
+    fn poseidon2_matches_reference() {
+        let expected: FrRaw = [0x9e19607a4417189a, 0x2a3617f274324551, 0x3df64c6b9662e9cf, 0x115cc0f5e7d69041];
+        assert_eq!(poseidon2(&[1, 0, 0, 0], &[2, 0, 0, 0]), expected);
     }
 }

@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use davinci_zkvm_input_gen::{EcdsaSig, SnarkJsProof, SnarkJsVk, NUM_FIELDS};
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// Accept JSON `null` for an optional list (Go encodes a nil slice as null).
@@ -79,7 +80,8 @@ pub struct BallotProofsJson {
     pub refreshed_ballots: Vec<Vec<String>>,
 }
 
-/// One lean-IMT Poseidon census membership proof in JSON format.
+/// One Keccak lean-IMT census membership proof in JSON format. Root, leaf
+/// and siblings are 32-byte big-endian hex, full 256-bit values.
 #[derive(Debug, Deserialize, Clone)]
 pub struct CensusProofJson {
     /// 32-byte big-endian hex: census tree root
@@ -173,16 +175,14 @@ pub struct CspDataJson {
 pub struct ProveRequest {
     /// snarkjs verification key
     pub vk: SnarkJsVk,
-    /// array of snarkjs Groth16 proofs
+    /// array of snarkjs Groth16 proofs; the guest derives their public inputs
     pub proofs: Vec<SnarkJsProof>,
-    /// public inputs for each proof (same length as proofs)
-    pub public_inputs: Vec<Vec<String>>,
     /// ECDSA signatures: one per proof, in same order. Mandatory.
     pub sigs: Vec<EcdsaSig>,
     /// Full state-transition data for the DAVINCI protocol.
     #[serde(default)]
     pub state: Option<StateTransitionJson>,
-    /// Census lean-IMT Poseidon membership proofs (one per voter).
+    /// Census Keccak lean-IMT membership proofs (one per voter).
     #[serde(default)]
     pub census_proofs: Vec<CensusProofJson>,
     /// CSP ECDSA census data (used when censusOrigin == 4).
@@ -322,6 +322,9 @@ pub struct Job {
     pub elapsed_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Fired by `DELETE /jobs/:id`.
+    #[serde(skip)]
+    pub cancel: CancellationToken,
 }
 
 impl Job {
@@ -336,6 +339,7 @@ impl Job {
             finished_at: None,
             elapsed_ms: None,
             error: None,
+            cancel: CancellationToken::new(),
         }
     }
 }

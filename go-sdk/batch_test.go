@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 )
@@ -36,18 +37,15 @@ func TestProveBatchToRequest(t *testing.T) {
 		Address: big.NewInt(0xDEAD),
 	}
 
-	pubInputs := NewPublicInput(big.NewInt(0xDEAD), big.NewInt(42), big.NewInt(999))
-
 	census := CensusProofFromBigInts(big.NewInt(100), big.NewInt(200), 0, []*big.Int{big.NewInt(300)})
 
 	batch := &ProveBatch{
 		VerificationKey: vk,
 		Voters: []VoterBallot{
 			{
-				Proof:        proof,
-				PublicInputs: pubInputs,
-				Signature:    sig,
-				Census:       census,
+				Proof:     proof,
+				Signature: sig,
+				Census:    census,
 			},
 		},
 	}
@@ -66,9 +64,6 @@ func TestProveBatchToRequest(t *testing.T) {
 	if len(req.Proofs) != 1 {
 		t.Fatalf("expected 1 proof, got %d", len(req.Proofs))
 	}
-	if len(req.PublicInputs) != 1 {
-		t.Fatalf("expected 1 public input set, got %d", len(req.PublicInputs))
-	}
 	if len(req.Sigs) != 1 {
 		t.Fatalf("expected 1 signature, got %d", len(req.Sigs))
 	}
@@ -76,12 +71,13 @@ func TestProveBatchToRequest(t *testing.T) {
 		t.Fatalf("expected 1 census proof, got %d", len(req.CensusProofs))
 	}
 
-	// Verify public inputs are decimal strings
-	if req.PublicInputs[0][0] != "57005" { // 0xDEAD
-		t.Errorf("expected public input 0 = '57005', got %q", req.PublicInputs[0][0])
+	// The guest derives the public inputs: the body carries none.
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if req.PublicInputs[0][1] != "42" {
-		t.Errorf("expected public input 1 = '42', got %q", req.PublicInputs[0][1])
+	if strings.Contains(string(body), "public_inputs") {
+		t.Error("request body carries public_inputs")
 	}
 
 	// No re-encryption → field should be nil
@@ -95,8 +91,7 @@ func TestProveBatchWithReencryption(t *testing.T) {
 		VerificationKeyJSON: json.RawMessage(`{"protocol":"groth16"}`),
 		Voters: []VoterBallot{
 			{
-				ProofJSON:    json.RawMessage(`{"pi_a":["1","2","1"]}`),
-				PublicInputs: NewPublicInput(big.NewInt(1)),
+				ProofJSON: json.RawMessage(`{"pi_a":["1","2","1"]}`),
 				Signature: &EcdsaSignature{
 					R: big.NewInt(1), S: big.NewInt(2),
 					PubKeyX: big.NewInt(3), PubKeyY: big.NewInt(4),
@@ -150,8 +145,7 @@ func TestProveBatchValidation(t *testing.T) {
 			batch: ProveBatch{
 				VerificationKeyJSON: json.RawMessage(`{}`),
 				Voters: []VoterBallot{{
-					ProofJSON:    json.RawMessage(`{}`),
-					PublicInputs: NewPublicInput(big.NewInt(1)),
+					ProofJSON: json.RawMessage(`{}`),
 					Signature: &EcdsaSignature{
 						R: big.NewInt(1), S: big.NewInt(2),
 						PubKeyX: big.NewInt(3), PubKeyY: big.NewInt(4),
@@ -168,8 +162,7 @@ func TestProveBatchValidation(t *testing.T) {
 			batch: ProveBatch{
 				VerificationKeyJSON: json.RawMessage(`{}`),
 				Voters: []VoterBallot{{
-					ProofJSON:    json.RawMessage(`{}`),
-					PublicInputs: NewPublicInput(big.NewInt(1)),
+					ProofJSON: json.RawMessage(`{}`),
 					Signature: &EcdsaSignature{
 						R: big.NewInt(1), S: big.NewInt(2),
 						PubKeyX: big.NewInt(3), PubKeyY: big.NewInt(4),
@@ -257,20 +250,6 @@ func TestNewBallotProofData(t *testing.T) {
 	}
 }
 
-func TestNewPublicInput(t *testing.T) {
-	pi := NewPublicInput(big.NewInt(0xDEAD), big.NewInt(42), big.NewInt(999))
-	strs := pi.toStrings()
-	if len(strs) != 3 {
-		t.Fatalf("expected 3 values, got %d", len(strs))
-	}
-	if strs[0] != "57005" {
-		t.Errorf("expected 57005, got %s", strs[0])
-	}
-	if strs[1] != "42" {
-		t.Errorf("expected 42, got %s", strs[1])
-	}
-}
-
 func TestProveContextCancellation(t *testing.T) {
 	// Verify that Prove respects context cancellation immediately on build error
 	c := NewClient("http://localhost:0")
@@ -280,8 +259,7 @@ func TestProveContextCancellation(t *testing.T) {
 	_, err := c.Prove(ctx, &ProveBatch{
 		VerificationKeyJSON: json.RawMessage(`{}`),
 		Voters: []VoterBallot{{
-			ProofJSON:    json.RawMessage(`{}`),
-			PublicInputs: NewPublicInput(big.NewInt(1)),
+			ProofJSON: json.RawMessage(`{}`),
 			Signature: &EcdsaSignature{
 				R: big.NewInt(1), S: big.NewInt(2),
 				PubKeyX: big.NewInt(3), PubKeyY: big.NewInt(4),
@@ -299,11 +277,10 @@ func TestProveContextCancellation(t *testing.T) {
 func TestProveBatchRoundTrip(t *testing.T) {
 	// Verify that ProveBatch → ProveRequest → JSON is valid
 	batch := &ProveBatch{
-		VerificationKeyJSON: json.RawMessage(`{"protocol":"groth16","curve":"bn128","nPublic":3}`),
+		VerificationKeyJSON: json.RawMessage(`{"protocol":"groth16","curve":"bn128","nPublic":71}`),
 		Voters: []VoterBallot{
 			{
-				ProofJSON:    json.RawMessage(`{"pi_a":["1","2","1"],"pi_b":[["3","4"],["5","6"],["1","0"]],"pi_c":["7","8","1"],"protocol":"groth16"}`),
-				PublicInputs: NewPublicInput(big.NewInt(100), big.NewInt(200)),
+				ProofJSON: json.RawMessage(`{"pi_a":["1","2","1"],"pi_b":[["3","4"],["5","6"],["1","0"]],"pi_c":["7","8","1"],"protocol":"groth16"}`),
 				Signature: &EcdsaSignature{
 					R: big.NewInt(1), S: big.NewInt(2),
 					PubKeyX: big.NewInt(3), PubKeyY: big.NewInt(4),
@@ -359,8 +336,7 @@ func TestProveTimeout(t *testing.T) {
 	_, err := c.Prove(ctx, &ProveBatch{
 		VerificationKeyJSON: json.RawMessage(`{}`),
 		Voters: []VoterBallot{{
-			ProofJSON:    json.RawMessage(`{}`),
-			PublicInputs: NewPublicInput(big.NewInt(1)),
+			ProofJSON: json.RawMessage(`{}`),
 			Signature: &EcdsaSignature{
 				R: big.NewInt(1), S: big.NewInt(2),
 				PubKeyX: big.NewInt(3), PubKeyY: big.NewInt(4),

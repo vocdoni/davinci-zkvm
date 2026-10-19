@@ -8,7 +8,6 @@ package integration
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -115,11 +114,7 @@ func steadyInput(t *testing.T, e *Election, voters []*Voter, results []*BallotRe
 		t.Fatal(err)
 	}
 	for i, res := range results {
-		pub, err := json.Marshal(res.PublicInputs)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for name, b := range map[string][]byte{"proof": res.ProofJSON, "public": pub, "sig": res.SigJSON} {
+		for name, b := range map[string][]byte{"proof": res.ProofJSON, "sig": res.SigJSON} {
 			if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("%s_%d.json", name, i+1)), b, 0o600); err != nil {
 				t.Fatal(err)
 			}

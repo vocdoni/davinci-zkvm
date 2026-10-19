@@ -5,8 +5,8 @@
 
 use crate::Error;
 
-/// Registers the batch guest commits (46; the rest are zero padding).
-pub const BATCH_REGS: usize = 46;
+/// Registers the batch guest commits (54; the rest are zero padding).
+pub const BATCH_REGS: usize = 54;
 /// Registers the results guest commits.
 pub const RESULTS_REGS: usize = 43;
 
@@ -31,6 +31,8 @@ pub struct BatchPublics {
     pub nproofs: u32,
     pub n_public: u32,
     pub log_n: u32,
+    /// Raw `D`, the cell-stream digest every evaluation point is derived from.
+    pub cells_digest: [u8; 32],
 }
 
 fn regs_from_u32_view(b: &[u8], min: usize) -> Result<Vec<u32>, Error> {
@@ -99,6 +101,7 @@ impl BatchPublics {
             nproofs: r[43],
             n_public: r[44],
             log_n: r[45],
+            cells_digest: bytes32(r, 46),
         }
     }
 

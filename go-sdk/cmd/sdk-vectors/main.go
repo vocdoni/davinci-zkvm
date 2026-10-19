@@ -8,11 +8,10 @@
 // It also writes the iden3 Poseidon constants for widths 1..16 to
 // ../rust-sdk/assets/poseidon_constants.bin (see -constants).
 //
-// The Groth16 fixtures (real_proof.json, real_proof_v1.json) are not
-// reproducible: rapidsnark randomizes every proof. A default run keeps them
-// and reads real_proof.json back for wire_prove.json; pass -proofs to
-// regenerate them, which also changes wire_prove.json. Every other file is
-// byte-identical across runs.
+// The Groth16 fixture (real_proof.json) is not reproducible: rapidsnark
+// randomizes every proof. A default run keeps it and reads it back for
+// wire_prove.json; pass -proofs to regenerate it, which also changes
+// wire_prove.json. Every other file is byte-identical across runs.
 package main
 
 import (
@@ -68,7 +67,6 @@ func main() {
 		saved := rng
 		rng = mrand.New(mrand.NewSource(20260927))
 		write("real_proof.json", realProofVector())
-		write("real_proof_v1.json", realProofV1Vector())
 		rng = saved
 	}
 	blobMain()

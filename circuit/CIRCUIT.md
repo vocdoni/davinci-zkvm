@@ -84,7 +84,7 @@ the all-zero encoding.
 |-------|-------------|-----------|------------------------------------------|
 | 1     | `GROTH16B`  | `io.rs`   | Header + VK + proofs + ECDSA signatures  |
 | 2     | `STATETX!`  | `io.rs`   | Full state-transition data               |
-| 3     | `CENSUS!!`  | `io.rs`   | Census lean-IMT Poseidon proofs (censusOrigin ≠ 4) |
+| 3     | `CENSUS!!`  | `io.rs`   | Census Keccak lean-IMT proofs (censusOrigin ≠ 4) |
 | 3'    | `CSPBLK!!`  | `io.rs`   | CSP ECDSA census proofs (censusOrigin 4) |
 | 4     | `REENCBLK`  | `io.rs`   | Election key, batch-scoped seed, re-encryption entries |
 | 5     | `KZGBLK!!`  | `io.rs`   | DA blob commitments (guest rebuilds cells) |
@@ -105,21 +105,22 @@ offset  size   field
 0       8      magic ("GROTH16B" LE)
 8       8      log_n (u64; the host writes floor(log₂ nproofs); echoed, not checked)
 16      8      nproofs (u64, 1..=MAX_BATCH_SIZE = 1024)
-24      8      n_public (u64, ≤ 256; 3 for the ballot circuit)
+24      8      n_public (u64, must be 71: the ballot circuit's public inputs)
 
 VK      alpha_g1 (G1) ‖ beta_g2 (G2) ‖ gamma_g2 (G2) ‖ delta_g2 (G2)
         gamma_abc_len (u64, must equal n_public + 1)
         gamma_abc[gamma_abc_len] (G1 each)
 Proofs  nproofs (u64, repeated, must equal the header value)
-        nproofs × ( A (G1) ‖ B (G2) ‖ C (G1) ‖ pubs[n_public] (Fr each) )
+        nproofs × ( A (G1) ‖ B (G2) ‖ C (G1) )
 ECDSA   nproofs × ( r (Fr) ‖ s (Fr) ‖ recid (u64, low byte used) )
 ```
 
-The block carries no batch-verification hints: the guest computes the whole
-random linear combination itself (§4). `nproofs` must equal `n_voters` (6.8).
-The VK hash, `SHA-256` over the VK bytes from `alpha_g1` through the last
-`gamma_abc` point (read as a big-endian integer), is bound to config key 0x07
-(6.7).
+The block carries no public inputs and no batch-verification hints: the
+guest derives every proof's 71 public inputs from the other blocks and
+computes the whole random linear combination itself (§4). `nproofs` must
+equal `n_voters` (6.7). The VK hash, `SHA-256` over the VK bytes from
+`alpha_g1` through the last `gamma_abc` point (read as a big-endian integer),
+is bound to config key 0x07 (6.6).
 
 ### STATETX Block
 
@@ -180,8 +181,11 @@ offset  size   field
 ──────  ────   ─────
 0       8      magic ("CENSUS!!" LE)
 8       8      n_proofs (u64, ≤ 4096)
-then n_proofs × ( root (Fr) ‖ leaf (Fr) ‖ index (u64) ‖ n_siblings (u64, ≤ 64) ‖ siblings (Fr each) )
+then n_proofs × ( root ‖ leaf ‖ index (u64) ‖ n_siblings (u64, ≤ 64) ‖ siblings )
 ```
+
+`root`, `leaf` and each sibling are 256-bit integers in four LE limbs, laid out
+like an `Fr` but never reduced: Keccak nodes are uniform 256-bit values.
 
 The CSPBLK layout is in §6 (3B).
 
@@ -220,7 +224,7 @@ the reconstructed cells need, sets `FAIL_KZG`.
 ### Parse failures
 
 `FAIL_PARSE` (bit 31) covers: a wrong Groth16 magic, `nproofs` of 0 or above
-`MAX_BATCH_SIZE`, `n_public > 256`, `gamma_abc_len ≠ n_public + 1`, a repeated
+`MAX_BATCH_SIZE`, `n_public ≠ 71`, `gamma_abc_len ≠ n_public + 1`, a repeated
 proof count different from the header, truncated data, any count above its
 cap, `n_levels` above 64, a process-proof count other than 0 or 5, and
 trailing bytes. Phase 1 is skipped when `FAIL_PARSE` is set.
@@ -229,12 +233,12 @@ trailing bytes. Phase 1 is skipped when `FAIL_PARSE` is set.
 
 ## 3. Output Registers
 
-The circuit writes 46 `u32` output registers with `commit_slice` (184 LE
-bytes). A ZisK proof carries 64 u32 publics, so publics 46..63 are zero; the
+The circuit writes 54 `u32` output registers with `commit_slice` (216 LE
+bytes). A ZisK proof carries 64 u32 publics, so publics 54..63 are zero; the
 on-chain `publicValues` is the same 64 values as u64 LE words (512 B).
 Registers 2–27 mirror the public inputs of davinci-node's state-transition
-circuit. The settlement contract reads registers 0–36 and 42; the fold guest
-reads 0–27 and 42; 40, 41 and 43–45 are diagnostics.
+circuit. The settlement contract reads registers 0–36, 42 and 46–53; the fold
+guest reads 0–27 and 42; 40, 41 and 43–45 are diagnostics.
 
 ```
 Register    Name                    Encoding
@@ -247,7 +251,8 @@ Register    Name                    Encoding
 [18]        VotersCount             STATETX n_voters
 [19]        OverwrittenVotesCount   STATETX n_overwritten
 
-[20..27]    CensusRoot              lean-IMT root of census proof 0, or the
+[20..27]    CensusRoot              Keccak lean-IMT root of census proof 0
+                                    (full 256 bits), or the
                                     recovered CSP address as uint160;
                                     FrRaw → 8 × u32 LE
 [28..35]    BlobsDigest             SHA-256 over ordered (commitment, y) pairs;
@@ -264,8 +269,13 @@ Register    Name                    Encoding
                                      guest and the settlement contract check it
                                      equals total_voters - total_overwrites)
 [43]        nproofs                 header nproofs (equals n_voters when overall_ok = 1)
-[44]        n_public                header n_public
+[44]        n_public                header n_public (71)
 [45]        log_n                   header log_n, echoed unchecked
+
+[46..53]    CellsDigest             D, SHA-256 over the DA cell stream (§8);
+                                    reg[46+i] = u32_le(D[4i..4i+4]). Seeds
+                                    every blob's evaluation point. Zero
+                                    without a KZG block and on FAIL_KZG.
 ```
 
 Without a STATETX block, registers 2–19 and 42 are zero. The census root is
@@ -287,15 +297,42 @@ registers. For limb `i` (0–3): `reg[base + 2i] = limb[i] & 0xFFFFFFFF`,
 
 Verify that each voter correctly encrypted their ballot using the election's
 public key. The ballot proof is a Groth16 BN254 zero-knowledge proof generated
-by the Circom `BallotCircuit`. Up to `MAX_BATCH_SIZE = 1024` proofs are
-verified in a single multi-pairing using Fiat-Shamir randomization. The phase
-is skipped (`batch_ok = 0`, no bit of its own) when `FAIL_PARSE` is set.
+by the Circom `BallotProof(16)` circuit. Up to `MAX_BATCH_SIZE = 1024` proofs
+are verified in a single multi-pairing using Fiat-Shamir randomization,
+against public inputs the guest derives itself. The phase is skipped
+(`batch_ok = 0`, no bit of its own) when `FAIL_PARSE` is set or the public
+inputs cannot be derived (1.0).
+
+### Public inputs
+
+**Module:** `publics.rs`
+
+The input carries no public inputs. Proof `i` is verified against these 71
+values, in the circuit's declaration order, each already bound to the state
+root, the census or the re-encryption it feeds:
+
+| j | Input | Source |
+|---|-------|--------|
+| 0 | address | Merkle: bits 88..247 of `census_proofs[i].leaf`; CSP: `csp.entries[i].voter_address` |
+| 1 | vote_id | `state.vote_id_chain[i].new_key[0]` (4.1.2 pins the upper limbs to zero) |
+| 2 | process_id | `state.process_id` (4.2.P5 pins it to config key 0x00) |
+| 3 | packed_ballot_mode | `state.process_proofs[1].new_value` (config key 0x02) |
+| 4, 5 | encryption key x, y | the REENCBLK key, bound to config key 0x03 (6.3) |
+| 6 | weight | Merkle: bits 0..87 of the leaf; CSP: `csp.entries[i].weight` |
+| 7 + 4f .. 10 + 4f | c1.x, c1.y, c2.x, c2.y of field `f` | `reenc_entries[i].original[f]` for `f < num_fields`; the TE identity `(0, 1), (0, 1)` above |
+
+Above `num_fields` the circuit leaves the cipherfields unconstrained and every
+SDK fills them with the identity; 4.3.4 asserts the originals there are the
+identity, so the constant is exact. Inputs 2..5 and the padded coordinates are
+the same for every proof of the batch.
 
 ### Constraint checks
 
 | # | Check | Fails on |
 |---|-------|----------|
+| 1.0 | Every source of the public inputs exists for every proof: STATETX with 5 process proofs, a REENCBLK key, one vote-id transition, one re-encryption entry and one census proof or CSP entry per proof. The live original coordinates and the CSP weights are canonical (`< r`): the pairing would see their residue while the transcript hashes the raw limbs | FAIL_BINDING |
 | 1.1 | VK: α and every γ_abc[j] are on BN254 G1 and not the identity; β, γ, δ are on the G2 twist, in the prime-order subgroup and not the identity | FAIL_CURVE |
+| 1.1b | VK: `δ ≠ γ`. A VK without a phase-2 contribution lets anyone who knows the phase-1 transcript forge proofs | FAIL_CURVE |
 | 1.2 | Each proof point A_i is on BN254 G1 and not the identity (G1 has cofactor 1, so on-curve means in-group) | FAIL_CURVE |
 | 1.3 | Each proof point B_i is on the BN254 G2 twist. No subgroup check; the code's argument is that the transcript fixes B_i before the random coefficients exist | FAIL_CURVE |
 | 1.4 | Each proof point C_i is on BN254 G1 and not the identity | FAIL_CURVE |
@@ -304,17 +341,18 @@ is skipped (`batch_ok = 0`, no bit of its own) when `FAIL_PARSE` is set.
 ### Fiat-Shamir transcript
 
 ```
-transcript = "groth16-batch-v2" ‖ A_0 ‖ B_0 ‖ C_0 ‖ pubs_0 ‖ A_1 ‖ B_1 ‖ C_1 ‖ pubs_1 ‖ ...
-digest     = SHA-256(transcript)
+transcript = "groth16-batch-v3" ‖ A_0 ‖ B_0 ‖ C_0 ‖ pubs_0 ‖ A_1 ‖ B_1 ‖ C_1 ‖ pubs_1 ‖ ...
+digest     = SHA-256(transcript)                       hashed as it is built, never buffered
 r_0        = 1
 r_i        = lo128(SHA-256(digest ‖ le64(i)))          i ≥ 1
 ```
 
-Curve points and public inputs enter as their raw `[u64; N]` LE limbs (64 B
-per G1, 128 B per G2, 32 B per input). `lo128` reads bytes 0..16 of the hash
-as two LE u64 limbs; the all-zero value maps to 1. The coefficients are
-independent 128-bit values (small-exponents batch test, 2⁻¹²⁸ soundness
-error). The VK is not in the transcript; it is pinned per process by 6.7.
+Curve points and the 71 derived public inputs enter as their raw `[u64; N]`
+LE limbs (64 B per G1, 128 B per G2, 32 B per input, 2,528 B per proof).
+`lo128` reads bytes 0..16 of the hash as two LE u64 limbs; the all-zero value
+maps to 1. The coefficients are independent 128-bit values (small-exponents
+batch test, 2⁻¹²⁸ soundness error). The VK is not in the transcript; it is
+pinned per process by 6.6.
 
 ### Security rationale
 
@@ -325,9 +363,19 @@ because one GT equation cannot bind n+3 free G1 points (a host could balance
 `B_i = c_i·β` against the α term and zero the γ and δ terms, which the pairing
 skips as identities). The γ-side term is aggregated as
 `(Σr_i)·γ_abc[0] + Σ_j (Σ_i r_i·pubs_ij)·γ_abc[j+1]`, which is algebraically
-identical to `Σ_i r_i·L_i` but needs only `n_public + 1` scalar muls per batch.
-Public inputs enter that sum reduced mod r, so a non-canonical input verifies
-as its residue; 2.6 and 6.6 compare the raw low 160 bits of `pubs[0]`.
+identical to `Σ_i r_i·L_i`. The inputs that are the same for every proof are
+folded into one point first,
+
+```
+IC₀' = γ_abc[0] + Σ_{j=2..5} pubs_j·γ_abc[j+1] + Σ_{f ≥ num_fields} (γ_abc[9+4f] + γ_abc[11+4f])
+```
+
+(the identity is `(0, 1)`: its x terms vanish and its y terms are 1), so the
+term is `(Σr_i)·IC₀' + Σ_j (Σ_i r_i·pubs_ij)·γ_abc[j+1]` over the varying
+`j ∈ {0, 1, 6} ∪ [7, 7 + 4·num_fields)`: `8 + 4·num_fields` scalar muls per
+batch. Public inputs enter the sum reduced mod r; 1.0 requires the live
+originals and the CSP weights to be canonical, and the other inputs are bound
+as raw bytes to the state root or the census.
 
 ---
 
@@ -347,11 +395,10 @@ they submitted.
 | # | Check | Fails on |
 |---|-------|----------|
 | 2.1 | ECDSA entries are present (non-empty) | FAIL_ECDSA |
-| 2.2 | At least 2 public inputs per proof (address, voteID) | FAIL_ECDSA |
+| 2.2 | The public inputs were derived (1.0) | FAIL_ECDSA |
 | 2.3 | ECDSA entry count == proof count | FAIL_ECDSA |
-| 2.4 | VoteID upper limbs are zero (`pubs[1][1..3] == 0`); voteID is uint64 | FAIL_ECDSA |
-| 2.5 | `pk = ecdsa_recover_secp256k1(r, s, z, recid)` succeeds, where `z = keccak256(ethSignedMessage(voteID))` read as a big-endian integer | FAIL_ECDSA |
-| 2.6 | The Ethereum address of the recovered key matches the low 160 bits of `pubs[0]`: `keccak256(pk.x_BE32 ‖ pk.y_BE32)[12..32] == address_BE20` | FAIL_ECDSA |
+| 2.5 | `pk = ecdsa_recover_secp256k1(r, s, z, recid)` succeeds, where `z = keccak256(ethSignedMessage(voteID))` read as a big-endian integer and voteID is public input 1 | FAIL_ECDSA |
+| 2.6 | The Ethereum address of the recovered key matches the low 160 bits of public input 0: `keccak256(pk.x_BE32 ‖ pk.y_BE32)[12..32] == address_BE20` | FAIL_ECDSA |
 
 The checks stop at the first failing entry.
 
@@ -387,7 +434,7 @@ limb 0 of that leaf's value:
 
 | censusOrigin | Method | Module | Description |
 |:---:|--------|--------|-------------|
-| ≠ 4 (1-3) | lean-IMT Poseidon | `census.rs` | Merkle tree membership proof |
+| ≠ 4 (1-3) | Keccak lean-IMT | `census.rs` | Merkle tree membership proof |
 | 4   | CSP ECDSA | `csp.rs` | Credential Service Provider signature |
 
 ### 3A. Merkle Census (censusOrigin 1-3)
@@ -399,7 +446,8 @@ leaf = PackAddressWeight(address, weight) = (address << 88) | weight
 ```
 
 Where `address` is the 160-bit Ethereum address and `weight` is the voter's
-weight (up to 88 bits). The leaf is stored as a BN254 Fr element.
+weight (up to 88 bits), so a leaf is below 2^248 (3A.6). Leaves, nodes and
+roots are 256-bit integers, never field elements.
 
 #### Constraint checks
 
@@ -410,6 +458,7 @@ weight (up to 88 bits). The leaf is stored as a BN254 Fr element.
 | 3A.3 | No duplicate leaves (raw 256-bit equality) across all proofs in the batch | FAIL_CENSUS |
 | 3A.4 | Each proof has a canonical shape: `siblings.len() <= 61` and `index >> siblings.len() == 0` (no path bit the walk never reads) | FAIL_CENSUS |
 | 3A.5 | Each proof's Merkle path is valid: recomputed root matches declared root | FAIL_CENSUS |
+| 3A.6 | Every leaf is below 2^248 (`leaf[3] >> 56 == 0`). Internal nodes are full 256-bit Keccak outputs, so the bound keeps a node presented as a leaf at a shorter path out | FAIL_CENSUS |
 
 #### Merkle path verification
 
@@ -419,11 +468,17 @@ For each proof `(root, leaf, index, siblings[])`:
 node ← leaf
 for i in 0..siblings.len():
     if (index >> i) & 1 == 1:
-        node ← poseidon2(siblings[i], node)    // node is right child
+        node ← H(siblings[i], node)    // node is right child
     else:
-        node ← poseidon2(node, siblings[i])    // node is left child
+        node ← H(node, siblings[i])    // node is left child
 assert node == root
+
+H(l, r) = keccak256(be32(l) ‖ be32(r))   // Solidity keccak256(abi.encode(l, r))
 ```
+
+There is no leaf/node domain tag: a node whose top byte happens to be zero
+passes 3A.6, but its address bits are a Keccak output whose key nobody holds,
+so it gives no voting power.
 
 The `census_root` output is taken from the first census proof's root field.
 
@@ -478,7 +533,8 @@ Only one keccak runs per batch: entries 1.. compare the recovered point with
 |---|-------|----------|
 | 3B.1 | CSP block is present when censusOrigin=4 | FAIL_MISSING_BLOCK |
 | 3B.2 | CSP block has at least 1 entry | FAIL_CSP |
-| 3B.2b | Every `voter_address` is a canonical uint160: `voter_address[2] >> 32 == 0` and `voter_address[3] == 0`. The message, the binding (6.6) and ECDSA (2.6) read only the low 160 bits, so without this one address with bit 160 set would pass 3B.3 as a second address | FAIL_CSP |
+| 3B.2b | Every `voter_address` is a canonical uint160: `voter_address[2] >> 32 == 0` and `voter_address[3] == 0`. The message and ECDSA (2.6) read only the low 160 bits, so without this one address with bit 160 set would pass 3B.3 as a second address | FAIL_CSP |
+| 3B.2c | Every `weight` is below 2^88 (`weight[1] >> 24 == 0`, `weight[2] == weight[3] == 0`), the width a Merkle census leaf gives it | FAIL_CENSUS |
 | 3B.3 | No duplicate `voter_address` and no duplicate `index` across entries (the index is the ballot slot, 4.1.6; the CSP must assign one index per voter) | FAIL_CSP |
 | 3B.4 | Each entry recovers a key (`ecdsa_recover_secp256k1(r, s, z, recid)` succeeds), and every recovered key equals `pk_0` | FAIL_CSP |
 
@@ -501,16 +557,15 @@ that the election tally is properly maintained.
 **Fail bits:** `FAIL_CONSISTENCY` (bit 14), `FAIL_BALLOT_NS` (bit 15)
 
 These checks ensure that the SMT keys fall in the correct namespace and that
-the ballot/voteID data is bound to the corresponding ballot proof. They pass
-trivially when `n_voters = 0`; the ballot rows run when the ballot chain is
-non-empty (4.2.2 requires `n_voters` entries).
+each ballot lands in its voter's slot. The vote-id key is ballot proof `i`'s
+public input 1 (§4), so the proof binds it. They pass trivially when
+`n_voters = 0`; the ballot rows run when the ballot chain is non-empty (4.2.2
+requires `n_voters` entries).
 
 | # | Check | Fails on |
 |---|-------|----------|
 | 4.1.1 | STATETX block is present | FAIL_MISSING_BLOCK |
 | 4.1.2 | Each `vote_id_chain[i].new_key[0] ≥ 0x8000_0000_0000_0000` (VoteID namespace) | FAIL_CONSISTENCY |
-| 4.1.3 | Each `vote_id_chain[i].new_key[0] == proofs[i].public_inputs[1][0]` (VoteID binding) | FAIL_CONSISTENCY |
-| 4.1.4 | VoteID public input upper limbs zero: `pubs[1][1..3] == 0` | FAIL_CONSISTENCY |
 | 4.1.4b | `vote_id_chain[i].new_key[1..3] == 0` and `ballot_chain[i].new_key[1..3] == 0`: slot keys are u64, and the DA blob publishes limb 0 only, so a leaf at `key + 2^64` would be unreconstructible | FAIL_CONSISTENCY / FAIL_BALLOT_NS |
 | 4.1.5 | Each `ballot_chain[i].new_key[0] ∈ [0x10, 0x7FFF_FFFF_FFFF_FFFF]` (Ballot namespace) | FAIL_BALLOT_NS |
 | 4.1.6 | `ballot_chain[i].new_key[0] == slot(i)` (slot binding): Merkle census `slot = address_slot(addr_i)` with `addr_i` the address of census leaf `i` (below); CSP census `slot = BallotMin + entries[i].index` (the index the CSP signed; a sum above `BallotMax` never matches) | FAIL_BALLOT_NS |
@@ -523,10 +578,9 @@ addr_i          = 20 bytes, big-endian, of (census_proofs[i].leaf >> 88) mod 2^1
 address_slot(a) = BallotMin + (be64(SHA-256("davinci-slot-v1" ‖ a)[0..8]) mod (2^63 − 16))
 ```
 
-`addr_i` is exactly the value 6.6 compares with ballot proof `i`'s address,
-which 2.6 binds to the ECDSA signer, so a ballot can only be written to its
-signer's slot. Leaf bits above 247 are not part of `addr_i`: a leaf carrying
-them either fails 6.6 or maps to its signer's slot, never to a second one. The
+`addr_i` is ballot proof `i`'s public input 0, which 2.6 binds to the ECDSA
+signer, so a ballot can only be written to its signer's slot. A leaf with
+bits above 247 fails 3A.6. The
 result is always inside `[BallotMin, BallotMax]`. The tag is 15 ASCII bytes and
 the preimage 35 bytes, hashed on the `sha256f` precompile.
 
@@ -687,8 +741,8 @@ read-proof are used; its other fields are ignored.
 | 4.2.P5 | `process_proofs[0].new_value == state.process_id` (ProcessID matches header) | FAIL_SMT_PROCESS |
 
 The values feed the rest of the guest: BallotMode gives `num_fields` (4.3.6)
-and enters the inputs hash (6.9), CensusOrigin selects Phase 3, EncryptionKey
-is checked in 6.3 and BallotVKHash in 6.7.
+and is public input 3 (§4), CensusOrigin selects Phase 3, EncryptionKey is
+checked in 6.3 and BallotVKHash in 6.6.
 
 ### 4.3 Re-encryption Verification
 
@@ -898,17 +952,18 @@ state chains and the guest-computed `refreshed_new` ballots.
 Bind the sequencer's DA-blob commitments to what the circuit has just proved.
 Blob cells are not host input: the guest rebuilds them from verified state
 (vote-id list and sorted slot updates covering new votes, overwrites and
-silent refreshes alike), packs them into 4096-cell EIP-4844 blobs, and
-evaluates each blob polynomial at the point derived from that blob's
-commitment. The Results accumulator is not in the blobs: a follower
-recomputes it (see "Results accumulator" below). The emitted `BlobsDigest`
-(§3) hashes the ordered `(commitment, y)` pairs; the settlement contract
-checks each pair against the blob's versioned hash via the EIP-4844
+silent refreshes alike), hashes the cell stream into `D`, packs it into
+4096-cell EIP-4844 blobs, and evaluates each blob polynomial at a point
+derived from `D` and that blob's commitment. The Results accumulator is not
+in the blobs: a follower recomputes it (see "Results accumulator" below).
+The emitted `BlobsDigest` (§3) hashes the ordered `(commitment, y)` pairs and
+`CellsDigest` is `D`; the settlement contract derives the same points from
+`D` and checks each pair against the blob's versioned hash via the EIP-4844
 point-evaluation precompile.
 
 The KZG block itself carries only the process context and the per-blob
 commitments (see §2 KZGBLK). Absent KZG block or absent STATETX: trivially
-pass with `BlobsDigest = 0` and `NBlobs = 0`.
+pass with `BlobsDigest = 0`, `NBlobs = 0` and `CellsDigest = 0`.
 
 ### Cell layout
 
@@ -977,18 +1032,47 @@ complete twisted-Edwards law on canonical coordinates (13.2), so the
 follower's tree reaches `NewStateRoot` exactly when its stored ballots are
 right.
 
+### Cell digest
+
+Before any commitment is read, the guest hashes the unpadded cell stream:
+
+```
+D = SHA-256( "davinci/cells/v1" ‖ u64_be(nf) ‖ u64_be(T) ‖ cell_0 ‖ … ‖ cell_{T-1} )
+```
+
+The tag is the 16 ASCII bytes `davinci/cells/v1`; with the two 8-byte
+big-endian counts it fills exactly one 32-byte cell, so the guest copies the
+stream behind that prefix cell and hashes one buffer with the `sha256f`
+precompile (about 2048 compression blocks per full blob). `T` is the cell count of
+the layout above; the zero padding of the last blob is implied by `T` and not
+hashed. `D` is emitted at registers [46..53].
+
 ### Evaluation point derivation
 
-Per blob `b`, `com_b = commitments[b]` (48 B big-endian):
+Per blob `b` of `n_blobs`, `com_b = commitments[b]` (48 B big-endian):
 
 ```
-z_b = SHA-256( processID_BE32 ‖ rootHashBefore_BE32 ‖ com_b ) mod r_bls   // BLS12-381 Fr
+z_b = SHA-256( "davinci/point/v1" ‖ processID_BE32 ‖ rootHashBefore_BE32 ‖ D
+               ‖ u64_be(n_blobs) ‖ u64_be(b) ‖ com_b ) mod r_bls       // BLS12-381 Fr
 ```
 
-`processID` and `rootHashBefore` are the KZG block's copies, bound to the
-STATETX by 6.1 and 6.2. Every blob evaluated by the guest is bound to the same
-election and the same `root_hash_before`, so a commitment for a different
-election or a different state root is unusable.
+A 176-byte preimage: the 16-byte tag, three 32-byte values, two 8-byte
+big-endian integers and the commitment. `processID` and `rootHashBefore` are
+the KZG block's copies, bound to the STATETX by 6.1 and 6.2. Every blob
+evaluated by the guest is bound to the same election, the same
+`root_hash_before`, the exact cell stream and its position, so a commitment
+for a different election, state root, content or slot is unusable.
+
+**Why `D` sits in the publics.** The registry must derive the point from
+exactly the `D` the guest computed; an unbound host-supplied `D` would only
+move the hole. The guest emits `D` in registers 46–53 of the publics: the
+settlement contract already receives the full 512-byte `publicValues` the
+PLONK proof binds, so it reads `D` from there with no extra calldata and no
+change to `BlobsDigest`. The fold guest reads only registers 0–27 and 42,
+and chained mode ships no KZG block (`D = 0`), so it is unaffected. The
+alternative, `D` as an extra settlement argument checked against a digest
+that covers it, would change the settlement ABI in every consumer for no
+extra binding.
 
 ### Barycentric evaluation
 
@@ -1021,9 +1105,9 @@ Emitted at registers [28..35] as 8 × u32 LE; `NBlobs` at [36].
 | 5.1 | KZG block absent (or STATETX absent): Phase 5 short-circuits with digest = 0, NBlobs = 0. The chained-mode path relies on that; STATETX absence is caught by the rest of the pipeline (`FAIL_MISSING_BLOCK`) so Phase 5 does not double-count it | — |
 | 5.2 | `1 ≤ n_blobs ≤ MAX_BLOBS = 32` (above the cap is already a parse failure, §2) | FAIL_KZG |
 | 5.3 | `n_blobs == ceil(T / 4096)`, with T from the reconstructed cell count. Under- or over-commitment forbidden | FAIL_KZG |
-| 5.4 | For every `b`: `y_b = eval_barycentric(cells_b, z_b)` where `z_b = SHA-256(pid_BE32 ‖ root_before_BE32 ‖ com_b) mod r_bls`. Emitted BlobsDigest = SHA-256 of the ordered `(com_b, y_b)` pairs | — |
+| 5.4 | For every `b`: `y_b = eval_barycentric(cells_b, z_b)` where `z_b = SHA-256("davinci/point/v1" ‖ pid_BE32 ‖ root_before_BE32 ‖ D ‖ u64_be(n_blobs) ‖ u64_be(b) ‖ com_b) mod r_bls` and `D` is the cell digest above. Emitted BlobsDigest = SHA-256 of the ordered `(com_b, y_b)` pairs, CellsDigest = `D` | — |
 
-On `FAIL_KZG` the digest registers stay zero and `NBlobs` carries the number of
+On `FAIL_KZG` both digests stay zero and `NBlobs` carries the number of
 commitments shipped. Check 5.4 has no fail bit: the guest evaluates and commits
 to `(com, y)`; the settlement contract does the KZG opening check against the
 blob-tx versioned hash. A wrong commitment shows up on-chain as a mismatched
@@ -1043,18 +1127,29 @@ point-evaluation result, not as a `FAIL_KZG` bit.
   through the same sort key. The layout does not mark them, so an overwrite
   looks like a refresh, the deniability property of §4.5; a slot's first
   appearance still marks a new vote.
-- **Per-blob binding.** `z_b` folds in the commitment and the process
-  context, so a commitment for the wrong election / wrong `root_before`
-  produces a `y` no honest KZG opening can hit; the digest changes and
-  the on-chain check fails.
+- **Content fixed before the point.** `z_b` is a hash of `D`, so the
+  polynomial is fixed before the point exists. With a point that depended
+  only on the process, the root and a sequencer-chosen commitment `C'`, the
+  sequencer could learn `z` first and then pick batch content (which slots
+  to refresh, ballot randomness) so that `P(z) = B'(z)` for a wrong blob
+  `B'`: for a fixed `z`, `y` is linear in the cells, a modular subset-sum
+  reachable with generalized-birthday work. Now any change of content or
+  commitment gives a fresh random `z`, and `B' ≠ P` agrees with `P` there
+  with probability at most 4095 / r_bls. Only blob 0 would have to be wrong
+  for that attack, since the header and every update key sit there.
+- **Per-blob binding.** `z_b` also folds in the commitment, the blob index
+  and count and the process context, so a commitment for the wrong
+  election, wrong `root_before` or wrong position produces a `y` no honest
+  KZG opening can hit; the digest changes and the on-chain check fails.
 - **BLS12-381 Fr fit.** `p_bn254 + 2²⁵⁴ < r_bls`, so `pack(x, y)` always
   lands inside the BLS Fr range. The parity tag lives in bit 254; BN254 Fr
   `< 2²⁵⁴` keeps `y_canon` clear of it.
 
 ### Performance note
 
-Each blob costs roughly 16k–25k `arith256_mod` calls, depending on how many
-cells are non-zero: the 4096 differences, the batch inverse (the largest
+`D` costs one SHA-256 pass over the cells already built (~2048 `sha256f`
+blocks per full blob). Each blob costs roughly 16k–25k `arith256_mod` calls,
+depending on how many cells are non-zero: the 4096 differences, the batch inverse (the largest
 part, ~12k) and two calls per non-zero cell for the weighted sum. The
 4096-entry root-of-unity table (~4.1k calls) is built once per batch. Small
 transitions fit in one blob. `MAX_BLOBS = 32` (131072 cells) is above the
@@ -1086,39 +1181,20 @@ per-voter data is correctly bound across blocks.
 | 6.3 | `SHA-256(reenc_pubkey_X_BE32 ‖ reenc_pubkey_Y_BE32) == process_proofs[2].new_value` | Re-encryption key matches process config (key 0x03) | FAIL_BINDING |
 | 6.4 | Eligibility proof count == `state.n_voters` | One eligibility proof per voter (Merkle or CSP) | FAIL_BINDING |
 | 6.5 | `reenc_entries.len() == state.n_voters` | One re-encryption entry per voter | FAIL_BINDING |
-| 6.6 | For each voter `i`: address from eligibility proof matches the low 160 bits of `proofs[i].public_inputs[0]` | Eligibility bound to the specific voter | FAIL_BINDING |
-| 6.7 | `SHA-256(VK wire bytes) == process_proofs[4].new_value` | Groth16 VK matches process config (key 0x07); the VK is fixed for the process lifetime | FAIL_BINDING |
-| 6.8 | If `n_voters > 0`: `proofs.len() == n_voters`, `n_public ≥ 3`, `reenc_entries.len() == n_voters`, `voter_ballots.len() == n_voters`, 5 process proofs and a REENCBLK key present | Preconditions of 6.9/6.10; ties the Groth16 proof count to `n_voters` | FAIL_BINDING |
-| 6.9 | For each voter `i`: `inputsHash(i) == proofs[i].public_inputs[2]` (below) | Original ciphertexts bound to the voter's ballot proof | FAIL_BINDING |
-| 6.10 | For each voter `i`: `reenc_entries[i].reencrypted == state.voter_ballots[i]` (all 16 ciphertexts, raw coords) | SMT ballot leaf and accumulator bound to the verified re-encryption | FAIL_BINDING |
+| 6.6 | `SHA-256(VK wire bytes) == process_proofs[4].new_value` | Groth16 VK matches process config (key 0x07); the VK is fixed for the process lifetime | FAIL_BINDING |
+| 6.7 | If `n_voters > 0`: `proofs.len() == n_voters`, `reenc_entries.len() == n_voters`, `voter_ballots.len() == n_voters`, 5 process proofs and a REENCBLK key present | Preconditions of 6.8; ties the Groth16 proof count to `n_voters` | FAIL_BINDING |
+| 6.8 | For each voter `i`: `reenc_entries[i].reencrypted == state.voter_ballots[i]` (all 16 ciphertexts, raw coords) | SMT ballot leaf and accumulator bound to the verified re-encryption | FAIL_BINDING |
 
-6.1 and 6.2 apply when a KZG block is present. 6.3 and 6.7 apply when there
-are exactly 5 process proofs (otherwise 4.2.P1 has already failed). 6.6
-compares the first `min(n_voters, eligibility count, proofs)` voters and needs
-`n_public ≥ 1`. 6.9 and 6.10 stop at the first mismatch.
-
-### Ballot inputs hash
-
-```
-in[0..71] = processID, ballotMode, pk.x, pk.y, pubs[0], pubs[1],
-            original[0].c1x, c1y, c2x, c2y, …, original[15].c2y, weight
-inputsHash = poseidon5( p16(in[0..16]), p16(in[16..32]), p16(in[32..48]),
-                        p16(in[48..64]), p7(in[64..71]) )
-```
-
-This is davinci-node's `BallotInputsHash` (`PoseidonMultiHash` over 71 inputs,
-16-wide chunks). `processID` is the STATETX value, `ballotMode` the key 0x02
-leaf value, `pk` the REENCBLK key as shipped. The weight is the low 88 bits of
-the census leaf in Merkle mode and `CspEntry.weight` in CSP mode.
+6.1 and 6.2 apply when a KZG block is present. 6.3 and 6.6 apply when there
+are exactly 5 process proofs (otherwise 4.2.P1 has already failed). 6.8 stops
+at the first mismatch. The eligibility address, the weight, the vote id and
+the original ciphertexts need no binding row: they are the ballot proof's
+public inputs (§4), so a proof verifies only for its own voter.
 
 ### Eligibility address extraction
 
-**Merkle mode** (censusOrigin 1-3): The census leaf is `(address << 88) | weight`.
-The address is extracted by right-shifting 88 bits.
-
-**CSP mode** (censusOrigin 4): The `CspEntry.voter_address` field contains the
-voter's Ethereum address directly as uint160 in FrRaw. The lower 3 limbs (160 bits)
-are compared against the ballot proof's `public_inputs[0]`.
+Public input 0 in Merkle mode is the census leaf shifted right by 88 bits
+(`publics.rs`, `extract_address_from_census_leaf`):
 
 ```rust
 addr[0] = (leaf[1] >> 24) | (leaf[2] << 40)   // bits 88..152 → bits 0..64
@@ -1127,7 +1203,8 @@ addr[2] = leaf[3] >> 24                         // bits 216..248 → bits 128..1
 addr[3] = 0
 ```
 
-The comparison uses the lower 160 bits (3 limbs, masked at limb[2]).
+3A.6 keeps `leaf[3] >> 56 == 0`, so the address is exactly 160 bits. In CSP
+mode it is `CspEntry.voter_address`, canonical by 3B.2b.
 
 ---
 
@@ -1160,25 +1237,25 @@ proof with `overall_ok = 0` is invalid and must be rejected by the verifier.
 
 | Bit | Constant | Module | Meaning |
 |-----|----------|--------|---------|
-| 1 | `FAIL_CURVE` | groth16.rs | Proof/VK point off-curve or the identity, or β/γ/δ outside the G2 subgroup (1.1–1.4) |
+| 1 | `FAIL_CURVE` | groth16.rs | Proof/VK point off-curve or the identity, β/γ/δ outside the G2 subgroup, or VK δ = γ (1.1–1.4) |
 | 2 | `FAIL_PAIRING` | groth16.rs | Batch pairing equation failed |
-| 3 | `FAIL_ECDSA` | ecdsa.rs | Signature entries missing, voteID not u64, key recovery failed or address binding failed (2.1–2.6) |
+| 3 | `FAIL_ECDSA` | ecdsa.rs | Signature entries missing, public inputs not derived, key recovery failed or address binding failed (2.1–2.6) |
 | 10 | `FAIL_SMT_VOTEID` | smt.rs | VoteID insertion chain invalid |
 | 11 | `FAIL_SMT_BALLOT` | smt.rs | Ballot insertion/update chain invalid |
 | 12 | `FAIL_SMT_RESULTS` | smt.rs | Net Results SMT transition invalid or not an UPDATE of key 0x04 |
 | 13 | `FAIL_SMT_PROCESS` | smt.rs | Process config read-proof invalid or missing |
-| 14 | `FAIL_CONSISTENCY` | consistency.rs | VoteID namespace, upper limbs or proof binding mismatch (4.1.2–4.1.4b) |
+| 14 | `FAIL_CONSISTENCY` | consistency.rs | VoteID namespace or upper limbs (4.1.2, 4.1.4b) |
 | 15 | `FAIL_BALLOT_NS` | consistency.rs | Ballot namespace, upper limbs, slot binding (4.1.6) or duplicate slot in the batch (4.1.7) |
-| 16 | `FAIL_CENSUS` | census.rs | Census roots differ, duplicate leaf, non-canonical shape or invalid path (3A.2–3A.5) |
+| 16 | `FAIL_CENSUS` | census.rs / csp.rs | Census roots differ, duplicate leaf, non-canonical shape, invalid path or leaf ≥ 2^248 (3A.2–3A.6); CSP weight ≥ 2^88 (3B.2c) |
 | 17 | `FAIL_REENC` | babyjubjub.rs / main.rs | Election key invalid, re-encryption mismatch, padded slot not identity, or `num_fields` out of range (4.3.2–4.3.6) |
 | 18 | `FAIL_KZG` | kzg.rs | Blob count zero or not `ceil(T / 4096)` (5.2, 5.3) |
 | 19 | `FAIL_MISSING_BLOCK` | various | STATETX, REENCBLK, or the census block `censusOrigin` selects is absent or empty |
 | 20 | `FAIL_RESULT_ACCUM` | results.rs | Net Results leaf mismatch, Results transition missing or unexpected, or padded slot not identity (4.4.5–4.4.9) |
 | 21 | `FAIL_LEAF_HASH` | results.rs | Ballot SMT leaf hash or ballot count mismatch (4.4.1–4.4.4) |
-| 22 | `FAIL_BINDING` | main.rs | Cross-block binding mismatch (6.1–6.10) |
+| 22 | `FAIL_BINDING` | main.rs / publics.rs | Public-input source missing or non-canonical (1.0), or cross-block binding mismatch (6.1–6.8) |
 | 23 | `FAIL_CSP` | csp.rs | CSP block empty, entry non-canonical, duplicated, or its key recovery failed or disagreed (3B.2–3B.4) |
 | 24 | `FAIL_REFRESH` | smt.rs / babyjubjub.rs / results.rs / main.rs | Silent-refresh chain over the cap (§4.5.1), count rule (§4.5.2), per-entry format / disjointness (§4.5.3), root chaining (§4.5.4), leaf-hash pin (§4.5.5–§4.5.6), padded-slot identity (§4.5.7), `occupied_before` overflowed the 32-bit output register (§4.5.8), or refresh ballot count mismatch (§4.5.9) |
-| 31 | `FAIL_PARSE` | io.rs | Binary format / parse error (§2) |
+| 31 | `FAIL_PARSE` | io.rs | Binary format / parse error, including `n_public ≠ 71` (§2) |
 
 ---
 
@@ -1188,23 +1265,26 @@ The following security properties are guaranteed when `overall_ok = 1`:
 
 ### 12.1 Ballot Integrity
 
-Every ballot in the batch has a valid Groth16 BN254 proof, attesting that the
-voter correctly encrypted their choices under the election public key according
-to the ballot circuit constraints.
+Every ballot in the batch has a valid Groth16 BN254 proof, under a VK with a
+phase-2 contribution, attesting that the voter correctly encrypted their
+choices under the election public key according to the ballot circuit
+constraints. The proof's public inputs are the guest's own copies of the
+voter's address, weight and vote id, the process configuration and the
+original ciphertexts (§4).
 
 ### 12.2 Voter Authentication
 
 Every voter demonstrated knowledge of the private key corresponding to their
 Ethereum address by producing a valid secp256k1 ECDSA signature over the
-voteID. The public key hash matches the address declared in the ballot proof.
+voteID. The public key hash matches the ballot proof's address (public input 0).
 
 ### 12.3 Census Membership
 
 Every voter has a valid eligibility proof:
-- **Merkle mode** (censusOrigin 1-3): valid lean-IMT Poseidon inclusion proof in the census tree.
+- **Merkle mode** (censusOrigin 1-3): valid Keccak lean-IMT inclusion proof in the census tree, of a leaf below 2^248.
 - **CSP mode** (censusOrigin 4): valid ECDSA signature from the CSP authority.
 
-The eligibility address is bound to the ballot proof address (Phase 6.6),
+The eligibility address and weight are ballot proof public inputs 0 and 6,
 preventing reuse of eligibility proofs across voters. In Merkle mode, no
 duplicate census leaves exist within a batch. In CSP mode, no two entries
 share a `voter_address` or an `index`. In both modes a batch writes each
@@ -1253,13 +1333,15 @@ values, preventing substitution.
 
 Blob cells are rebuilt in-guest from verified state (vote-id list and
 sorted slot updates covering new votes, overwrites and silent refreshes; a
-follower recomputes the Results ballot, §8). Each blob polynomial is
-evaluated at
-`z_b = SHA-256(pid ‖ root_before ‖ com_b) mod r_bls` and the ordered
-`(com_b, y_b)` pairs are hashed into `BlobsDigest`. The settlement contract
-verifies each `(com_b, y_b)` against the blob-tx versioned hash via the
-EIP-4844 point-evaluation precompile, so an unavailable or tampered blob is
-rejected on-chain even though the guest itself does no BLS12-381 pairings.
+follower recomputes the Results ballot, §8) and hashed into `D` before any
+point exists. Each blob polynomial is evaluated at
+`z_b = SHA-256(tag ‖ pid ‖ root_before ‖ D ‖ n_blobs ‖ b ‖ com_b) mod r_bls`
+and the ordered `(com_b, y_b)` pairs are hashed into `BlobsDigest`. The
+settlement contract derives `z_b` from the proven `D` and verifies each
+`(com_b, y_b)` against the blob-tx versioned hash via the EIP-4844
+point-evaluation precompile, so an unavailable or tampered blob is rejected
+on-chain even though the guest itself does no BLS12-381 pairings, and the
+content cannot be chosen after the point is known.
 
 ---
 
@@ -1267,13 +1349,9 @@ rejected on-chain even though the guest itself does no BLS12-381 pairings.
 
 ### 13.1 Ballot-to-Re-encryption Binding
 
-The ballot proof's public inputs are `[address, voteID, inputsHash]`; the
-ciphertexts themselves are not public inputs of the Circom circuit. Phase 6
-closes the gap: the guest recomputes `inputsHash` as the Poseidon commitment
-over `(processID, ballotMode, encKey, address, voteID, the 16 original
-ciphertexts, weight)` and requires it to equal `public_inputs[2]` (6.9), which
-binds `reenc_entries[i].original` to the proven ballot. It then requires
-`reenc_entries[i].reencrypted` to equal `state.voter_ballots[i]` (6.10), which
+The original ciphertexts are public inputs 7..70 of the ballot proof (§4), so
+`reenc_entries[i].original` is the proven ballot. The guest then requires
+`reenc_entries[i].reencrypted` to equal `state.voter_ballots[i]` (6.8), which
 binds the SMT ballot leaf and the results accumulator to the verified
 re-encryption. A sequencer cannot pair a valid proof with a different
 ballot, nor store anything but the chain-derived re-encryption of it.
@@ -1284,7 +1362,7 @@ The BabyJubJub curve has cofactor 8. The election key must be on the curve,
 not the identity and in the prime-order subgroup (`l · pk == identity`,
 §4.3.2 and §4.3.2b), checked before any offset scalar is consumed; 6.3 binds
 it to the process configuration. Ciphertext points are not curve-checked in
-this guest: originals are bound to the ballot proof (6.9), and stored and
+this guest: originals are the ballot proof's public inputs (§4), and stored and
 refreshed ballots to their SMT leaves.
 
 ### 13.3 KZG Opening Proof
@@ -1293,10 +1371,11 @@ The guest evaluates each blob polynomial (`y_b = eval(cells_b, z_b)`) but
 does not verify the KZG opening proof itself (which requires BLS12-381
 pairings unavailable as precompiles).
 
-**Mitigation:** The emitted `BlobsDigest` binds each `(com_b, y_b)` pair.
-The settlement contract feeds every pair to the EIP-4844 point-evaluation
-precompile against the blob-tx versioned hash, so an opening that does not
-match the on-chain blob is rejected there.
+**Mitigation:** The emitted `BlobsDigest` binds each `(com_b, y_b)` pair and
+`CellsDigest` the point each was evaluated at. The settlement contract feeds
+every pair to the EIP-4844 point-evaluation precompile against the blob-tx
+versioned hash, at `z_b` derived from the emitted `D`, so an opening that
+does not match the on-chain blob is rejected there.
 
 ### 13.4 CSP Census — Revocation
 
@@ -1328,7 +1407,7 @@ chained mode) must also check:
   address);
 - `OccupiedBefore` equals the running `voters − overwrites`;
 - in per-batch mode, `NBlobs ≥ 1` and every `(com_b, y_b)` against its blob's
-  versioned hash.
+  versioned hash, at `z_b` derived from the emitted `CellsDigest` (§8).
 
 ---
 
@@ -1337,14 +1416,14 @@ chained mode) must also check:
 | Primitive | Module | Implementation | Notes |
 |-----------|--------|---------------|-------|
 | SHA-256 | `hash.rs` | `zisklib::sha256` on the `sha256f` precompile | SMT, leaf hashes, transcripts, offset chain |
-| Keccak-256 | `hash.rs` | `zisklib::keccak256` on the `keccak_f` precompile | ECDSA envelope, Ethereum address |
+| Keccak-256 | `hash.rs` | `zisklib::keccak256` on the `keccak_f` precompile | ECDSA envelope, Ethereum address, census tree nodes (`keccak_node`) |
 | BN254 Groth16 pairing | `circuit/src/groth16.rs` | `zisklib::pairing_batch_bn254` | Multi-pairing |
 | BN254 G1 MSM | `circuit/src/groth16.rs` | `zisklib::scalar_mul_bn254`, `add_bn254` | In-guest random linear combination |
 | BN254 G1/G2 curve checks | `bn254.rs` | `zisklib::is_on_curve_bn254`, `is_on_curve_twist_bn254`, `is_on_subgroup_twist_bn254` | Identity rejected separately |
 | secp256k1 ECDSA | `circuit/src/ecdsa.rs`, `circuit/src/csp.rs` | `zisklib::ecdsa_recover_secp256k1` | Public-key recovery |
 | BN254 Fr arithmetic | `bn254_fr.rs` | ZisK `arith256_mod` precompile (syscall 0x802) | `(a·b+c) mod p` |
 | BLS12-381 Fr arithmetic | `bls_fr.rs` | ZisK `arith256_mod` precompile (syscall 0x802) | `(a·b+c) mod p`; inverse = checked host hint |
-| Poseidon (iden3, BN254) | `poseidon.rs` | Software (bn254_fr precompile for field ops) | t=3 (8 full + 57 partial rounds) for the census; t=17/8/6 for the inputs hash |
+| Poseidon (iden3, BN254) | `poseidon.rs` | Software (bn254_fr precompile for field ops) | Not used by this guest (t=13 serves the results and aggregator guests) |
 | BabyJubJub | `babyjubjub.rs` | `babyjubjub_add` precompile (syscall 0x81D), affine | Twisted Edwards; curve check on bn254_fr |
 | Arbo SMT | `smt.rs` | Software (SHA-256 precompile for hashing) | Circomlib Processor + Verifier |
 
@@ -1397,15 +1476,17 @@ batch has no re-encryption entries and no refreshes.
 ### 15.4 Padded-field skips
 
 Fields `i ≥ num_fields` skip the re-encryption and refresh EC work (4.3.4,
-4.5.7), the accumulator adds (4.4.9) and the DA pack cells (§8). In the inputs
-hash (§9), a 16-input chunk made only of padded coordinates is replaced by the
-constant `poseidon16([0, 1, 0, 1, …])`. Each skip is sound only because the
-padded slots are asserted to be the identity.
+4.5.7), the accumulator adds (4.4.9) and the DA pack cells (§8). Their public
+inputs are the constant identity, folded into `IC₀'` once per batch (§4).
+Each skip is sound only because the padded slots are asserted to be the
+identity.
 
 ### 15.5 Groth16 MSM (`groth16.rs`)
 
-The γ-side term is aggregated across proofs (§4), so a batch needs
-`n_public + 1` scalar muls on γ_abc instead of `n·(n_public + 1)`. The batch
+The γ-side term is aggregated across proofs and the batch constants are
+folded into `IC₀'` (§4), so a batch needs `8 + 4·num_fields` scalar muls on
+γ_abc instead of `n·(n_public + 1)`; the per-proof work is one Fr muladd per
+varying input and the streamed transcript. The batch
 coefficients are 128-bit, and `scalar_mul_bn254` starts at the scalar's MSB,
 so the per-proof `r_i·A_i` and `r_i·C_i` muls cost about half of a full-width
 mul.

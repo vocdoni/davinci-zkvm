@@ -10,8 +10,9 @@ import (
 // PublicOutputs holds the public outputs of a ZisK circuit execution,
 // matching the on-chain public inputs of davinci-node's StateTransitionCircuit.
 //
-// These values are extracted from the 46 u32 output registers produced by the
-// ZisK prover/emulator. Use ParseOutputs to decode raw register values.
+// These values are extracted from the OutputRegisters u32 output registers
+// produced by the ZisK prover/emulator. Use ParseOutputs to decode raw
+// register values.
 type PublicOutputs struct {
 	// OK is true when all circuit checks passed (output[0] == 1).
 	OK bool
@@ -27,7 +28,7 @@ type PublicOutputs struct {
 	VotersCount int
 	// OverwrittenVotesCount is the number of votes that overwrote an earlier ballot.
 	OverwrittenVotesCount int
-	// CensusRoot is the 256-bit lean-IMT Poseidon BN254 census root.
+	// CensusRoot is the 256-bit Keccak lean-IMT census root (CSP: the CSP address).
 	CensusRoot *big.Int
 	// BlobsDigest is SHA-256(com_0 || y_0 || ... || com_{n-1} || y_{n-1})
 	// over the DA blobs bound by this transition (32 bytes, zero if the
@@ -35,6 +36,9 @@ type PublicOutputs struct {
 	BlobsDigest [32]byte
 	// NBlobs is the number of blobs the guest bound (0..=MaxBlobs).
 	NBlobs uint32
+	// CellsDigest is D over the DA cell stream (32 bytes, zero if the batch
+	// shipped no KZG block); the blobs' evaluation points derive from it.
+	CellsDigest [32]byte
 	// OccupiedBefore is the batch's claimed count of occupied ballot slots
 	// before it ran; it bounds the silent-refresh minimum the guest enforced,
 	// so the consumer must check it against its running votes − overwrites.
@@ -71,13 +75,13 @@ const (
 	FailParse        = 1 << 31 // Input parsing error
 )
 
-// ParseOutputs decodes the 46 u32 output registers from the ZisK circuit
-// into a structured PublicOutputs.
+// ParseOutputs decodes the OutputRegisters u32 output registers from the
+// ZisK circuit into a structured PublicOutputs.
 //
-// The outputs slice must have at least 46 elements.
+// The outputs slice must have at least OutputRegisters elements.
 func ParseOutputs(outputs []uint32) (*PublicOutputs, error) {
-	if len(outputs) < 46 {
-		return nil, fmt.Errorf("expected at least 46 output registers, got %d", len(outputs))
+	if len(outputs) < OutputRegisters {
+		return nil, fmt.Errorf("expected at least %d output registers, got %d", OutputRegisters, len(outputs))
 	}
 
 	o := &PublicOutputs{
@@ -102,6 +106,7 @@ func ParseOutputs(outputs []uint32) (*PublicOutputs, error) {
 	// order so the caller gets the same 32-byte value the guest sha256'd.
 	for i := 0; i < 8; i++ {
 		binary.LittleEndian.PutUint32(o.BlobsDigest[i*4:(i+1)*4], outputs[OutputBlobsDigest+i])
+		binary.LittleEndian.PutUint32(o.CellsDigest[i*4:(i+1)*4], outputs[OutputCellsDigest+i])
 	}
 
 	return o, nil

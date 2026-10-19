@@ -18,7 +18,6 @@ ark-bn254 = { version = "0.4", default-features = false, features = ["curve"] }
 ark-ec = { version = "0.4", default-features = false }
 ark-ff = { version = "0.4", default-features = false }
 ark-groth16 = { version = "0.4", default-features = false }
-ark-snark = { version = "0.4", default-features = false }
 ark-serialize = { version = "0.4", default-features = false }
 ark-std = { version = "0.4", default-features = false, features = ["std"] }
 num-bigint = "0.4"

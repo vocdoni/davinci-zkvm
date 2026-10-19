@@ -22,7 +22,6 @@ import (
 	"strings"
 	"time"
 
-	iden3poseidon "github.com/iden3/go-iden3-crypto/poseidon"
 	arbo "github.com/vocdoni/arbo"
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/format"
@@ -322,7 +321,7 @@ const (
 // so the SMT leaf, results accumulator and reencryption block stay consistent.
 type wideBallot []*elgamal.Ciphertext
 
-// Census (lean-IMT Poseidon) helpers
+// Census (Keccak lean-IMT) helpers
 
 // ballotLeafHash computes a deterministic 32-byte SHA-256 leaf value for an
 // ElGamal ballot stored in the arbo state tree. Each of the BallotFields
@@ -355,15 +354,6 @@ func ballotLeafHash(b wideBallot) *big.Int {
 		}
 	}
 	return new(big.Int).SetBytes(h.Sum(nil))
-}
-
-// poseidonHasher computes Poseidon(a, b) used by lean-IMT.
-func poseidonHasher(a, b *big.Int) *big.Int {
-	out, err := iden3poseidon.Hash([]*big.Int{a, b})
-	if err != nil {
-		panic(err)
-	}
-	return out
 }
 
 // bigIntEq compares two *big.Int values.

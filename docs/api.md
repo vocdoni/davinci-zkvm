@@ -29,6 +29,7 @@ earlier job IDs.
 | `POST` | `/finalize` | Chained mode: verify the results and wrap the chain in the final PLONK. |
 | `POST` | `/jobs/import` | Chained mode: register a batch (default) or fold (`?kind=fold`) STARK `proof.bin` proved on another prover. |
 | `GET` | `/jobs/{id}` | Job status and timing. |
+| `DELETE` | `/jobs/{id}` | Cancel a queued or running job. |
 | `GET` | `/jobs/{id}/snark` | The four `verifySnarkProof` arguments of a PLONK job. |
 | `GET` | `/jobs/{id}/snark/raw` | The raw `proof.bin` (bincode), for `cargo-zisk verify` or `/jobs/import`. |
 | `GET` | `/jobs/{id}/publics` | The guest's public outputs as 64 little-endian `u32` (256 bytes). |
@@ -41,7 +42,7 @@ earlier job IDs.
 
 | Code | Meaning |
 |---|---|
-| `202` | Job accepted: `{"job_id": "<uuid>", "status": "queued"}`. |
+| `202` | Job accepted: `{"job_id": "<uuid>", "status": "queued"}`. On `DELETE /jobs/{id}`, a running job whose cancel is under way. |
 | `400` | Invalid JSON or request, a referenced job that is missing, not done or of the wrong kind, or an unknown `kind` on `/jobs/import`. Body: `{"error": "..."}`. |
 | `404` | Unknown job or missing artifact. |
 | `415` | JSON body sent without `Content-Type: application/json`. |
@@ -61,8 +62,8 @@ Byte order depends on where a value comes from:
   re-encryption key and seed, the `ballot_proofs` coordinates, census proofs,
   voter and CSP signature fields, and the `kzg` block's `process_id` and
   `root_hash_before`. KZG commitments are 48 bytes (96 hex characters).
-- **Decimal strings**: snarkjs proofs and verification keys, ballot proof
-  public inputs, and the signer address in `sigs`.
+- **Decimal strings**: snarkjs proofs and verification keys, and the signer
+  address in `sigs`.
 
 The Go and Rust SDKs build these bodies from typed values; use them unless
 you have a reason not to.
@@ -71,12 +72,11 @@ you have a reason not to.
 
 | Field | Required | Content |
 |---|---|---|
-| `vk` | yes | snarkjs verification key of the ballot circuit. |
-| `proofs` | yes | snarkjs Groth16 ballot proofs, 1 to 1024. |
-| `public_inputs` | yes | One `[address, vote_id, inputs_hash]` per proof, decimal. |
+| `vk` | yes | snarkjs verification key of the ballot circuit (71 public inputs, snarkjs G2 ordering; any other shape is a 400). |
+| `proofs` | yes | snarkjs Groth16 ballot proofs, 1 to 1024. The guest derives their 71 public inputs from the other blocks; the service does not verify them. |
 | `sigs` | yes | One vote-ID signature per proof: `signature_r`, `signature_s`, `signature_v` (0 or 1), `vote_id`, `address`, `public_key_x`, `public_key_y`. |
 | `state` | yes | State transition: counts (`voters_count`, `overwritten_count`, `occupied_before`), `process_id`, `old_state_root`, `new_state_root`, the SMT chains `vote_id_smt`, `ballot_smt`, `refresh_smt`, `results_smt`, the five `process_smt` read proofs, and `ballot_proofs` (old accumulator, new, overwritten and refreshed ballots). |
-| `census_proofs` | one of | lean-IMT membership proof per voter (`root`, `leaf`, `index`, `siblings`). |
+| `census_proofs` | one of | Keccak lean-IMT membership proof per voter (`root`, `leaf`, `index`, `siblings`, each a 256-bit big-endian value: `0x` and 64 hex digits each; anything else is a 400). |
 | `csp_data` | one of | CSP attestation per voter (`r`, `s`, `recid`, `voter_address`, `weight`, `index`). |
 | `reencryption` | yes | `encryption_key_x`, `encryption_key_y`, the batch `seed` and one `{original, reencrypted}` entry of 16 ciphertexts per voter. |
 | `kzg` | per-batch mode | `process_id`, `root_hash_before` and the blob `commitments`. Omit in chained mode. |
@@ -108,6 +108,23 @@ snark's `public_values` before settling; the SDKs parse them for you.
 `status` is `queued`, `running`, `done` or `failed` (with `error`). `kind` is
 `batch`, `batchstark`, `fold`, `finalize` or `results`. Fold and finalize jobs
 list the jobs they consumed in `parent_job_ids`.
+
+## `DELETE /jobs/{id}`
+
+Cancels a job its submitter no longer needs, so the jobs behind it start
+sooner. The response body is the job, as `GET /jobs/{id}` returns it.
+
+- Queued: the job ends at once as `failed` with `"error": "cancelled"` and
+  never starts. `200`.
+- Running: the prover's process group (`mpirun` and its ranks included) gets
+  SIGTERM, then SIGKILL after 5 seconds. `202` with `"status": "running"`;
+  the job reads `failed` / `cancelled` once the group is dead, and only then
+  does the next job start.
+- Done or failed: nothing changes, so repeating a cancel is harmless. `200`.
+- Unknown id: `404`.
+
+A cancelled job is never retried, and its directory (input and partial
+proof) is deleted. Older provers without the route answer `405`.
 
 ## `GET /jobs/{id}/snark`
 

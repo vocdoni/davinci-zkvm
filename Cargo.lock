@@ -539,7 +539,6 @@ dependencies = [
  "ark-ff",
  "ark-groth16",
  "ark-serialize",
- "ark-snark",
  "ark-std",
  "bincode",
  "hex",
@@ -578,7 +577,7 @@ dependencies = [
 
 [[package]]
 name = "davinci-zkvm-service"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -587,6 +586,7 @@ dependencies = [
  "dashmap",
  "davinci-zkvm-input-gen",
  "hex",
+ "rustix",
  "serde",
  "serde_json",
  "tokio",

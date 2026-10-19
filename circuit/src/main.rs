@@ -8,11 +8,12 @@ mod ecdsa;
 mod groth16;
 mod io;
 mod kzg;
+mod publics;
 
 
 // Shared primitives re-exported at the crate root so `crate::types::…`
 // paths keep working in the modules above.
-pub use circuit_primitives::{babyjubjub, bn254, bn254_fr, bls_fr, da_blob, hash, poseidon, results, smt, types};
+pub use circuit_primitives::{babyjubjub, bn254, bn254_fr, bls_fr, da_blob, hash, results, smt, types};
 
 use crate::types::{FrRaw, ZERO_FR};
 use ziskos::io::{commit_slice, read_slice};
@@ -53,12 +54,19 @@ use crate::hash::hash_enc_key;
 // [41] ecdsa_ok    => ECDSA signature batch result
 // [42] OccupiedBefore => ballot slots occupied before the batch
 // [43] nproofs     => number of Groth16 proofs verified
-// [44] n_public    => number of public inputs per proof
+// [44] n_public    => number of public inputs per proof (71)
 // [45] log_n       => log₂ of the aggregation tree depth
+// Indices 46-53: DA cell binding
+//   [46..53] CellsDigest       => D, SHA-256 over the DA cell stream (8 × u32,
+//                                 LE); seeds every blob's evaluation point.
+//                                 Zero when no KZG block is present.
+
+/// Output registers the guest commits (ZisK pads the 64 publics with zero).
+const N_OUTPUTS: usize = 54;
 
 /// Write a 256-bit `FrRaw` into output register buffer at `base`.
 #[inline(always)]
-fn write_fr_output(out: &mut [u32; 46], base: usize, v: &FrRaw) {
+fn write_fr_output(out: &mut [u32; N_OUTPUTS], base: usize, v: &FrRaw) {
     for i in 0..4 {
         out[base + i * 2]     = (v[i] & 0xFFFF_FFFF) as u32;
         out[base + i * 2 + 1] = (v[i] >> 32) as u32;
@@ -74,12 +82,40 @@ fn main() {
     // operate on the parsed representation. Parse errors set FAIL_PARSE.
     let parsed = io::parse_input(&input, &mut fail_mask);
 
+    // Read censusOrigin from process config (process_proofs[3], key 0x06).
+    let census_origin: u64 = parsed.state.as_ref()
+        .and_then(|s| s.process_proofs.get(3))
+        .map(|p| p.new_value[0])
+        .unwrap_or(0);
+
+    // Read num_fields from the BallotMode config leaf (process_proofs[1],
+    // key 0x02), low byte of the 32-byte LE arbo leaf. Fields at or above it
+    // are identity-padded: the public inputs, the re-encryption and the
+    // results loops all skip their curve work.
+    let num_fields: usize = parsed.state.as_ref()
+        .and_then(|s| s.process_proofs.get(1))
+        .map(|p| (p.new_value[0] & 0xFF) as usize)
+        .unwrap_or(crate::types::NUM_FIELDS);
+    let num_fields = if num_fields >= 1 && num_fields <= crate::types::NUM_FIELDS {
+        num_fields
+    } else {
+        fail_mask |= crate::types::FAIL_REENC;
+        crate::types::NUM_FIELDS
+    };
+
+    // Ballot proof public inputs
+    // The host sends none: the guest derives proof i's 71 inputs from the
+    // census leaf or CSP entry, the vote-id SMT key, the process config leaves
+    // and the original ciphertexts it re-encrypts (publics.rs). A proof only
+    // verifies if the voter proved exactly those values.
+    let publics = publics::Publics::derive(&parsed, census_origin, num_fields, &mut fail_mask);
+
     // Ballot proof verification
     // Verify the BN254 Groth16 ballot proofs using batch pairing. Each proof
     // attests that a voter correctly encrypted their ballot under the election
     // public key. The batch verification aggregates all proofs into a single
     // multi-pairing check with random linear combination (Fiat-Shamir).
-    let batch_ok = groth16::verify_batch(&parsed, &mut fail_mask);
+    let batch_ok = groth16::verify_batch(&parsed, publics.as_ref(), &mut fail_mask);
 
     // Authentication
     // Verify voter identity via cryptographic signatures. Each voter must prove
@@ -90,28 +126,23 @@ fn main() {
     // Extensible to: RSA, BLS, EdDSA, or other signature schemes. The
     // authentication method will be determined by a process parameter
     // (similar to how censusOrigin selects the eligibility check).
-    let auth_ok = ecdsa::verify_batch(&parsed, &mut fail_mask);
+    let auth_ok = ecdsa::verify_batch(&parsed, publics.as_ref(), &mut fail_mask);
 
     // Eligibility
     // Verify each voter's right to participate in this election by checking
     // their membership in the census. The verification method depends on the
     // censusOrigin parameter stored in the process configuration (key 0x06).
     // Supported census origins:
-    //   1-3: lean-IMT Poseidon Merkle tree proofs.
+    //   1-3: Keccak lean-IMT Merkle tree proofs.
     //        Each voter proves inclusion of (address, weight) in the census tree.
-    //        Enforces: same root for all proofs, no duplicate leaves.
+    //        Enforces: same root for all proofs, no duplicate leaves, leaves
+    //        below 2^248.
     //   4:   CSP (Credential Service Provider) ECDSA.
     //        An authority signs each voter's (processID, address, weight, index)
     //        using secp256k1 ECDSA. The censusRoot is the CSP's Ethereum address.
     //        Enforces: valid CSP signatures, no duplicate (address, index) pairs.
     // Extensible: future census origins (ZK-credential proofs, on-chain lookups)
     // can be added as new branches without modifying existing logic.
-
-    // Read censusOrigin from process config (process_proofs[3], key 0x06).
-    let census_origin: u64 = parsed.state.as_ref()
-        .and_then(|s| s.process_proofs.get(3))
-        .map(|p| p.new_value[0])
-        .unwrap_or(0);
 
     let (eligibility_ok, census_root) = if census_origin == crate::types::CENSUS_ORIGIN_CSP {
         // CSP ECDSA mode: verify CSP signatures for each voter.
@@ -128,7 +159,7 @@ fn main() {
             }
         }
     } else {
-        // Merkle tree mode (censusOrigin 1-3): lean-IMT Poseidon proofs.
+        // Merkle tree mode (censusOrigin 1-3): Keccak lean-IMT proofs.
         let ok = census::verify_batch(&parsed, &mut fail_mask);
         let root = parsed.census_proofs.first().map(|cp| cp.root).unwrap_or(ZERO_FR);
         (ok, root)
@@ -164,20 +195,6 @@ fn main() {
     //     H(tag || be32(seed) || be32(old_root)) so scalars never repeat
     //     within or across transitions, keeping stored ballots unlinkable to
     //     the voter while preserving the homomorphic tally structure.
-
-    // Read num_fields from the BallotMode config leaf (process_proofs[1],
-    // key 0x02), low byte of the 32-byte LE arbo leaf. Bounds the skip-work
-    // optimization in the re-encryption and results loops.
-    let num_fields: usize = parsed.state.as_ref()
-        .and_then(|s| s.process_proofs.get(1))
-        .map(|p| (p.new_value[0] & 0xFF) as usize)
-        .unwrap_or(crate::types::NUM_FIELDS);
-    let num_fields = if num_fields >= 1 && num_fields <= crate::types::NUM_FIELDS {
-        num_fields
-    } else {
-        fail_mask |= crate::types::FAIL_REENC;
-        crate::types::NUM_FIELDS
-    };
 
     // Batch re-encryption + refresh chain. Same offset-scalar chain covers
     // both: first every REENC voter entry in order, then every refresh entry
@@ -219,14 +236,14 @@ fn main() {
     // The guest rebuilds the DA blob cells from verified state (vote-id list
     // and sorted slot updates covering new votes, overwrites and silent
     // refreshes; the Results accumulator is not emitted, a follower
-    // recomputes it) and evaluates each blob polynomial at the point derived
-    // from that blob's commitment. The emitted digest binds the sequencer's
-    // commitments to what the circuit has just proved; the settlement
-    // contract checks each `(commitment, y)` against the blob's versioned
-    // hash via the EIP-4844 point-evaluation precompile. Runs AFTER the
-    // re-encryption (needs `refreshed_new`) and AFTER verify_state (needs the
-    // SMT chains).
-    let (kzg_ok, blobs_digest, n_blobs) = kzg::verify_kzg(
+    // recomputes it), hashes them into D and evaluates each blob polynomial
+    // at the point derived from D and that blob's commitment. The emitted
+    // digest binds the sequencer's commitments to what the circuit has just
+    // proved; the settlement contract derives the points from the emitted D
+    // and checks each `(commitment, y)` against the blob's versioned hash via
+    // the EIP-4844 point-evaluation precompile. Runs AFTER the re-encryption
+    // (needs `refreshed_new`) and AFTER verify_state (needs the SMT chains).
+    let (kzg_ok, blobs_digest, n_blobs, cells_digest) = kzg::verify_kzg(
         &parsed.kzg,
         parsed.state.as_ref(),
         num_fields,
@@ -312,64 +329,16 @@ fn main() {
         }
     }
 
-    // Eligibility address must match the ballot proof's address.
-    // For Merkle census: the leaf encodes PackAddressWeight(address, weight) = (address << 88) | weight.
-    // For CSP census: each CspEntry has voter_address directly as uint160 in FrRaw.
-    // The ballot proof's public_inputs[0] is the voter's Ethereum address (uint160).
-    // This check binds each eligibility proof to the specific voter who submitted
-    // the corresponding ballot proof.
-    if let Some(state) = &parsed.state {
-        if parsed.n_public >= 1 {
-            if census_origin == crate::types::CENSUS_ORIGIN_CSP {
-                // CSP mode: compare CspEntry.voter_address with proof address.
-                if let Some(csp) = &parsed.csp_block {
-                    let n = state.n_voters.min(csp.entries.len()).min(parsed.proofs.len());
-                    for i in 0..n {
-                        let csp_addr = &csp.entries[i].voter_address;
-                        let proof_addr = &parsed.proofs[i].public_inputs[0];
-                        if csp_addr[0] != proof_addr[0]
-                            || csp_addr[1] != proof_addr[1]
-                            || (csp_addr[2] & 0xFFFFFFFF) != (proof_addr[2] & 0xFFFFFFFF)
-                        {
-                            fail_mask |= crate::types::FAIL_BINDING;
-                            binding_ok = false;
-                            break;
-                        }
-                    }
-                }
-            } else {
-                // Merkle mode: extract address from census leaf.
-                let n = state.n_voters.min(parsed.census_proofs.len()).min(parsed.proofs.len());
-                for i in 0..n {
-                    let leaf_addr = extract_address_from_census_leaf(&parsed.census_proofs[i].leaf);
-                    let proof_addr = &parsed.proofs[i].public_inputs[0];
-                    if leaf_addr[0] != proof_addr[0]
-                        || leaf_addr[1] != proof_addr[1]
-                        || (leaf_addr[2] & 0xFFFFFFFF) != (proof_addr[2] & 0xFFFFFFFF)
-                    {
-                        fail_mask |= crate::types::FAIL_BINDING;
-                        binding_ok = false;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
     // Ballot proof <=> re-encryption <=> state binding.
-    // Each Groth16 ballot proof commits to public_inputs[2] = inputsHash =
-    // PoseidonMultiHash(processID, ballotMode, encKeyX, encKeyY, address,
-    // voteID, 64 original-ballot TE coords, weight). Recomputing it in-guest
-    // binds reenc_entries[i].original to the voter's proof — without this a
-    // malicious sequencer could pair a valid proof with an arbitrary
-    // "original" ballot. Comparing reencrypted against state.voter_ballots[i]
-    // then binds the SMT ballot leaf and results accumulator to the verified
-    // re-encryption. Also enforces proofs.len() == n_voters (batch Groth16
-    // verification alone accepts an empty proof list).
+    // The ballot proofs were verified against reenc_entries[i].original
+    // (public inputs 7..70), so the originals are the voter's ciphertexts;
+    // comparing reencrypted against state.voter_ballots[i] then binds the SMT
+    // ballot leaf and the results accumulator to the verified re-encryption.
+    // Also enforces proofs.len() == n_voters (batch Groth16 verification
+    // alone accepts an empty proof list).
     if let Some(state) = &parsed.state {
         if state.n_voters > 0 {
             let bindable = parsed.proofs.len() == state.n_voters
-                && parsed.n_public >= 3
                 && parsed.reenc_entries.len() == state.n_voters
                 && state.voter_ballots.len() == state.n_voters
                 && state.process_proofs.len() == 5
@@ -378,44 +347,10 @@ fn main() {
                 fail_mask |= crate::types::FAIL_BINDING;
                 binding_ok = false;
             } else {
-                let (pub_x, pub_y) = parsed.reenc_pub_key.as_ref().unwrap();
-                let ballot_mode = &state.process_proofs[1].new_value;
                 for i in 0..state.n_voters {
-                    let entry = &parsed.reenc_entries[i];
-
-                    // Weight: Merkle leaf = (address << 88) | weight, so the
-                    // low 88 bits; CSP entries carry it explicitly.
-                    let weight = if census_origin == crate::types::CENSUS_ORIGIN_CSP {
-                        parsed.csp_block.as_ref()
-                            .and_then(|c| c.entries.get(i))
-                            .map(|e| e.weight)
-                            .unwrap_or(ZERO_FR)
-                    } else {
-                        parsed.census_proofs.get(i)
-                            .map(|cp| [cp.leaf[0], cp.leaf[1] & 0xFF_FFFF, 0, 0])
-                            .unwrap_or(ZERO_FR)
-                    };
-
-                    let mut ballot = [ZERO_FR; crate::types::BALLOT_FIELDS];
-                    for f in 0..crate::types::NUM_FIELDS {
-                        ballot[f * 4] = entry.original[f].c1x;
-                        ballot[f * 4 + 1] = entry.original[f].c1y;
-                        ballot[f * 4 + 2] = entry.original[f].c2x;
-                        ballot[f * 4 + 3] = entry.original[f].c2y;
-                    }
-                    let pubs = &parsed.proofs[i].public_inputs;
-                    let h = poseidon::ballot_inputs_hash(
-                        &state.process_id, ballot_mode, pub_x, pub_y,
-                        &pubs[0], &pubs[1], &ballot, &weight, num_fields,
-                    );
-                    if h != pubs[2] {
-                        fail_mask |= crate::types::FAIL_BINDING;
-                        binding_ok = false;
-                        break;
-                    }
-
                     // Re-encrypted ballot must equal the state's voter ballot
                     // (SHA-256-hashed into the SMT leaf and accumulated).
+                    let entry = &parsed.reenc_entries[i];
                     let vb = &state.voter_ballots[i];
                     let mut same = true;
                     for f in 0..crate::types::NUM_FIELDS {
@@ -460,9 +395,9 @@ fn main() {
 
     // census_root is the Merkle root or CSP Ethereum address depending on censusOrigin.
 
-    // Build the 46 u32 output registers and emit as a byte slice.
+    // Build the u32 output registers and emit as a byte slice.
     // ziskos keeps set_output private; commit_slice is the public API.
-    let mut out = [0u32; 46];
+    let mut out = [0u32; N_OUTPUTS];
 
     // Status
     out[0] = overall_ok as u32;
@@ -496,8 +431,15 @@ fn main() {
     out[44] = parsed.n_public as u32;
     out[45] = parsed.log_n as u32;
 
-    // Emit all 46 registers as LE bytes
-    let mut out_bytes = [0u8; 46 * 4];
+    // DA cell binding: D as 8 × u32 LE, the same byte order as BlobsDigest.
+    for i in 0..8 {
+        out[46 + i] = u32::from_le_bytes(
+            cells_digest[i * 4..i * 4 + 4].try_into().unwrap(),
+        );
+    }
+
+    // Emit all registers as LE bytes
+    let mut out_bytes = [0u8; N_OUTPUTS * 4];
     for (i, &reg) in out.iter().enumerate() {
         out_bytes[i * 4..i * 4 + 4].copy_from_slice(&reg.to_le_bytes());
     }

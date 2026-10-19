@@ -11,7 +11,7 @@ use davinci_zkvm_sdk::crypto::chaum_pedersen::{
 };
 use davinci_zkvm_sdk::crypto::elgamal::{decrypt, encrypt, keygen, reencrypt, Ciphertext};
 use davinci_zkvm_sdk::crypto::field::*;
-use davinci_zkvm_sdk::crypto::poseidon::{multi_poseidon, poseidon};
+use davinci_zkvm_sdk::crypto::poseidon::poseidon;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
@@ -60,21 +60,6 @@ fn poseidon12_matches_guest_vector() {
         poseidon(&frs(&v["poseidon12_in"])).unwrap(),
         fr(&v["poseidon12_out"])
     );
-}
-
-#[test]
-fn multi_poseidon_chunks_by_16() {
-    let inputs: Vec<Fr> = (1..=71u64).map(Fr::from).collect();
-    let chunks: Vec<Fr> = inputs.chunks(16).map(|c| poseidon(c).unwrap()).collect();
-    assert_eq!(multi_poseidon(&inputs).unwrap(), poseidon(&chunks).unwrap());
-    // guest wide_tests::ballot_inputs_hash_matches_multihash
-    let expected = [
-        0x766291e2382e3ef5u64,
-        0x2c3d2b8c7b372e69,
-        0x0fdddd04802ddbe4,
-        0x057bfc2b042c3647,
-    ];
-    assert_eq!(fr_to_u256(&multi_poseidon(&inputs).unwrap()).0, expected);
 }
 
 #[test]

@@ -25,12 +25,6 @@ pub async fn submit_prove(
         )
             .into_response();
     }
-    if req.public_inputs.len() != num_proofs {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("public_inputs length ({}) must match proofs length ({})", req.public_inputs.len(), num_proofs)})),
-        ).into_response();
-    }
 
     let kind = match req.output.as_deref() {
         None | Some("plonk") => JobKind::Batch,
@@ -119,7 +113,6 @@ pub async fn submit_prove(
     // Generate ZisK binary input (CPU-bound => runs in blocking thread pool)
     let vk = req.vk.clone();
     let proofs = req.proofs.clone();
-    let public_inputs = req.public_inputs.clone();
     let sigs = req.sigs.clone();
     let state_json = req.state.clone();
     let census_json = req.census_proofs.clone();
@@ -127,7 +120,7 @@ pub async fn submit_prove(
     let reenc_json = req.reencryption.clone();
     let kzg_json = req.kzg.clone();
     let input_bytes = match tokio::task::spawn_blocking(move || {
-        let mut bytes = generate_input(&vk, &proofs, &public_inputs, &sigs)?;
+        let mut bytes = generate_input(&vk, &proofs, &sigs)?;
 
         // Append full STATETX state-transition block.
         if let Some(st) = state_json {

@@ -15,7 +15,7 @@
 
 use crate::babyjubjub::BjjAccumulator;
 use crate::bn254_fr::ONE;
-use crate::hash;
+use crate::hash::{sha256_compress, sha256_state_to_fr_be, SHA256_IV};
 use crate::types::{
     BallotData, FrRaw, StateBlock, BALLOT_FIELDS, FAIL_LEAF_HASH, FAIL_REFRESH, FAIL_RESULT_ACCUM,
     NUM_FIELDS, ZERO_FR,
@@ -111,16 +111,24 @@ pub fn serialize_ballot(b: &BallotData) -> Vec<u8> {
 
 /// Compute SHA-256 of the serialized ballot → FrRaw (LE limbs).
 /// This hash should match the SMT leaf `new_value` for ballot insertions.
+/// Same bytes as `serialize_ballot`, fed straight to the compression: an Fr's
+/// be32 encoding is its limbs high to low, each byte-swapped, so two Fr fill
+/// one block and the 2048-byte message is 32 blocks plus a padding block.
 pub fn ballot_leaf_hash(b: &BallotData) -> FrRaw {
-    let serialized = serialize_ballot(b);
-    let digest = hash::sha256_once(&serialized);
-    // Convert 32-byte hash (big-endian) to FrRaw [u64; 4] LE limbs (arbo convention)
-    let mut fr = ZERO_FR;
-    for i in 0..4 {
-        let off = (3 - i) * 8;
-        fr[i] = u64::from_be_bytes(digest[off..off + 8].try_into().unwrap());
+    const _: () = assert!(BALLOT_FIELDS % 2 == 0);
+    const PAD: [u64; 8] = [0x80, 0, 0, 0, 0, 0, 0, ((BALLOT_FIELDS * 32 * 8) as u64).swap_bytes()];
+    let mut state = SHA256_IV;
+    let mut block = [0u64; 8];
+    for pair in b.chunks_exact(2) {
+        for (h, fr) in pair.iter().enumerate() {
+            for i in 0..4 {
+                block[h * 4 + i] = fr[3 - i].swap_bytes();
+            }
+        }
+        sha256_compress(&mut state, &block);
     }
-    fr
+    sha256_compress(&mut state, &PAD);
+    sha256_state_to_fr_be(&state)
 }
 
 /// Verify the result accumulator and ballot leaf hashes.
@@ -138,6 +146,24 @@ pub fn ballot_leaf_hash(b: &BallotData) -> FrRaw {
 mod tests {
     use super::*;
     use crate::babyjubjub::{bjj_add, bjj_generator, bjj_mul, bjj_neg, BjjAffine};
+
+    // The one-shot hash must equal SHA-256 over `serialize_ballot`'s bytes.
+    #[test]
+    fn ballot_leaf_hash_matches_streaming_sha256() {
+        let mut b = zero_ballot();
+        for (i, fr) in b.iter_mut().enumerate() {
+            let i = i as u64;
+            *fr = [0x0102030405060708 ^ i, 0xa1a2a3a4a5a6a7a8, 0x1112131415161718 << (i % 7), 0xf1f2f3f4f5f6f7f8 ^ (i << 56)];
+        }
+        for ballot in [zero_ballot(), b] {
+            let d = crate::hash::sha256_once(&serialize_ballot(&ballot));
+            let mut expected = ZERO_FR;
+            for i in 0..4 {
+                expected[i] = u64::from_be_bytes(d[(3 - i) * 8..(4 - i) * 8].try_into().unwrap());
+            }
+            assert_eq!(ballot_leaf_hash(&ballot), expected);
+        }
+    }
 
     #[test]
     fn ballot_net_matches_pairwise_ops() {

@@ -23,7 +23,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestInvalidRequest_EmptyProofs(t *testing.T) {
-	body := []byte(`{"vk":{"protocol":"groth16","curve":"bn128","nPublic":1,"vk_alpha_1":["0","0","0"],"vk_beta_2":[["0","0"],["0","0"],["0","0"]],"vk_gamma_2":[["0","0"],["0","0"],["0","0"]],"vk_delta_2":[["0","0"],["0","0"],["0","0"]],"IC":[]},"proofs":[],"public_inputs":[],"sigs":[]}`)
+	body := []byte(`{"vk":{"protocol":"groth16","curve":"bn128","nPublic":1,"vk_alpha_1":["0","0","0"],"vk_beta_2":[["0","0"],["0","0"],["0","0"]],"vk_gamma_2":[["0","0"],["0","0"],["0","0"]],"vk_delta_2":[["0","0"],["0","0"],["0","0"]],"IC":[]},"proofs":[],"sigs":[]}`)
 	resp, err := http.Post(apiURL+"/prove", "application/json", strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatalf("POST /prove: %v", err)

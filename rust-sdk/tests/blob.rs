@@ -97,6 +97,14 @@ fn blobs_match_go_kzg4844() {
             hexes(&case["versioned_hashes"])
         );
         assert_eq!(hex::encode(tb.digest), s(&case["digest"]));
+        assert_eq!(hex::encode(tb.cells_digest), s(&case["cells_digest"]));
+        assert_eq!(tb.cells_digest, cells_digest(t.num_fields, &cells(&t)));
+        for (i, com) in tb.commitments.iter().enumerate() {
+            assert_eq!(
+                tb.zs[i],
+                compute_z(&pid, &root, &tb.cells_digest, n, i, com)
+            );
+        }
         assert_eq!(tb.blobs, blobs_from_cells(&cells(&t)).unwrap());
         assert_eq!(decode_blobs(&tb.blobs, t.num_fields).unwrap(), sorted(&t));
         for (b, vh) in tb.blobs.iter().zip(&tb.versioned_hashes) {
@@ -434,4 +442,85 @@ proptest! {
         let tb = build_blobs(&t, &Fr::from(77u64), &[9u8; 32]).unwrap();
         prop_assert_eq!(decode_blobs(&tb.blobs, t.num_fields).unwrap(), t);
     }
+}
+
+// Inputs of go-sdk blob_test.go katPointInputs: every byte distinct.
+fn kat_point_inputs() -> (Fr, [u8; 32], [u8; 32], [u8; 48]) {
+    let mut pid = [0u8; 32];
+    let mut root_le = [0u8; 32];
+    let mut d = [0u8; 32];
+    for i in 0..32 {
+        pid[i] = i as u8;
+        root_le[i] = 0x20 + i as u8;
+        d[i] = 0x40 + i as u8;
+    }
+    let mut com = [0u8; 48];
+    for (i, c) in com.iter_mut().enumerate() {
+        *c = 0x60 + i as u8;
+    }
+    (fr_from_be(&pid).unwrap(), root_le, d, com)
+}
+
+#[test]
+fn point_and_cells_digest_known_answers() {
+    // Same values as go-sdk TestEvaluationPointKnownAnswers and the registry tests.
+    let (pid, root, d, com) = kat_point_inputs();
+    for (n, b, want) in [
+        (
+            3,
+            2,
+            "2e68404174db9baf4868d118f11d7785ab9229ff6ca34ff9f13a2e9b5b28c858",
+        ),
+        (
+            32,
+            31,
+            "380120e02ac40876fbff01e9c74d852999b7dcd028c008fb5898b8f64236a5f7",
+        ),
+        // Raw hash above r_bls.
+        (
+            1,
+            0,
+            "1b5d86841b7b84d14f182c18852689813b81270252cb91c62467600f1e924f71",
+        ),
+    ] {
+        assert_eq!(
+            hex::encode(compute_z(&pid, &root, &d, n, b, &com)),
+            want,
+            "n {n} b {b}"
+        );
+    }
+    let cells: Vec<[u8; 32]> = (1u8..=3).map(|i| [i; 32]).collect();
+    assert_eq!(
+        hex::encode(cells_digest(2, &cells)),
+        "68aa598b4b224849460be6b385c0a75f409f16a2546ba18c864fd069a97d5a8c"
+    );
+    // A trailing zero cell is not padding D absorbs silently.
+    let mut padded = cells.clone();
+    padded.push([0; 32]);
+    assert_ne!(cells_digest(2, &padded), cells_digest(2, &cells));
+}
+
+#[test]
+fn challenge_binds_refresh_selection() {
+    // Two valid refresh selections (one slot of an adjacent occupied pair,
+    // same position in the stream), same old root, and the same supplied
+    // commitment: the points must differ. Under sha256(pid || root || C)
+    // they were equal, so content could be fitted to a known point.
+    let mut refreshed = Ballot::identity();
+    refreshed.0[0].c1 = Point::generator();
+    let t = |refresh_key: u64| TransitionData {
+        vote_ids: vec![VOTE_ID_MIN | 77],
+        updates: vec![(0x40, Ballot::identity()), (refresh_key, refreshed)],
+        num_fields: 2,
+    };
+    let (pid, root) = (Fr::from(0x1234u64), [0x56; 32]);
+    let a = build_blobs(&t(0x20), &pid, &root).unwrap();
+    let b = build_blobs(&t(0x21), &pid, &root).unwrap();
+    assert_eq!(cells(&t(0x20)).len(), cells(&t(0x21)).len());
+    assert_ne!(a.cells_digest, b.cells_digest);
+    let c = a.commitments[0];
+    let za = compute_z(&pid, &root, &a.cells_digest, 1, 0, &c);
+    let zb = compute_z(&pid, &root, &b.cells_digest, 1, 0, &c);
+    assert_ne!(za, zb);
+    assert_eq!(za, a.zs[0]);
 }
