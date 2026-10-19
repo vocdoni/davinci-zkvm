@@ -46,7 +46,7 @@ pub struct SnarkJsProof {
 /// snarkjs verification key (`verification_key.json`).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct SnarkJsVk {
-    /// davinci-circom's setup label (`"dev"` for the development setup);
+    /// davinci-circom's setup label (`"ceremony"` for the pre-production key);
     /// carried through, never used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<String>,

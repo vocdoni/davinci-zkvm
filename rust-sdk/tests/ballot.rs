@@ -117,9 +117,9 @@ fn leaf_hashes_match_go() {
     assert_eq!(leaf_value_bytes(&d), r);
 }
 
-/// davinci-circom `artifacts/DEV_VK_HASH`: the development setup's ballot VK.
-/// The production ceremony replaces the asset and this pin together.
-const DEV_VK_HASH: &str = "e8e1e7377394b6600e7e31f2f2d012f148694d07c6088b205371a0fcc96418a9";
+/// The pre-production ceremony key (davinci-circom v1.2.0, `artifacts/VK_HASH`).
+/// A new key replaces the asset and this pin together.
+const BALLOT_VK_HASH: &str = "7caffddcd7ea38439cbb45789b810d8eafceca65cff93dbeaae409b2bf64e219";
 
 #[test]
 fn ballot_vk_hash_matches_go() {
@@ -131,7 +131,7 @@ fn ballot_vk_hash_matches_go() {
     .unwrap();
     let ver = BallotVerifier::from_snarkjs_json(&embedded).unwrap();
     assert_eq!(hex::encode(ver.vk_hash()), s(&v["ballot_vk_leaf"]));
-    assert_eq!(hex::encode(ver.vk_hash()), DEV_VK_HASH);
+    assert_eq!(hex::encode(ver.vk_hash()), BALLOT_VK_HASH);
 }
 
 #[test]
