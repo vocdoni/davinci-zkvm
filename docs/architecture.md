@@ -32,7 +32,7 @@ in one execution:
 | Check | What it covers |
 |---|---|
 | Ballot proofs | Batched Groth16 (BN254) verification of every voter's ballot proof against 71 public inputs the guest derives itself (census address and weight, vote ID, process config, original ciphertexts), with the random linear combination computed in-guest. |
-| Signatures | secp256k1 recovery of each voter's signature over its vote ID, bound to the address in the ballot proof. |
+| Signatures | secp256k1 recovery of each voter's signature over its vote envelope (process id, vote ID and the original ciphertexts), bound to the address in the ballot proof. |
 | Eligibility | Keccak lean-IMT census proofs, or signatures from a Credential Service Provider (CSP census). |
 | State transition | Arbo SHA-256 sparse Merkle tree updates for vote IDs, ballots and the results leaf, plus read proofs of the process configuration. |
 | Re-encryption | Every stored ballot is the voter's ballot re-encrypted with scalars derived in-guest from one secret seed per batch. |
@@ -156,6 +156,7 @@ can tell overwrites from refreshes.
 | Ciphertexts per ballot | 16 | `NUM_FIELDS` |
 | DA blobs per batch | 32 | `MAX_BLOBS` |
 | State tree depth | 64 | `SMT_LEVELS` |
+| Sibling slots per state-tree proof | 65 | `SMT_PROOF_LEVELS` |
 
 The constants live in `circuit-primitives/src/types.rs` and are mirrored in
 `input-gen`, `go-sdk/types.go` and `rust-sdk/src/limits.rs`. Changing one

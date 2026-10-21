@@ -33,8 +33,11 @@ import (
 const (
 	// procLevels is the number of levels in the arbo SHA-256 process state
 	// tree (davinci-node StateTreeMaxLevels); keys are u64, hence keyLen.
-	procLevels = 64
-	keyLen     = 8
+	procLevels = davinci.SMTLevels
+	// proofLevels is the sibling count of every state-tree proof the harness
+	// sends: one more than the tree depth, for a leaf at depth 64.
+	proofLevels = davinci.SMTProofLevels
+	keyLen      = 8
 	// ballotMin is the minimum key for ballot SMT entries (matches circuit constant).
 	ballotMin = uint64(0x10)
 	// voteIDMin is the minimum key for voteID SMT entries (bit 63 set).
@@ -470,7 +473,7 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 	}
 
 	bLen := arbo.HashFunctionSha256.Len()
-	processSmtProofs, err := buildArboReadProofs(e.ProcTree, configKeys, bLen, procLevels)
+	processSmtProofs, err := buildArboReadProofs(e.ProcTree, configKeys, bLen, proofLevels)
 	if err != nil {
 		return nil, nil, fmt.Errorf("buildArboReadProofs: %w", err)
 	}
@@ -492,7 +495,7 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 			e.ProcTree,
 			new(big.Int).SetUint64(res.VoteID),
 			big.NewInt(davinci.VoteIDLeafValue),
-			procLevels,
+			proofLevels,
 		)
 		if err != nil {
 			return nil, nil, fmt.Errorf("voteID insert[%d]: %w", i, err)
@@ -519,7 +522,7 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 				e.ProcTree,
 				new(big.Int).SetUint64(key),
 				newLeafVal,
-				procLevels,
+				proofLevels,
 			)
 			if err != nil {
 				return nil, nil, fmt.Errorf("ballot update[%d] (voter %d): %w", i, v.CensusIdx, err)
@@ -532,7 +535,7 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 				e.ProcTree,
 				new(big.Int).SetUint64(key),
 				newLeafVal,
-				procLevels,
+				proofLevels,
 			)
 			if err != nil {
 				return nil, nil, fmt.Errorf("ballot insert[%d] (voter %d): %w", i, v.CensusIdx, err)
@@ -610,7 +613,7 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 			e.ProcTree,
 			new(big.Int).SetUint64(key),
 			newLeafVal,
-			procLevels,
+			proofLevels,
 		)
 		if err != nil {
 			return nil, nil, fmt.Errorf("refresh update[%#x]: %w", key, err)
@@ -633,7 +636,7 @@ func (e *Election) BuildStateBlock(batchVoters []*Voter, ballotResults []*Ballot
 		e.ProcTree,
 		new(big.Int).SetUint64(keyResults),
 		newResultsLeaf,
-		procLevels,
+		proofLevels,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Results update: %w", err)

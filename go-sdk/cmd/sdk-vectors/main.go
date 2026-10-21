@@ -60,7 +60,9 @@ func main() {
 	write("leanimt.json", leanIMTVectors())
 	write("census.json", censusVectors())
 	write("slot.json", slotVectors())
-	write("voteid_sig.json", voteIDSigVectors())
+	// The retired vote-id signature vectors drew one value here; keep the
+	// stream so that ballots.json does not move.
+	_ = rng.Uint64()
 	write("ballots.json", ballotVectors())
 	if *proofs {
 		// Own stream, so the files after this do not depend on -proofs.

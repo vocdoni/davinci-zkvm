@@ -24,32 +24,57 @@ pub fn gt_one() -> GT {
     one
 }
 
-/// Returns `true` if `p` is on the BN254 G2 curve and in the prime-order
-/// subgroup. Rejects the identity: it is only used on VK points (β, γ, δ),
-/// which are never 𝒪 in an honest setup, and a 𝒪 γ or δ would drop its
-/// pairing term entirely (the precompile skips 𝒪 pairs), unbinding the
-/// public inputs or C points. The VK-hash pin already blocks substitution;
-/// this is free defense in depth.
+/// BN254 base field modulus q as [u64; 4] little-endian.
+pub const BN254_FQ_MODULUS: [u64; 4] = [
+    0x3c208c16d87cfd47,
+    0x97816a916871ca8d,
+    0xb85045b68181585d,
+    0x30644e72e131a029,
+];
+
+/// Returns `true` if the 4-limb LE value `x` is below q.
+pub fn fq_is_canonical(x: &[u64]) -> bool {
+    for i in (0..4).rev() {
+        if x[i] != BN254_FQ_MODULUS[i] {
+            return x[i] < BN254_FQ_MODULUS[i];
+        }
+    }
+    false
+}
+
+/// Returns `true` if every coordinate of `p` is canonical, `p` is on the
+/// BN254 G2 twist and in the prime-order subgroup, and is not the identity.
+///
+/// Used on the VK's β, γ, δ and on every proof's B. The batch randomises the
+/// G1 slot of each pairing, which is sound only when B is in G2: otherwise
+/// `e(r·A, B)` is no power of a fixed `e(A, B)`. A 𝒪 B, γ or δ would drop its
+/// pairing term (the precompile skips 𝒪 pairs). The bound comes first: the
+/// transcript hashes the raw limbs, and the Fq2 precompiles abort on a limb
+/// at or above q.
 pub fn g2_is_valid(p: &G2) -> bool {
-    if *p == g2_identity() {
+    if !(0..4).all(|i| fq_is_canonical(&p[4 * i..4 * i + 4])) || *p == g2_identity() {
         return false;
     }
     is_on_curve_twist_bn254(p) && is_on_subgroup_twist_bn254(p)
 }
 
-/// Returns `true` if `p` is on the BN254 G1 curve and is not the identity.
+/// Returns `true` if both coordinates of `p` are canonical and `p` is on the
+/// BN254 G1 curve and is not the identity.
 ///
-/// The identity check is ours to make: zisklib's `is_on_curve_bn254` ends in
-/// `eq(lhs, rhs) || eq(p, G1_IDENTITY)`, so it accepts the all-zero encoding.
-/// Every G1 point we validate feeds the batch MSM, and `add_bn254` requires
-/// on-curve, non-identity, canonical inputs. An identity term is also skipped
-/// outright by the pairing precompile, which is exactly the degree of freedom
-/// the batch random linear combination exists to remove.
+/// The bound comes first: zisklib's curve check reduces its input, while the
+/// transcript hashes the raw limbs, so `x + q` would be a second encoding of
+/// the same point. The identity check is ours to make too: zisklib's
+/// `is_on_curve_bn254` ends in `eq(lhs, rhs) || eq(p, G1_IDENTITY)`, so it
+/// accepts the all-zero encoding. Every G1 point we validate feeds the batch
+/// MSM, and `add_bn254` requires on-curve, non-identity, canonical inputs. An
+/// identity term is also skipped outright by the pairing precompile, which is
+/// exactly the degree of freedom the batch random linear combination exists
+/// to remove.
 ///
 /// No subgroup check: BN254 G1 has prime order, so on-curve implies
 /// in-group.
 pub fn g1_is_valid(p: &G1) -> bool {
-    if *p == g1_identity() {
+    if !fq_is_canonical(&p[0..4]) || !fq_is_canonical(&p[4..8]) || *p == g1_identity() {
         return false;
     }
     is_on_curve_bn254(p)
@@ -100,5 +125,43 @@ mod tests {
         let mut p = G2_GEN;
         p[0] ^= 1;
         assert!(!g2_is_valid(&p));
+    }
+
+    /// `v + q` as LE limbs (no carry out for the values used here).
+    fn plus_q(v: &[u64]) -> [u64; 4] {
+        let mut out = [0u64; 4];
+        let mut carry = 0u128;
+        for i in 0..4 {
+            let s = v[i] as u128 + BN254_FQ_MODULUS[i] as u128 + carry;
+            out[i] = s as u64;
+            carry = s >> 64;
+        }
+        assert_eq!(carry, 0);
+        out
+    }
+
+    #[test]
+    fn fq_bound() {
+        assert!(fq_is_canonical(&[0, 0, 0, 0]));
+        let mut below = BN254_FQ_MODULUS;
+        below[0] -= 1;
+        assert!(fq_is_canonical(&below));
+        assert!(!fq_is_canonical(&BN254_FQ_MODULUS));
+        assert!(!fq_is_canonical(&[u64::MAX; 4]));
+    }
+
+    #[test]
+    fn non_canonical_coordinates_rejected() {
+        // G1 generator (1, 2), and the same point with x + q.
+        let g1: G1 = [1, 0, 0, 0, 2, 0, 0, 0];
+        assert!(g1_is_valid(&g1));
+        let mut alias = g1;
+        alias[0..4].copy_from_slice(&plus_q(&g1[0..4]));
+        assert!(!g1_is_valid(&alias));
+        for c in 0..4 {
+            let mut alias = G2_GEN;
+            alias[4 * c..4 * c + 4].copy_from_slice(&plus_q(&G2_GEN[4 * c..4 * c + 4]));
+            assert!(!g2_is_valid(&alias), "coordinate {c}");
+        }
     }
 }

@@ -43,8 +43,8 @@ pub fn le_to_fr(b: &[u8; 32]) -> FrRaw {
 // Arbo-compatible hash functions
 
 /// Arbo leaf hash: `SHA256(key_le8 || value_le32 || 0x01)` => 41 bytes.
-/// The tree has `SMT_LEVELS = 64` levels, so arbo keys are 8 bytes; only
-/// limb 0 of the key is ever hashed or walked.
+/// Keys are u64 (arbo keys are 8 bytes), so only limb 0 is hashed;
+/// `verify_transition` refuses any key with a non-zero upper limb.
 /// One padded block, as LE words: the LE fields are the words themselves,
 /// then 0x01, the 0x80 pad byte and the 328-bit length (big-endian).
 pub fn leaf_hash(key: &FrRaw, value: &FrRaw) -> FrRaw {
@@ -227,6 +227,13 @@ fn processor_level(
 pub fn verify_transition(t: &SmtTransition) -> bool {
     let levels = t.siblings.len();
     if levels == 0 {
+        return false;
+    }
+
+    // Keys are u64: the leaf hash covers limb 0 only, while a 65-level walk
+    // reads bit 64 (limb 1), so a wider key would stand for the leaf of its
+    // low limb on another path.
+    if t.old_key[1..].iter().chain(&t.new_key[1..]).any(|&l| l != 0) {
         return false;
     }
 
@@ -1150,5 +1157,72 @@ mod hash_tests {
             d[i] = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
         }
         assert_eq!(node_hash(&ZERO_FR, &ZERO_FR), le_to_fr(&d));
+    }
+}
+
+#[cfg(test)]
+mod key_width_tests {
+    use super::*;
+    use crate::types::{SMT_LEVELS, SMT_PROOF_LEVELS};
+
+    fn bit(k: &FrRaw, i: usize) -> bool {
+        (k[i / 64] >> (i % 64)) & 1 == 1
+    }
+
+    fn sw(b: bool, l: FrRaw, r: FrRaw) -> (FrRaw, FrRaw) {
+        if b {
+            (r, l)
+        } else {
+            (l, r)
+        }
+    }
+
+    /// A two-leaf tree: slot 0x10 and vote id 2^63|5, with the INSERT of the
+    /// vote id again, its `old_key` given as `old_key` and the root the
+    /// processor derives for it.
+    fn reinsert(old_key: FrRaw, levels: usize) -> SmtTransition {
+        let k: FrRaw = [(1u64 << 63) | 5, 0, 0, 0];
+        let j: FrRaw = [0x10, 0, 0, 0];
+        let lk = leaf_hash(&k, &ZERO_FR);
+        let lj = leaf_hash(&j, &[7, 0, 0, 0]);
+        let root = node_hash(&lj, &lk);
+        let mut siblings = vec![ZERO_FR; levels];
+        siblings[0] = lj;
+        let (l, r) = sw(bit(&k, 64), lk, lk);
+        let mut new = node_hash(&l, &r);
+        for i in (1..SMT_LEVELS).rev() {
+            let (l, r) = sw(bit(&k, i), new, ZERO_FR);
+            new = node_hash(&l, &r);
+        }
+        let (l, r) = sw(bit(&k, 0), new, lj);
+        SmtTransition {
+            old_root: root,
+            new_root: node_hash(&l, &r),
+            old_key,
+            old_value: ZERO_FR,
+            is_old0: false,
+            new_key: k,
+            new_value: ZERO_FR,
+            fnc0: true,
+            fnc1: false,
+            siblings,
+        }
+    }
+
+    #[test]
+    fn an_existing_key_is_never_inserted_again() {
+        let k: FrRaw = [(1u64 << 63) | 5, 0, 0, 0];
+        assert!(!verify_transition(&reinsert(k, SMT_PROOF_LEVELS)));
+        assert!(!verify_transition(&reinsert(k, SMT_LEVELS)));
+    }
+
+    #[test]
+    fn a_key_wider_than_64_bits_is_refused() {
+        let alias: FrRaw = [(1u64 << 63) | 5, 1, 0, 0];
+        assert!(!verify_transition(&reinsert(alias, SMT_LEVELS)));
+        assert!(!verify_transition(&reinsert(alias, SMT_PROOF_LEVELS)));
+        let mut t = reinsert([(1u64 << 63) | 5, 0, 0, 0], SMT_PROOF_LEVELS);
+        t.new_key[2] = 1;
+        assert!(!verify_transition(&t));
     }
 }

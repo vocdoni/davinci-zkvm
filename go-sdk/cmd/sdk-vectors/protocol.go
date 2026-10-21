@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
+	mrand "math/rand"
 	"os"
 	"path/filepath"
 
@@ -19,9 +21,7 @@ import (
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/chain"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/circuits/ballotproof"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto"
 	bjj "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/bjj_gnark"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/signatures/ethereum"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/spec"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/types"
 )
@@ -274,25 +274,60 @@ func censusVectors() map[string]any {
 	}
 }
 
-func voteIDSigVectors() map[string]any {
+type voteEnvelopeVec struct {
+	ProcessID string   `json:"pid"`     // 0x + 32-byte BE (the preimage bytes)
+	VoteID    string   `json:"vote_id"` // 0x + 8-byte BE
+	Ballot    []string `json:"ballot"`  // 64 decimal TE coordinates, circuit order
+	SignerKey string   `json:"signer_key"`
+	Digest    string   `json:"digest"`    // davinci.VoteEnvelopeDigest
+	Signature string   `json:"signature"` // r ‖ s ‖ v, v in {0, 1}
+	Address   string   `json:"address"`
+}
+
+// voteEnvelopeVectors are signed vote envelopes (davinci.VoteEnvelopeDigest,
+// SignVote) on their own rng, so the other files do not move. The last two
+// reuse the third one's vote id with another process id, and its process id
+// with another ballot: each changes the digest and the signature.
+func voteEnvelopeVectors() []voteEnvelopeVec {
+	r := mrand.New(mrand.NewSource(20261020))
+	_, pk := fixedKey()
 	key := fixedECDSA("davinci-sdk-vectors-voter")
-	type sigVec struct {
-		VoteID uint64 `json:"vote_id"`
-		R      string `json:"r"`
-		S      string `json:"s"`
-		V      uint8  `json:"v"`
+	addr := ethcrypto.PubkeyToAddress(key.PublicKey)
+	ballot := func(nf int) []*big.Int {
+		fields := make([]uint64, nf)
+		for i := range fields {
+			fields[i] = uint64(r.Intn(50))
+		}
+		return encryptBallot(pk, fields, new(big.Int).Rand(r, fieldP), nf).FromRTEtoTE().BigInts()
 	}
-	var out []sigVec
-	for _, vid := range []uint64{1 << 63, 1<<63 + 12345, 1<<64 - 1, 1<<63 | rng.Uint64()} {
-		sig, err := ethereum.Sign(crypto.PadToSign(types.VoteID(vid).Bytes()), key)
+	pid := func() *big.Int {
+		creator := make([]byte, 20)
+		r.Read(creator)
+		return processID(creator, [4]byte{0x3c, 0x3e, 0x07, 0x77}, uint64(r.Intn(1<<20))).MathBigInt()
+	}
+	vec := func(p *big.Int, vid uint64, b []*big.Int) voteEnvelopeVec {
+		d, err := davinci.VoteEnvelopeDigest(p, vid, b)
 		must(err)
-		b := sig.Bytes()
-		out = append(out, sigVec{VoteID: vid, R: hex.EncodeToString(b[:32]), S: hex.EncodeToString(b[32:64]), V: b[64]})
+		sig, err := davinci.SignVote(key, p, vid, b)
+		must(err)
+		got, err := davinci.RecoverVoteSigner(p, vid, b, sig)
+		must(err)
+		if got != addr {
+			log.Fatalf("vote envelope: recovered %s, want %s", got, addr)
+		}
+		return voteEnvelopeVec{
+			ProcessID: "0x" + hex32(p), VoteID: fmt.Sprintf("0x%016x", vid), Ballot: decs(b),
+			SignerKey: "0x" + hex.EncodeToString(ethcrypto.FromECDSA(key)), Digest: "0x" + hex.EncodeToString(d[:]),
+			Signature: "0x" + hex.EncodeToString(sig), Address: "0x" + hex.EncodeToString(addr.Bytes()),
+		}
 	}
-	return map[string]any{
-		"key":     hex.EncodeToString(ethcrypto.FromECDSA(key)),
-		"address": hex.EncodeToString(ethcrypto.PubkeyToAddress(key.PublicKey).Bytes()),
-		"sigs":    out,
+	p3, vid3, b3 := pid(), uint64(1<<63)|r.Uint64(), ballot(7)
+	return []voteEnvelopeVec{
+		vec(pid(), 1<<63, ballot(1)),
+		vec(pid(), 1<<64-1, ballot(16)),
+		vec(p3, vid3, b3),
+		vec(pid(), vid3, b3),
+		vec(p3, vid3, ballot(7)),
 	}
 }
 

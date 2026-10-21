@@ -24,9 +24,10 @@ fn limits_and_refresh_target() {
             MAX_REFRESH,
             NUM_FIELDS,
             SMT_LEVELS,
+            SMT_PROOF_LEVELS,
             MAX_BLOBS
         ),
-        (1024, 2048, 16, 64, 32)
+        (1024, 2048, 16, 64, 65, 32)
     );
     assert_eq!(
         (REFRESH_MIN, REFRESH_TAU, REFRESH_KAPPA, TX_BLOB_CAP),
@@ -43,6 +44,39 @@ fn limits_and_refresh_target() {
     assert_eq!(required_refresh(10, 2, 5), 3);
     assert_eq!(required_refresh(10, 2, 1000), 16);
     assert_eq!(required_refresh(10, 20, 5), 0);
+}
+
+/// The registry's creation rule at its boundaries (go-sdk
+/// TestBallotModeValidateCostRule, ProcessRegistry.t.sol).
+#[test]
+fn mode_rule_boundaries() {
+    let mode = |num_fields: u8, max_value: u64, cost_exponent: u8| BallotMode {
+        num_fields,
+        group_size: num_fields,
+        unique_values: false,
+        cost_exponent,
+        max_value,
+        min_value: 0,
+        max_value_sum: 0,
+        min_value_sum: 0,
+    };
+    for (name, m, ok) in [
+        ("16 * (2^48-1)^1", mode(16, (1 << 48) - 1, 1), true),
+        ("16 * (2^15)^4 = 2^64", mode(16, 1 << 15, 4), false),
+        ("1 * (2^63-1)^1 = 2^63-1", mode(1, (1 << 63) - 1, 1), true),
+        ("1 * (2^63)^1 = 2^63", mode(1, 1 << 63, 1), false),
+        ("2 * (2^31)^2 = 2^63", mode(2, 1 << 31, 2), false),
+        ("1 * 3037000499^2 < 2^63", mode(1, 3_037_000_499, 2), true),
+        (
+            "16 * (2^48-1)^255 overflows",
+            mode(16, (1 << 48) - 1, 255),
+            false,
+        ),
+        ("16 * 1^255", mode(16, 1, 255), true),
+        ("costExponent 0", mode(16, 1, 0), false),
+    ] {
+        assert_eq!(m.validate().is_ok(), ok, "{name}");
+    }
 }
 
 #[test]
@@ -117,9 +151,9 @@ fn leaf_hashes_match_go() {
     assert_eq!(leaf_value_bytes(&d), r);
 }
 
-/// The pre-production ceremony key (davinci-circom v1.2.0, `artifacts/VK_HASH`).
+/// The pre-production ceremony key (davinci-circom v1.3.0, `artifacts/VK_HASH`).
 /// A new key replaces the asset and this pin together.
-const BALLOT_VK_HASH: &str = "7caffddcd7ea38439cbb45789b810d8eafceca65cff93dbeaae409b2bf64e219";
+const BALLOT_VK_HASH: &str = "67e8e6b47ea32cf144d6e72886f02b95ed068b157f9d4ccc8e97f335858e4963";
 
 #[test]
 fn ballot_vk_hash_matches_go() {

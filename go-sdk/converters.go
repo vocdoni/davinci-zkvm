@@ -88,12 +88,14 @@ type Groth16Proof struct {
 	Protocol string
 }
 
-// MarshalJSON produces snarkjs-compatible proof JSON.
+// MarshalJSON produces snarkjs-compatible proof JSON. "curve" is always
+// bn128 (BN254) and must be present: input-gen's SnarkJsProof requires it.
 func (p *Groth16Proof) MarshalJSON() ([]byte, error) {
 	return []byte(fmt.Sprintf(`{`+
 		`"pi_a":[%q,%q,%q],`+
 		`"pi_b":[[%q,%q],[%q,%q],[%q,%q]],`+
 		`"pi_c":[%q,%q,%q],`+
+		`"curve":"bn128",`+
 		`"protocol":%q}`,
 		p.A[0], p.A[1], p.A[2],
 		p.B[0][0], p.B[0][1], p.B[1][0], p.B[1][1], p.B[2][0], p.B[2][1],

@@ -28,22 +28,25 @@ the JSON carries as arbo-LE hex). `Digest` is 32 raw SHA-256 bytes.
 | 8 | 32 | `state_root` | Digest: the arbo root bytes |
 | 40 | 32 | `pk_x` | Fr, TE x of the election key |
 | 72 | 32 | `pk_y` | Fr, TE y |
-| 104 | 8 | `n_key` | u64, must equal `SMT_LEVELS` = 64 |
-| 112 | 64×32 | `key_siblings` | Digest each, root→leaf, zero-padded |
-| 2160 | 64×32 | `accumulator` | Fr each, `[c1x, c1y, c2x, c2y] × 16`, TE |
-| 4208 | 8 | `n_acc` | u64, must equal 64 |
-| 4216 | 64×32 | `acc_siblings` | Digest each, root→leaf, zero-padded |
-| 6264 | 16×8 | `results` | u64 claimed plaintext per ciphertext |
-| 6392 | 16×160 | `cp` | per ciphertext: `a1x a1y a2x a2y z` (Fr each) |
-| 8952 | | end | total length is exactly 8952 bytes |
+| 104 | 8 | `n_key` | u64, must equal `SMT_PROOF_LEVELS` = 65 |
+| 112 | 65×32 | `key_siblings` | Digest each, root→leaf, zero-padded |
+| 2192 | 64×32 | `accumulator` | Fr each, `[c1x, c1y, c2x, c2y] × 16`, TE |
+| 4240 | 8 | `n_acc` | u64, must equal 65 |
+| 4248 | 65×32 | `acc_siblings` | Digest each, root→leaf, zero-padded |
+| 6328 | 16×8 | `results` | u64 claimed plaintext per ciphertext |
+| 6456 | 16×160 | `cp` | per ciphertext: `a1x a1y a2x a2y z` (Fr each) |
+| 9016 | | end | total length is exactly 9016 bytes |
 
-Anything else (wrong magic, `n_key`/`n_acc` ≠ 64, short frame, trailing bytes)
+Anything else (wrong magic, `n_key`/`n_acc` ≠ 65, short frame, trailing bytes)
 is a parse failure: the guest sets `FAIL_PARSE`, skips every check and
 commits `ok = 0`.
 
-The host builder accepts sibling lists of 1..=64 entries and zero-pads them to
-64 (trailing zero siblings do not change an SMT inclusion proof); more than 64
-is rejected host-side.
+Each list has 65 slots, one more than the 64-level state tree: a key that
+shares its 63 low path bits with another (a vote id `2^63 | k`) sits at depth
+64, and its proof needs the zero sentinel below it. The host builder accepts
+sibling lists of 1..=65 entries and zero-pads them to 65 (trailing zero
+siblings do not change an SMT inclusion proof); more than 65 is rejected
+host-side.
 
 ### JSON (`POST /results`, `gen-results-input --request`)
 

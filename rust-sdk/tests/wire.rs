@@ -314,7 +314,7 @@ fn build_results_request_roundtrip() {
         build_results_request(&root, &pk, &sibs, &acc, &sibs, &sk, 10_000, &mut rng).unwrap();
     assert_eq!(&results[..4], &tally);
     assert!(results[4..].iter().all(|r| *r == 0));
-    assert_eq!(req.key_siblings.len(), 64);
+    assert_eq!(req.key_siblings.len(), 65);
     assert_eq!(req.key_siblings[1], hex::encode([2u8; 32]));
     assert_eq!(req.key_siblings[2], hex::encode([0u8; 32]));
     assert_eq!(req.state_root, hex::encode(root));
@@ -335,7 +335,7 @@ fn build_results_request_roundtrip() {
     let (sk2, _) = keygen(&mut rng);
     assert!(build_results_request(&root, &pk, &sibs, &acc, &sibs, &sk2, 10_000, &mut rng).is_err());
     assert!(build_results_request(&root, &pk, &sibs, &acc, &sibs, &sk, 999, &mut rng).is_err());
-    let long = vec![[0u8; 32]; 65];
+    let long = vec![[0u8; 32]; 66];
     assert!(build_results_request(&root, &pk, &long, &acc, &sibs, &sk, 10_000, &mut rng).is_err());
 }
 
@@ -343,11 +343,11 @@ fn build_results_request_roundtrip() {
 fn release_pins() {
     assert_eq!(
         hex::encode(BATCH_PROGRAM_VK),
-        "1e4a74a1c6fb1cd1874d80895e1e075930837955efb4a135539016f7cdead2a8"
+        "4b1a527e284af96fa0c3543e9e9b18746a6494edd99c309e58d96a804e3041dc"
     );
     assert_eq!(
         hex::encode(RESULTS_PROGRAM_VK),
-        "de55d751582e510bf378d4eec0d98ee3fa5817a50b77bc0e5ce560035e29e4e9"
+        "ce964acdd53329fc49ede57f5ea288f044950e136be119287fd0021390689dc4"
     );
     assert_eq!(
         hex::encode(ROOT_C_VADCOP_FINAL),

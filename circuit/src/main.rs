@@ -120,8 +120,8 @@ fn main() {
     // Authentication
     // Verify voter identity via cryptographic signatures. Each voter must prove
     // they control the private key corresponding to their registered address.
-    // The signature covers the voteID, binding the voter's identity to their
-    // specific ballot.
+    // The signature covers the vote envelope (process id, vote id and the
+    // original ciphertexts), binding the voter's identity to their ballot.
     // Currently supported: secp256k1 ECDSA (Ethereum-compatible).
     // Extensible to: RSA, BLS, EdDSA, or other signature schemes. The
     // authentication method will be determined by a process parameter

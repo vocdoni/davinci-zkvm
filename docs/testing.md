@@ -45,12 +45,13 @@ Requirements:
 
 ```bash
 cd go-sdk/tests
-go test ./integration -run 'TestCheat|TestResultsCheat' -v -timeout 30m
+go test ./integration -run 'TestCheat|TestAttack|TestResultsCheat' -v -timeout 30m
 ```
 
 A missing generator makes the tests skip rather than fail, so check the
-output for `SKIP`. `TestCheat*` covers the vote-batch guest, including the
-ballot-slot and CSP cases, and `TestResultsCheat` the results guest.
+output for `SKIP`; CI fails on any skip. `TestCheat*` and `TestAttack*` cover
+the vote-batch guest, including the ballot-slot and CSP cases, and
+`TestResultsCheat` the results guest.
 
 ## Integration tests
 

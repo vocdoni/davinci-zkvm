@@ -462,10 +462,10 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
     // VoteID chain
     let vote_id_n = read1!(0) as usize;
     let n_levels = read1!(0) as usize;
-    if n_levels > crate::types::SMT_LEVELS {
+    if n_levels > crate::types::SMT_PROOF_LEVELS {
         *fail_mask |= 1 << 31;
     }
-    let n_levels = n_levels.min(crate::types::SMT_LEVELS);
+    let n_levels = n_levels.min(crate::types::SMT_PROOF_LEVELS);
     if vote_id_n > crate::types::MAX_BATCH_SIZE {
         *fail_mask |= 1 << 31;
     }
@@ -478,10 +478,10 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
     // Ballot chain
     let ballot_n = read1!(0) as usize;
     let ballot_n_levels = read1!(0) as usize;
-    if ballot_n_levels > crate::types::SMT_LEVELS {
+    if ballot_n_levels > crate::types::SMT_PROOF_LEVELS {
         *fail_mask |= 1 << 31;
     }
-    let ballot_n_levels = ballot_n_levels.min(crate::types::SMT_LEVELS);
+    let ballot_n_levels = ballot_n_levels.min(crate::types::SMT_PROOF_LEVELS);
     if ballot_n > crate::types::MAX_BATCH_SIZE {
         *fail_mask |= 1 << 31;
     }
@@ -500,10 +500,10 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
     }
     let refresh_n = refresh_n.min(crate::types::MAX_REFRESH);
     let refresh_n_levels = read1!(0) as usize;
-    if refresh_n_levels > crate::types::SMT_LEVELS {
+    if refresh_n_levels > crate::types::SMT_PROOF_LEVELS {
         *fail_mask |= 1 << 31;
     }
-    let refresh_n_levels = refresh_n_levels.min(crate::types::SMT_LEVELS);
+    let refresh_n_levels = refresh_n_levels.min(crate::types::SMT_PROOF_LEVELS);
     let mut refresh_chain = Vec::with_capacity(refresh_n);
     for _ in 0..refresh_n {
         refresh_chain.push(parse_smt_transition(input, off, refresh_n_levels, fail_mask));
@@ -512,10 +512,10 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
     // Net Results transition (0 or 1)
     let has_results = read1!(0) != 0;
     let results_n_levels = read1!(0) as usize;
-    if results_n_levels > crate::types::SMT_LEVELS {
+    if results_n_levels > crate::types::SMT_PROOF_LEVELS {
         *fail_mask |= 1 << 31;
     }
-    let results_n_levels = results_n_levels.min(crate::types::SMT_LEVELS);
+    let results_n_levels = results_n_levels.min(crate::types::SMT_PROOF_LEVELS);
     let results = if has_results {
         Some(parse_smt_transition(
             input,
@@ -536,10 +536,10 @@ fn parse_state_block(input: &[u8], off: &mut usize, fail_mask: &mut u32) -> Stat
     let mut process_proofs = Vec::with_capacity(process_n);
     if process_n > 0 {
         let process_n_levels = read1!(0) as usize;
-        if process_n_levels > crate::types::SMT_LEVELS {
+        if process_n_levels > crate::types::SMT_PROOF_LEVELS {
             *fail_mask |= 1 << 31;
         }
-        let process_n_levels = process_n_levels.min(crate::types::SMT_LEVELS);
+        let process_n_levels = process_n_levels.min(crate::types::SMT_PROOF_LEVELS);
         for _ in 0..process_n {
             process_proofs.push(parse_smt_transition(
                 input,

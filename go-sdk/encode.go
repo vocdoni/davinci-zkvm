@@ -298,10 +298,27 @@ func beHexToFrLE(s string) ([4]uint64, error) {
 	return beBytes32ToFrLE(b), nil
 }
 
+// censusHexToFrLE parses a census value: "0x" and exactly 64 hex digits (either
+// case), a big-endian 256-bit integer, never reduced. Anything else is
+// refused, as input-gen's census_node_from_hex, rust-sdk and the TS SDK do:
+// a short, unprefixed or decimal string would otherwise be read as another
+// root, leaf or sibling.
+func censusHexToFrLE(s string) ([4]uint64, error) {
+	h, ok := strings.CutPrefix(s, "0x")
+	if !ok || len(h) != 64 {
+		return [4]uint64{}, fmt.Errorf("census value must be 0x and 64 hex digits: %q", s)
+	}
+	b, err := hex.DecodeString(h)
+	if err != nil {
+		return [4]uint64{}, fmt.Errorf("census value must be 0x and 64 hex digits: %q", s)
+	}
+	return beBytes32ToFrLE(b), nil
+}
+
 // EncodeCensusBlock serializes a slice of CensusProof into the CENSUS binary block.
 //
-// CensusProof.Root, Leaf, and Siblings must be 32-byte big-endian hex strings
-// (0x-prefixed), matching the output of math/big.Int.Bytes().
+// CensusProof.Root, Leaf, and Siblings must be "0x" and exactly 64 hex digits
+// (a 32-byte big-endian integer); any other form is an error.
 //
 // Format:
 //
@@ -320,11 +337,11 @@ func EncodeCensusBlock(proofs []CensusProof) ([]byte, error) {
 	buf := append([]byte{}, censusMagic[:]...)
 	buf = appendU64(buf, uint64(len(proofs)))
 	for _, p := range proofs {
-		root, err := beHexToFrLE(p.Root)
+		root, err := censusHexToFrLE(p.Root)
 		if err != nil {
 			return nil, fmt.Errorf("census root: %w", err)
 		}
-		leaf, err := beHexToFrLE(p.Leaf)
+		leaf, err := censusHexToFrLE(p.Leaf)
 		if err != nil {
 			return nil, fmt.Errorf("census leaf: %w", err)
 		}
@@ -332,7 +349,7 @@ func EncodeCensusBlock(proofs []CensusProof) ([]byte, error) {
 		buf = appendFr(buf, leaf)
 		buf = appendU64(buf, p.Index)
 		buf = appendU64(buf, uint64(len(p.Siblings)))
-		buf, err = appendFrHexSlice(buf, p.Siblings, beHexToFrLE)
+		buf, err = appendFrHexSlice(buf, p.Siblings, censusHexToFrLE)
 		if err != nil {
 			return nil, fmt.Errorf("census sibling: %w", err)
 		}

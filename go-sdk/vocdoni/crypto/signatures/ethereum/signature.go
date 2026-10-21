@@ -8,8 +8,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/types"
 )
 
 const (
@@ -105,12 +103,6 @@ func (sig *ECDSASignature) SetBytes(signature []byte) *ECDSASignature {
 	}
 
 	return sig
-}
-
-// VerifyVoteID checks if the signature is valid for the given voteID.
-// This method also checks that the public key matches the passed expectedAddress
-func (sig *ECDSASignature) VerifyVoteID(voteID types.VoteID, expectedAddress common.Address) (bool, []byte) {
-	return sig.Verify(crypto.PadToSign(voteID.Bytes()), expectedAddress)
 }
 
 // Verify checks that `sig` is a valid signature of `signedInput` produced by `expectedAddress`,

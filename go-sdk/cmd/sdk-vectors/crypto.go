@@ -520,5 +520,6 @@ func hashVectors() map[string]any {
 		"enc_key":         map[string]any{"pk": pj(x, y), "hash": sha256Hex(append(be32(x), be32(y)...))},
 		"identity_ballot": ballotLeafHash(identityCoords()),
 		"ballot_vk_leaf":  hex32(ballotVKLeaf(vkLocal)),
+		"vote_envelope":   voteEnvelopeVectors(),
 	}
 }

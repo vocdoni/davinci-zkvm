@@ -162,4 +162,4 @@ go-sdk module pins, and the Rust SDK embeds the same verification key
 `artifacts/ballot_proof_vkey.json`). Both must change together: the guest
 checks the VK hash against config key 0x07, and `rust-sdk/tests/ballot.rs`
 pins it to davinci-circom's `artifacts/VK_HASH` (the pre-production ceremony
-key, davinci-circom v1.2.0).
+key, davinci-circom v1.3.0).

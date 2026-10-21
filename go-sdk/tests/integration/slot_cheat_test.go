@@ -257,12 +257,12 @@ func TestCheatCensusLeafNonCanonical(t *testing.T) {
 }
 
 // TestCheatBallotKeyHighLimb keeps the right slot in limb 0 of the ballot key
-// and sets limb 1. The 64-level tree hashes and walks limb 0 only, so the SMT
-// chain stays valid; only the upper-limb rule (4.1.4b) rejects it.
+// and sets limb 1. The upper-limb rule (4.1.4b) rejects it, and the SMT
+// processor refuses any key wider than 64 bits (4.2).
 func TestCheatBallotKeyHighLimb(t *testing.T) {
 	base, _, _ := buildCheatInput(t)
 	base.stateData.BallotSmt[0].NewKey = withLimb1(t, base.stateData.BallotSmt[0].NewKey)
-	assertCircuitFailsExactly(t, base.reencodeState(t), failBallotNS, "ballot_key_limb1")
+	assertCircuitFailsExactly(t, base.reencodeState(t), failBallotNS|failSMTBallot, "ballot_key_limb1")
 }
 
 // TestCheatVoteIDKeyHighLimb is the vote-id counterpart of
@@ -270,7 +270,7 @@ func TestCheatBallotKeyHighLimb(t *testing.T) {
 func TestCheatVoteIDKeyHighLimb(t *testing.T) {
 	base, _, _ := buildCheatInput(t)
 	base.stateData.VoteIDSmt[0].NewKey = withLimb1(t, base.stateData.VoteIDSmt[0].NewKey)
-	assertCircuitFailsExactly(t, base.reencodeState(t), failConsistency, "vote_id_key_limb1")
+	assertCircuitFailsExactly(t, base.reencodeState(t), failConsistency|failSMTVoteID, "vote_id_key_limb1")
 }
 
 // TestCheatSlotInsertOverOccupied turns an honest revote (UPDATE) into an

@@ -8,7 +8,7 @@ use crate::crypto::babyjubjub::Point;
 use crate::crypto::chaum_pedersen::{prove_decryption, verify_decryption};
 use crate::crypto::elgamal::decrypt;
 use crate::crypto::field::{fr_to_le, u256_to_le, Fr, U256};
-use crate::limits::{NUM_FIELDS, SMT_LEVELS};
+use crate::limits::{NUM_FIELDS, SMT_PROOF_LEVELS};
 use crate::types::{CpProofJson, ResultsRequest};
 use crate::Error;
 
@@ -18,20 +18,20 @@ fn le(x: &Fr) -> String {
 }
 
 fn siblings(s: &[[u8; 32]]) -> Result<Vec<String>, Error> {
-    if s.len() > SMT_LEVELS {
+    if s.len() > SMT_PROOF_LEVELS {
         return Err(Error::Input(format!(
-            "{} siblings, at most {SMT_LEVELS}",
+            "{} siblings, at most {SMT_PROOF_LEVELS}",
             s.len()
         )));
     }
     let mut out: Vec<String> = s.iter().map(hex::encode).collect();
-    out.resize(SMT_LEVELS, hex::encode([0u8; 32]));
+    out.resize(SMT_PROOF_LEVELS, hex::encode([0u8; 32]));
     Ok(out)
 }
 
 /// Builds the `/results` body for the final `state_root` (raw arbo bytes).
 /// The siblings are the inclusion proofs of keys 0x03 and 0x04 under that
-/// root, root to leaf (zero-padded to 64 here). Every accumulator field must
+/// root, root to leaf (zero-padded to 65 here, `SMT_PROOF_LEVELS`). Every accumulator field must
 /// decrypt within `[0, max]`; `sk` must match `pk`. Returns the request and
 /// the tally.
 #[allow(clippy::too_many_arguments)]

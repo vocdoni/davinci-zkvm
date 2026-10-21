@@ -15,7 +15,7 @@ require (
 	github.com/iden3/go-rapidsnark/witness v0.0.6
 	github.com/rs/zerolog v1.34.0
 	github.com/vocdoni/arbo v0.0.0-20260501121933-158dce698e7a
-	github.com/vocdoni/davinci-circom v1.2.0
+	github.com/vocdoni/davinci-circom v1.3.0
 	github.com/vocdoni/gnark-crypto-primitives v0.0.6
 	github.com/vocdoni/lean-imt-go v0.0.2
 )

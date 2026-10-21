@@ -21,6 +21,18 @@ import (
 // The prover's host RAM, not the GPU, is what bounds it.
 const MaxBatchSize = 1024
 
+// State tree shape. Keys have SMTLevels path bits: the arbo tree is
+// SMTLevels deep (arbo pins it in storage, so it never changes). Two keys
+// that agree on their 63 low bits (a vote id 2^63 | k next to key k) both sit
+// at depth 64, and the circomlib proof format needs a zero sentinel below a
+// leaf, so every state-tree proof sent to the guests and the registry is
+// zero-padded to SMTProofLevels sibling slots. Mirrors circuit-primitives
+// SMT_LEVELS / SMT_PROOF_LEVELS and rust-sdk limits.
+const (
+	SMTLevels      = 64
+	SMTProofLevels = SMTLevels + 1
+)
+
 // State tree key namespaces (davinci-node spec/params). Keys are u64 in a
 // 64-level arbo tree: distinct keys never share a leaf.
 const (
@@ -52,9 +64,21 @@ func SlotKey(address [20]byte) uint64 {
 }
 
 // CSPSlotKey is the ballot slot of a CSP-census voter: BallotMin plus the
-// index the CSP signed.
+// index the CSP signed. It does not range-check: for an index at or above
+// BallotMax - BallotMin + 1 (2^63 - 16) the sum leaves the ballot namespace or
+// wraps, and the guest refuses the batch. Use CSPSlotKeyChecked for an index
+// from outside.
 func CSPSlotKey(index uint64) uint64 {
 	return BallotMin + index
+}
+
+// CSPSlotKeyChecked is CSPSlotKey with the guest's bound: an error unless
+// BallotMin + index stays in [BallotMin, BallotMax] (rust-sdk slot_key_csp).
+func CSPSlotKeyChecked(index uint64) (uint64, error) {
+	if index > BallotMax-BallotMin {
+		return 0, fmt.Errorf("CSP index %d: slot outside the ballot namespace", index)
+	}
+	return BallotMin + index, nil
 }
 
 // LeafAddress is the 20-byte address a Merkle census leaf binds, as the guest
@@ -70,7 +94,7 @@ func LeafAddress(leaf [4]uint64) [20]byte {
 // SlotKey returns the ballot slot of the address this census proof's leaf
 // binds.
 func (p CensusProof) SlotKey() (uint64, error) {
-	leaf, err := beHexToFrLE(p.Leaf)
+	leaf, err := censusHexToFrLE(p.Leaf)
 	if err != nil {
 		return 0, fmt.Errorf("census leaf: %w", err)
 	}

@@ -17,7 +17,7 @@ use circuit_primitives::hash::hash_enc_key;
 use circuit_primitives::results::ballot_leaf_hash;
 use circuit_primitives::smt::{le_to_fr, verify_inclusion};
 use circuit_primitives::types::{
-    BallotData, FrRaw, BALLOT_FIELDS, NUM_FIELDS, SMT_LEVELS, ZERO_FR,
+    BallotData, FrRaw, BALLOT_FIELDS, NUM_FIELDS, SMT_PROOF_LEVELS, ZERO_FR,
 };
 use ziskos::io::{commit_slice, read_slice};
 
@@ -27,10 +27,10 @@ const FRAME_LEN: usize = 8
     + 32
     + 64
     + 8
-    + SMT_LEVELS * 32
+    + SMT_PROOF_LEVELS * 32
     + BALLOT_FIELDS * 32
     + 8
-    + SMT_LEVELS * 32
+    + SMT_PROOF_LEVELS * 32
     + NUM_FIELDS * 8
     + NUM_FIELDS * CP_BYTES;
 
@@ -53,9 +53,9 @@ const NO_INDEX: u32 = u32::MAX;
 struct Input {
     state_root: FrRaw,
     pk: BjjAffine,
-    key_siblings: [FrRaw; SMT_LEVELS],
+    key_siblings: [FrRaw; SMT_PROOF_LEVELS],
     acc: BallotData,
-    acc_siblings: [FrRaw; SMT_LEVELS],
+    acc_siblings: [FrRaw; SMT_PROOF_LEVELS],
     results: [u64; NUM_FIELDS],
     cp: [CpProof; NUM_FIELDS],
 }
@@ -82,11 +82,11 @@ impl<'a> Reader<'a> {
         self.take::<32>().map(|b| le_to_fr(&b))
     }
 
-    fn siblings(&mut self) -> Option<[FrRaw; SMT_LEVELS]> {
-        if self.u64()? != SMT_LEVELS as u64 {
+    fn siblings(&mut self) -> Option<[FrRaw; SMT_PROOF_LEVELS]> {
+        if self.u64()? != SMT_PROOF_LEVELS as u64 {
             return None;
         }
-        let mut s = [ZERO_FR; SMT_LEVELS];
+        let mut s = [ZERO_FR; SMT_PROOF_LEVELS];
         for v in s.iter_mut() {
             *v = self.fr()?;
         }

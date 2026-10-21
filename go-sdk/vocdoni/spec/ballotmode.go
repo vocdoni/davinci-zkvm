@@ -51,7 +51,11 @@ func (bm BallotMode) Pack() (*big.Int, error) {
 	return packed, nil
 }
 
-// Validate validates the ballot mode fields for basic consistency.
+// Validate validates the ballot mode fields for basic consistency and the
+// registry's creation rule (ProcessRegistry._validateNewProcess): costExponent
+// at least 1 and numFields * maxValue^costExponent below 2^63, so a ballot's
+// cost never wraps in the field and both budget comparators of the circuit
+// compare integers. Mirrors rust-sdk BallotMode::validate.
 func (bm BallotMode) Validate() error {
 	if int(bm.NumFields) > params.FieldsPerBallot {
 		return fmt.Errorf("numFields %d is greater than max size %d", bm.NumFields, params.FieldsPerBallot)
@@ -64,6 +68,17 @@ func (bm BallotMode) Validate() error {
 	}
 	if bm.MinValueSum > bm.MaxValueSum {
 		return fmt.Errorf("minValueSum %d is greater than maxValueSum %d", bm.MinValueSum, bm.MaxValueSum)
+	}
+	if bm.CostExponent == 0 {
+		return fmt.Errorf("costExponent must be at least 1")
+	}
+	limit := new(big.Int).Lsh(big.NewInt(1), 63)
+	maxValue := new(big.Int).SetUint64(bm.MaxValue)
+	cost := new(big.Int).SetUint64(uint64(bm.NumFields))
+	for range bm.CostExponent {
+		if cost.Mul(cost, maxValue).Cmp(limit) >= 0 {
+			return fmt.Errorf("numFields * maxValue^costExponent must be below 2^63")
+		}
 	}
 	return nil
 }

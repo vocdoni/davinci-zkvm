@@ -164,7 +164,7 @@ func TestAttackCensusOneDifferentRoot(t *testing.T) {
 	if len(proofs) < 2 {
 		t.Fatal("need >= 2 census proofs")
 	}
-	proofs[1].Root = flipHex(t, trimHex(proofs[1].Root))
+	proofs[1].Root = "0x" + flipHex(t, trimHex(proofs[1].Root)) // census values are 0x + 64 hex digits
 	census, err := davinci.EncodeCensusBlock(proofs)
 	if err != nil {
 		t.Fatalf("EncodeCensusBlock: %v", err)

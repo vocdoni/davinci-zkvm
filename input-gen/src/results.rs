@@ -5,9 +5,9 @@
 //! magic "DAVRSLT1" u64
 //! state_root   32B  raw arbo root digest
 //! pk_x, pk_y   2 x 32B  TE coords
-//! n_key u64 (= 64), key_siblings 64 x 32B
+//! n_key u64 (= 65), key_siblings 65 x 32B
 //! accumulator  64 x 32B  [c1x, c1y, c2x, c2y] x 16
-//! n_acc u64 (= 64), acc_siblings 64 x 32B
+//! n_acc u64 (= 65), acc_siblings 65 x 32B
 //! results      16 x u64
 //! cp           16 x 160B  a1x a1y a2x a2y z
 //! ```
@@ -20,8 +20,9 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub const RESULTS_MAGIC: u64 = u64::from_le_bytes(*b"DAVRSLT1");
-/// Sibling count the guest accepts (state tree depth, `SMT_LEVELS`).
-pub const RESULTS_LEVELS: usize = 64;
+/// Sibling slots the guest accepts per list (`SMT_PROOF_LEVELS`): one more
+/// than the 64-level state tree, for a leaf at depth 64.
+pub const RESULTS_LEVELS: usize = 65;
 /// Exact guest frame length.
 pub const RESULTS_FRAME_LEN: usize = 8
     + 32
@@ -42,11 +43,11 @@ pub struct ResultsJson {
     /// Election key, TE coordinates.
     pub enc_key_x: String,
     pub enc_key_y: String,
-    /// Inclusion siblings of key 0x03, root→leaf, at most 64 (zero-padded here).
+    /// Inclusion siblings of key 0x03, root→leaf, at most 65 (zero-padded here).
     pub key_siblings: Vec<String>,
     /// Net results accumulator (key 0x04): 64 TE coordinates.
     pub accumulator: Vec<String>,
-    /// Inclusion siblings of key 0x04, root→leaf, at most 64.
+    /// Inclusion siblings of key 0x04, root→leaf, at most 65.
     pub acc_siblings: Vec<String>,
     /// Claimed plaintext per ciphertext.
     pub results: Vec<u64>,
@@ -166,23 +167,23 @@ mod tests {
     fn frame_layout() {
         let f = build_results_input(&request()).unwrap();
         assert_eq!(f.len(), RESULTS_FRAME_LEN);
-        assert_eq!(RESULTS_FRAME_LEN, 8952);
+        assert_eq!(RESULTS_FRAME_LEN, 9016);
         assert_eq!(&f[0..8], b"DAVRSLT1");
         assert_eq!(f[8..40], [0x11; 32]);
         assert_eq!(f[40..72], [0x22; 32]);
         assert_eq!(f[72..104], [0x33; 32]);
-        assert_eq!(u64::from_le_bytes(f[104..112].try_into().unwrap()), 64);
-        // Three siblings, then zero padding.
+        assert_eq!(u64::from_le_bytes(f[104..112].try_into().unwrap()), 65);
+        // Three siblings, then zero padding to 65.
         assert_eq!(f[112 + 2 * 32..112 + 3 * 32], [0x44; 32]);
-        assert!(f[112 + 3 * 32..2160].iter().all(|&b| b == 0));
-        assert_eq!(f[2160 + 5 * 32..2160 + 6 * 32], [5u8; 32]);
-        assert_eq!(u64::from_le_bytes(f[4208..4216].try_into().unwrap()), 64);
-        assert_eq!(f[4216..4248], [0x55; 32]);
+        assert!(f[112 + 3 * 32..2192].iter().all(|&b| b == 0));
+        assert_eq!(f[2192 + 5 * 32..2192 + 6 * 32], [5u8; 32]);
+        assert_eq!(u64::from_le_bytes(f[4240..4248].try_into().unwrap()), 65);
+        assert_eq!(f[4248..4280], [0x55; 32]);
         assert_eq!(
-            u64::from_le_bytes(f[6264 + 3 * 8..6264 + 4 * 8].try_into().unwrap()),
+            u64::from_le_bytes(f[6328 + 3 * 8..6328 + 4 * 8].try_into().unwrap()),
             3 << 32 | 7
         );
-        let cp2 = 6392 + 2 * 160;
+        let cp2 = 6456 + 2 * 160;
         assert_eq!(f[cp2..cp2 + 32], [0xA2; 32]);
         assert_eq!(f[cp2 + 128..cp2 + 160], [0xB2; 32]);
     }

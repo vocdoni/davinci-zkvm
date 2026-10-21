@@ -74,7 +74,7 @@ you have a reason not to.
 |---|---|---|
 | `vk` | yes | snarkjs verification key of the ballot circuit (71 public inputs, snarkjs G2 ordering; any other shape is a 400). |
 | `proofs` | yes | snarkjs Groth16 ballot proofs, 1 to 1024. The guest derives their 71 public inputs from the other blocks; the service does not verify them. |
-| `sigs` | yes | One vote-ID signature per proof: `signature_r`, `signature_s`, `signature_v` (0 or 1), `vote_id`, `address`, `public_key_x`, `public_key_y`. |
+| `sigs` | yes | One vote-envelope signature per proof (personal-sign of `keccak256("davinci-vote-v1" ‖ process id ‖ vote id ‖ sha256(ballot))`, [CIRCUIT.md §5](../circuit/CIRCUIT.md#5-phase-2-authentication)): `signature_r`, `signature_s`, `signature_v` (0 or 1), `vote_id`, `address`, `public_key_x`, `public_key_y`. |
 | `state` | yes | State transition: counts (`voters_count`, `overwritten_count`, `occupied_before`), `process_id`, `old_state_root`, `new_state_root`, the SMT chains `vote_id_smt`, `ballot_smt`, `refresh_smt`, `results_smt`, the five `process_smt` read proofs, and `ballot_proofs` (old accumulator, new, overwritten and refreshed ballots). |
 | `census_proofs` | one of | Keccak lean-IMT membership proof per voter (`root`, `leaf`, `index`, `siblings`, each a 256-bit big-endian value: `0x` and 64 hex digits each; anything else is a 400). |
 | `csp_data` | one of | CSP attestation per voter (`r`, `s`, `recid`, `voter_address`, `weight`, `index`). |
@@ -153,7 +153,7 @@ are arbo little-endian hex:
   "state_root":   final state root (raw arbo root bytes),
   "enc_key_x":    election key, twisted Edwards x,
   "enc_key_y":    election key, twisted Edwards y,
-  "key_siblings": inclusion proof of state key 0x03, root to leaf, up to 64,
+  "key_siblings": inclusion proof of state key 0x03, root to leaf, up to 65,
   "accumulator":  64 coordinates of the results accumulator (state key 0x04),
   "acc_siblings": inclusion proof of state key 0x04,
   "results":      16 plaintexts (u64),

@@ -149,18 +149,23 @@ Then, in order:
 ```
 
 Every count, flag and `n_levels` is a u64 word. `n_levels` is at most
-`SMT_LEVELS = 64` (the arbo tree depth, davinci-node `StateTreeMaxLevels`).
+`SMT_PROOF_LEVELS = 65`, one more than the arbo tree depth `SMT_LEVELS = 64`
+(davinci-node `StateTreeMaxLevels`).
 Counts or `n_levels` above their caps set `FAIL_PARSE` and are clamped before
 any allocation. A process-proof count other than 0 or 5 is a parse failure;
 0 parses but fails 4.2.P1. With the payload flag at 0 the ballot lists are
 empty and `old_results` is all-zero. A ballot is 64 × 32 B (`NUM_FIELDS = 16`
 ciphertexts × 4 TE coords, `[c1x, c1y, c2x, c2y]` per ciphertext).
 
-A leaf at depth 64 would need 64 siblings, the last one non-zero, plus the
-zero leaf-level sentinel the processor expects, which does not fit; arbo never
-creates one (`Add` fails with `ErrMaxVirtualLevel` for a key that agrees with
-an existing key on its first 63 path bits), so such a vote-id simply cannot be
-inserted and the voter resubmits with a fresh `k`.
+Keys have 64 path bits, and two keys that agree on bits 0..62 (a vote id
+`2^63 | k` next to key `k`) split only at level 63: arbo places both leaves at
+depth 64. A proof of such a leaf has 64 siblings, the last one non-zero, plus
+the zero leaf-level sentinel the processor expects, so proofs carry up to
+`SMT_PROOF_LEVELS = 65` sibling slots. Hosts zero-pad every proof to 65; a
+host may still send 64 for a tree without such a pair. The tree, its keys and
+its roots are those of the 64-level arbo tree either way. Keys stay u64:
+the processor refuses any key limb above limb 0 (4.2), since the 65th level
+reads bit 64.
 
 Each SMT transition entry is:
 
@@ -226,7 +231,7 @@ the reconstructed cells need, sets `FAIL_KZG`.
 `FAIL_PARSE` (bit 31) covers: a wrong Groth16 magic, `nproofs` of 0 or above
 `MAX_BATCH_SIZE`, `n_public ≠ 71`, `gamma_abc_len ≠ n_public + 1`, a repeated
 proof count different from the header, truncated data, any count above its
-cap, `n_levels` above 64, a process-proof count other than 0 or 5, and
+cap, `n_levels` above 65, a process-proof count other than 0 or 5, and
 trailing bytes. Phase 1 is skipped when `FAIL_PARSE` is set.
 
 ---
@@ -331,11 +336,11 @@ the same for every proof of the batch.
 | # | Check | Fails on |
 |---|-------|----------|
 | 1.0 | Every source of the public inputs exists for every proof: STATETX with 5 process proofs, a REENCBLK key, one vote-id transition, one re-encryption entry and one census proof or CSP entry per proof. The live original coordinates and the CSP weights are canonical (`< r`): the pairing would see their residue while the transcript hashes the raw limbs | FAIL_BINDING |
-| 1.1 | VK: α and every γ_abc[j] are on BN254 G1 and not the identity; β, γ, δ are on the G2 twist, in the prime-order subgroup and not the identity | FAIL_CURVE |
+| 1.1 | VK: every coordinate of α, β, γ, δ and γ_abc[j] is below q; α and every γ_abc[j] are on BN254 G1 and not the identity; β, γ, δ are on the G2 twist, in the prime-order subgroup and not the identity | FAIL_CURVE |
 | 1.1b | VK: `δ ≠ γ`. A VK without a phase-2 contribution lets anyone who knows the phase-1 transcript forge proofs | FAIL_CURVE |
-| 1.2 | Each proof point A_i is on BN254 G1 and not the identity (G1 has cofactor 1, so on-curve means in-group) | FAIL_CURVE |
-| 1.3 | Each proof point B_i is on the BN254 G2 twist. No subgroup check; the code's argument is that the transcript fixes B_i before the random coefficients exist | FAIL_CURVE |
-| 1.4 | Each proof point C_i is on BN254 G1 and not the identity | FAIL_CURVE |
+| 1.2 | Each proof point A_i has coordinates below q, is on BN254 G1 and is not the identity (G1 has cofactor 1, so on-curve means in-group) | FAIL_CURVE |
+| 1.3 | Each proof point B_i has coordinates below q, is on the BN254 G2 twist, is in the prime-order subgroup (`is_on_subgroup_twist_bn254`) and is not the identity | FAIL_CURVE |
+| 1.4 | Each proof point C_i has coordinates below q, is on BN254 G1 and is not the identity | FAIL_CURVE |
 | 1.5 | Batch pairing equation holds: `e(-(Σr_i)·α, β) · e(-Σ r_i·L_i, γ) · e(-Σ r_i·C_i, δ) · Π e(r_i·A_i, B_i) = 1_GT` | FAIL_PAIRING |
 
 ### Fiat-Shamir transcript
@@ -351,8 +356,22 @@ Curve points and the 71 derived public inputs enter as their raw `[u64; N]`
 LE limbs (64 B per G1, 128 B per G2, 32 B per input, 2,528 B per proof).
 `lo128` reads bytes 0..16 of the hash as two LE u64 limbs; the all-zero value
 maps to 1. The coefficients are independent 128-bit values (small-exponents
-batch test, 2⁻¹²⁸ soundness error). The VK is not in the transcript; it is
-pinned per process by 6.6.
+batch test). The VK is not in the transcript; it is pinned per process by 6.6.
+
+Checks 1.1-1.4 run before the transcript and before any curve operation. They
+are what the batch test needs: with every A_i, C_i in G1 and every B_i in G2,
+each `T_i = e(A_i, B_i) · e(α, β)⁻¹ · e(L_i, γ)⁻¹ · e(C_i, δ)⁻¹` is in the
+order-r subgroup of GT and `e(r_i·A_i, B_i) = e(A_i, B_i)^{r_i}`, so the
+equation is `Π T_i^{r_i} = 1` with every `T_i` fixed by the transcript before
+the coefficients exist. If some `T_j ≠ 1`, `j ≥ 1`, at most one value of
+`r_j mod r` satisfies it: a soundness error of 2⁻¹²⁷ per transcript (the
+remap of the all-zero coefficient to 1 doubles the odds of that value), times
+the number of transcripts tried; if only `T_0 ≠ 1` the check fails, so
+`r_0 = 1` needs no randomisation. Without the G2 check the ate value is not
+bilinear in the G1 argument and the argument does not apply. The `< q`
+bounds make each point's encoding unique, so the transcript sees exactly the
+points the pairing uses (zisklib's precompiles reduce their inputs, and its
+Fq2 precompiles abort on a limb at or above q).
 
 ### Security rationale
 
@@ -387,8 +406,9 @@ as raw bytes to the state root or the census.
 ### Purpose
 
 Verify that each voter controls the private key corresponding to their declared
-Ethereum address. The authentication binds voter identity to the specific ballot
-they submitted.
+Ethereum address. The signature covers the vote envelope: the process id, the
+vote id and the original ciphertexts the voter's proof was verified against, so
+it authorizes exactly one ballot in one process.
 
 ### Constraint checks
 
@@ -397,7 +417,7 @@ they submitted.
 | 2.1 | ECDSA entries are present (non-empty) | FAIL_ECDSA |
 | 2.2 | The public inputs were derived (1.0) | FAIL_ECDSA |
 | 2.3 | ECDSA entry count == proof count | FAIL_ECDSA |
-| 2.5 | `pk = ecdsa_recover_secp256k1(r, s, z, recid)` succeeds, where `z = keccak256(ethSignedMessage(voteID))` read as a big-endian integer and voteID is public input 1 | FAIL_ECDSA |
+| 2.5 | `pk = ecdsa_recover_secp256k1(r, s, z, recid)` succeeds, where `z` is the personal-sign hash of the vote envelope digest below, read as a big-endian integer, over process id (public input 2), vote id (public input 1) and the original ciphertexts (public inputs 7..70) | FAIL_ECDSA |
 | 2.6 | The Ethereum address of the recovered key matches the low 160 bits of public input 0: `keccak256(pk.x_BE32 ‖ pk.y_BE32)[12..32] == address_BE20` | FAIL_ECDSA |
 
 The checks stop at the first failing entry.
@@ -405,13 +425,22 @@ The checks stop at the first failing entry.
 ### Signature scheme
 
 ```
-message   = PadToSign(vote_id_BE8)                         // 32 bytes: 24×0x00 ‖ vote_id_BE8
-envelope  = "\x19Ethereum Signed Message:\n32" ‖ message   // 60 bytes
+ballot    = sha256(c1x ‖ c1y ‖ c2x ‖ c2y of the 16 fields, BE32 each)  // 2048 B, raw digest
+digest    = keccak256("davinci-vote-v1" ‖ process_id_BE32 ‖ vote_id_BE8 ‖ ballot)   // 87 B
+envelope  = "\x19Ethereum Signed Message:\n32" ‖ digest     // 60 bytes
 z         = keccak256(envelope)                             // 256-bit hash
 ```
 
-This matches `davinci-node/crypto/signatures/ethereum.Sign()`. The voter's
-public key is not in the input: the guest recovers it from `(r, s, z, recid)`.
+The tag is 15 ASCII bytes with no length prefix. The process id is the 32-byte
+big-endian encoding of the 31-byte id (one leading zero byte, as in the CSP
+message). The ballot is the one the proof commits to, in circuit order, the
+identity `(0, 1), (0, 1)` at and above `num_fields`, hashed as
+`ballot_leaf_hash` hashes a ballot (never reduced). A wallet signs the digest
+with `personal_sign`; `v` may be 0, 1, 27 or 28 and a high-S signature recovers
+the same key. rust-sdk `census::vote_envelope_digest` and go-sdk
+`VoteEnvelopeDigest` compute the same bytes; `rust-sdk/testdata/hashes.json`
+(`vote_envelope`) is the shared vector. The voter's public key is not in the
+input: the guest recovers it from `(r, s, z, recid)`.
 
 ### Extensibility
 
@@ -693,13 +722,17 @@ Compute:
 ```
 
 Siblings run root → leaf (`siblings[0]` is the root level). The path bit at
-level `i` is bit `i` of key limb 0, LSB first. For an enabled transition the
+level `i` is bit `i` of the key, LSB first (bit 64, read by a 65-slot proof,
+is bit 0 of limb 1). Keys are u64: a transition whose `old_key` or `new_key`
+has a non-zero limb 1..3 is refused before the walk, because the leaf hash
+covers limb 0 only and such a key would stand for an existing leaf on another
+path. For an enabled transition the
 leaf-level sibling must be zero and exactly one insertion level must exist
 (circomlib `LevIns`: the leaf sits one level below the last non-zero sibling),
 and the state machine must end in exactly one terminal state. A transition
 with zero siblings is rejected. INSERT of a key already in the tree fails:
 with `old_key == new_key` the state machine never reaches a terminal state,
-and any other witness misses `old_root`.
+and any other u64 `old_key` misses `old_root`.
 
 > **Read-proofs use the Verifier, not a Processor NOOP.** A Processor NOOP
 > only checks `old_root == new_root` and ignores the siblings, so it cannot
@@ -716,7 +749,8 @@ node_hash(left, right) = SHA-256(left_LE32 ‖ right_LE32)          // 64 bytes
 ```
 
 All byte arrays use **little-endian** encoding (Arbo's `BigIntToBytes` convention).
-Only limb 0 of a key is hashed or walked; 4.1.4b and 4.5.3 pin the upper limbs.
+Only limb 0 of a key is hashed; every transition refuses non-zero upper limbs
+(above), and 4.1.4b and 4.5.3 name the chain-level reasons.
 
 #### Process Config Read-Proofs
 
@@ -1237,7 +1271,7 @@ proof with `overall_ok = 0` is invalid and must be rejected by the verifier.
 
 | Bit | Constant | Module | Meaning |
 |-----|----------|--------|---------|
-| 1 | `FAIL_CURVE` | groth16.rs | Proof/VK point off-curve or the identity, β/γ/δ outside the G2 subgroup, or VK δ = γ (1.1–1.4) |
+| 1 | `FAIL_CURVE` | groth16.rs | Proof/VK point with a coordinate at or above q, off-curve or the identity, β/γ/δ or a proof's B outside the G2 subgroup, or VK δ = γ (1.1–1.4) |
 | 2 | `FAIL_PAIRING` | groth16.rs | Batch pairing equation failed |
 | 3 | `FAIL_ECDSA` | ecdsa.rs | Signature entries missing, public inputs not derived, key recovery failed or address binding failed (2.1–2.6) |
 | 10 | `FAIL_SMT_VOTEID` | smt.rs | VoteID insertion chain invalid |
@@ -1275,8 +1309,10 @@ original ciphertexts (§4).
 ### 12.2 Voter Authentication
 
 Every voter demonstrated knowledge of the private key corresponding to their
-Ethereum address by producing a valid secp256k1 ECDSA signature over the
-voteID. The public key hash matches the ballot proof's address (public input 0).
+Ethereum address by producing a valid secp256k1 ECDSA signature over its vote
+envelope: the process id, the vote id and the original ciphertexts (§5). The
+public key hash matches the ballot proof's address (public input 0), and a
+signature made for another process or other ciphertexts does not verify.
 
 ### 12.3 Census Membership
 
@@ -1419,7 +1455,7 @@ chained mode) must also check:
 | Keccak-256 | `hash.rs` | `zisklib::keccak256` on the `keccak_f` precompile | ECDSA envelope, Ethereum address, census tree nodes (`keccak_node`) |
 | BN254 Groth16 pairing | `circuit/src/groth16.rs` | `zisklib::pairing_batch_bn254` | Multi-pairing |
 | BN254 G1 MSM | `circuit/src/groth16.rs` | `zisklib::scalar_mul_bn254`, `add_bn254` | In-guest random linear combination |
-| BN254 G1/G2 curve checks | `bn254.rs` | `zisklib::is_on_curve_bn254`, `is_on_curve_twist_bn254`, `is_on_subgroup_twist_bn254` | Identity rejected separately |
+| BN254 G1/G2 curve checks | `bn254.rs` | `zisklib::is_on_curve_bn254`, `is_on_curve_twist_bn254`, `is_on_subgroup_twist_bn254` | Coordinates bounded below q and the identity rejected first |
 | secp256k1 ECDSA | `circuit/src/ecdsa.rs`, `circuit/src/csp.rs` | `zisklib::ecdsa_recover_secp256k1` | Public-key recovery |
 | BN254 Fr arithmetic | `bn254_fr.rs` | ZisK `arith256_mod` precompile (syscall 0x802) | `(a·b+c) mod p` |
 | BLS12-381 Fr arithmetic | `bls_fr.rs` | ZisK `arith256_mod` precompile (syscall 0x802) | `(a·b+c) mod p`; inverse = checked host hint |

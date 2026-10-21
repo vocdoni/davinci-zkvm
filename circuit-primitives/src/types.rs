@@ -59,11 +59,16 @@ pub const NUM_FIELDS: usize = 16;
 pub const BALLOT_FIELDS: usize = NUM_FIELDS * 4;
 
 /// Depth of the arbo state tree (davinci-node `StateTreeMaxLevels`). Keys
-/// are u64, so the leaf hash covers 8 key bytes and proofs carry at most 64
-/// siblings. Distinct u64 keys never share a leaf; the only collisions are
-/// between 63-bit truncated vote-id hashes, which just make that voter
-/// resubmit with a fresh k.
+/// are u64, so the leaf hash covers 8 key bytes. Distinct u64 keys never
+/// share a leaf, but two that agree on their 63 low path bits (a vote id
+/// `2^63 | k` next to key `k`) both sit at depth 64.
 pub const SMT_LEVELS: usize = 64;
+
+/// Sibling slots of every state-tree proof the guests read: the circomlib
+/// processor needs a zero sentinel one level below the leaf, so a leaf at
+/// depth `SMT_LEVELS` takes `SMT_LEVELS + 1` slots. Shorter proofs are
+/// zero-padded; the tree itself stays `SMT_LEVELS` deep.
+pub const SMT_PROOF_LEVELS: usize = SMT_LEVELS + 1;
 
 /// Maximum number of ballot proofs per batch.
 /// Increase here to support larger batches.

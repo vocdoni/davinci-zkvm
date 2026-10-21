@@ -31,9 +31,11 @@
 //!   the point is identical.
 //! - The coefficients are independent 128-bit values rather than 254-bit powers
 //!   `r_shiftⁱ`. `scalar_mul_bn254` starts its double-and-add at the scalar's
-//!   MSB, so the per-proof `rᵢ·Aᵢ` and `rᵢ·Cᵢ` muls cost half. The
-//!   small-exponents batch test (Bellare–Garay–Rabin) gives soundness error
-//!   2⁻¹²⁸ per Fiat-Shamir attempt — beyond BN254's own ~100-bit security.
+//!   MSB, so the per-proof `rᵢ·Aᵢ` and `rᵢ·Cᵢ` muls cost half. With every
+//!   point canonical and in its group, the small-exponents batch test
+//!   (Bellare–Garay–Rabin) gives soundness error 2⁻¹²⁷ per Fiat-Shamir attempt
+//!   (the all-zero coefficient maps to 1, which doubles that value's odds) —
+//!   beyond BN254's own ~100-bit security.
 //! - The transcript is hashed as it is produced (`Sha256Words`), never
 //!   buffered (2.5 KB per proof).
 //!
@@ -54,10 +56,7 @@ use crate::hash::{sha256_once, Sha256Words};
 use crate::io::ParsedInput;
 use crate::publics::{Publics, PUB_ADDRESS, PUB_CONSTANTS, PUB_FIELDS, PUB_VOTE_ID, PUB_WEIGHT};
 use crate::types::*;
-use ziskos::zisklib::{
-    add_bn254, is_on_curve_twist_bn254, neg_bn254, pairing_batch_bn254,
-    scalar_mul_bn254,
-};
+use ziskos::zisklib::{add_bn254, neg_bn254, pairing_batch_bn254, scalar_mul_bn254};
 
 /// Transcript domain tag, `b"groth16-batch-v3"` as two LE words.
 const TRANSCRIPT_TAG: [u64; 2] = [
@@ -109,8 +108,9 @@ fn g1_add_mul(acc: &mut G1, p: &G1, k: &FrRaw) {
 /// (`FAIL_BINDING` is already set).
 ///
 /// # Fail-mask bits
-/// - `FAIL_CURVE` (bit 1): a curve/subgroup check failed on a VK or proof
-///   point, or the VK has `delta == gamma` (no phase-2 contribution)
+/// - `FAIL_CURVE` (bit 1): a canonical-encoding, curve or subgroup check
+///   failed on a VK or proof point, or the VK has `delta == gamma` (no
+///   phase-2 contribution)
 /// - `FAIL_PAIRING` (bit 2): the batch pairing equation did not hold
 pub fn verify_batch(parsed: &ParsedInput, publics: Option<&Publics>, fail_mask: &mut u32) -> bool {
     // Skip expensive work if we already know the input is malformed.
@@ -122,14 +122,13 @@ pub fn verify_batch(parsed: &ParsedInput, publics: Option<&Publics>, fail_mask: 
     };
 
     // --- Validate curve points ---
-    // VK G1 points, gamma_abc and the proof A/C points must be strictly
-    // on-curve and non-infinity: the in-guest scalar multiplication requires
-    // non-zero points. `g1_is_valid` enforces the non-infinity half itself,
-    // because zisklib's `is_on_curve_bn254` accepts the all-zero identity.
-    // VK G2 points additionally need the subgroup check.
-    // Proof B is on-curve-only: subgroup soundness comes from the randomized
-    // batch coefficients (the transcript commits to B before the coefficients
-    // exist).
+    // Before the transcript and before any curve operation, every VK and
+    // proof point must have canonical coordinates (< q), be on its curve and
+    // not be the identity; G2 points (β, γ, δ and every proof's B) must also
+    // be in the prime-order subgroup. The transcript hashes raw limbs, so a
+    // non-canonical coordinate would be a second encoding of the same proof;
+    // and the random coefficients scale the G1 slot of each pairing, which
+    // is sound only for B in G2 (r₀ = 1 then needs no randomisation).
     let mut points_ok = true;
     points_ok &= g1_is_valid(&parsed.vk_alpha_g1);
     points_ok &= g2_is_valid(&parsed.vk_beta_g2);
@@ -140,7 +139,7 @@ pub fn verify_batch(parsed: &ParsedInput, publics: Option<&Publics>, fail_mask: 
     }
     for i in 0..parsed.nproofs {
         points_ok &= g1_is_valid(&parsed.proofs[i].a);
-        points_ok &= is_on_curve_twist_bn254(&parsed.proofs[i].b);
+        points_ok &= g2_is_valid(&parsed.proofs[i].b);
         points_ok &= g1_is_valid(&parsed.proofs[i].c);
     }
     // A VK whose delta equals gamma has no phase-2 contribution: anyone who

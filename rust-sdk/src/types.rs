@@ -67,7 +67,7 @@ pub struct SnarkJsVk {
     pub ic: Vec<[String; 3]>,
 }
 
-/// Voter ECDSA signature over its vote id. Only `signature_r/s/v` reach the
+/// Voter ECDSA signature over its vote envelope. Only `signature_r/s/v` reach the
 /// guest; the service still requires the other fields.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct EcdsaSigJson {
@@ -96,7 +96,7 @@ pub struct SmtEntryJson {
     pub new_value: String,
     pub fnc0: u8,
     pub fnc1: u8,
-    /// Root to leaf, zero-padded to `SMT_LEVELS`.
+    /// Root to leaf, zero-padded to `SMT_PROOF_LEVELS` (65).
     pub siblings: Vec<String>,
 }
 

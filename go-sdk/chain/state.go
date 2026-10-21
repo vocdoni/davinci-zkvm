@@ -23,8 +23,11 @@ import (
 const (
 	// procLevels is the number of levels in the arbo SHA-256 state tree
 	// (davinci-node StateTreeMaxLevels). Keys are u64, hence keyLen.
-	procLevels = 64
-	keyLen     = 8
+	procLevels = davinci.SMTLevels
+	// proofLevels is the sibling count of every proof the state hands out:
+	// one more than the tree depth, for a leaf at depth 64.
+	proofLevels = davinci.SMTProofLevels
+	keyLen      = 8
 	// ballotMin is the minimum key for ballot SMT entries.
 	ballotMin = uint64(0x10)
 	// keyResults is the net accumulated results leaf.
@@ -241,7 +244,7 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 		reencEntries[idx] = entry
 	}
 
-	processSmtProofs, err := buildArboReadProofs(s.tree, configKeys, bLen, procLevels)
+	processSmtProofs, err := buildArboReadProofs(s.tree, configKeys, bLen, proofLevels)
 	if err != nil {
 		return nil, nil, fmt.Errorf("config read proofs: %w", err)
 	}
@@ -253,7 +256,7 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 			s.tree,
 			new(big.Int).SetUint64(v.VoteID),
 			big.NewInt(davinci.VoteIDLeafValue),
-			procLevels,
+			proofLevels,
 		)
 		if err != nil {
 			return nil, nil, fmt.Errorf("voteID insert[%d]: %w", i, err)
@@ -269,14 +272,14 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 		key := v.Slot
 		leaf := ballotLeafHash(reencBallots[i])
 		if old, isOverwrite := s.votedBallots[key]; isOverwrite {
-			entry, err := buildArboUpdateEntry(s.tree, new(big.Int).SetUint64(key), leaf, procLevels)
+			entry, err := buildArboUpdateEntry(s.tree, new(big.Int).SetUint64(key), leaf, proofLevels)
 			if err != nil {
 				return nil, nil, fmt.Errorf("ballot update[%d]: %w", i, err)
 			}
 			ballotChain = append(ballotChain, entry)
 			overwritten = append(overwritten, old)
 		} else {
-			entry, err := buildArboInsertEntry(s.tree, new(big.Int).SetUint64(key), leaf, procLevels)
+			entry, err := buildArboInsertEntry(s.tree, new(big.Int).SetUint64(key), leaf, proofLevels)
 			if err != nil {
 				return nil, nil, fmt.Errorf("ballot insert[%d]: %w", i, err)
 			}
@@ -359,7 +362,7 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 				return nil, nil, fmt.Errorf("refresh reenc[%#x]: %w", key, err)
 			}
 			entry, err := buildArboUpdateEntry(
-				s.tree, new(big.Int).SetUint64(key), ballotLeafHash(refreshed), procLevels)
+				s.tree, new(big.Int).SetUint64(key), ballotLeafHash(refreshed), proofLevels)
 			if err != nil {
 				return nil, nil, fmt.Errorf("refresh update[%#x]: %w", key, err)
 			}
@@ -376,7 +379,7 @@ func (s *State) ApplyBatch(votes []Vote) (*davinci.StateTransitionData, *davinci
 	}
 
 	resultsEntry, err := buildArboUpdateEntry(
-		s.tree, new(big.Int).SetUint64(keyResults), accumLeafHash(newResults), procLevels)
+		s.tree, new(big.Int).SetUint64(keyResults), accumLeafHash(newResults), proofLevels)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Results update: %w", err)
 	}
@@ -514,7 +517,7 @@ func (s *State) EncryptedResults() []string {
 }
 
 // leafSiblings returns the inclusion siblings of a state tree key,
-// zero-padded to procLevels, as plain LE hex.
+// zero-padded to proofLevels, as plain LE hex.
 func (s *State) leafSiblings(key uint64) ([]string, error) {
 	bLen := arbo.HashFunctionSha256.Len()
 	keyBytes := arbo.BigIntToBytes(keyLen, new(big.Int).SetUint64(key))
@@ -530,11 +533,11 @@ func (s *State) leafSiblings(key uint64) ([]string, error) {
 		return nil, err
 	}
 	zero := make([]byte, bLen)
-	for len(sibs) < procLevels {
+	for len(sibs) < proofLevels {
 		sibs = append(sibs, zero)
 	}
-	out := make([]string, procLevels)
-	for i, sib := range sibs[:procLevels] {
+	out := make([]string, proofLevels)
+	for i, sib := range sibs[:proofLevels] {
 		out[i] = hex.EncodeToString(pad32(sib))
 	}
 	return out, nil

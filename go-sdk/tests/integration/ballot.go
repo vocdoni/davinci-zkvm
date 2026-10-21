@@ -19,7 +19,6 @@ import (
 	davinci "github.com/vocdoni/davinci-zkvm/go-sdk"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/circuits/ballotproof"
 	ballotprooftest "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/circuits/test/ballotproof"
-	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto"
 	"github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc"
 	bjjgnark "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/ecc/bjj_gnark"
 	nodesig "github.com/vocdoni/davinci-zkvm/go-sdk/vocdoni/crypto/signatures/ethereum"
@@ -116,37 +115,35 @@ func GenerateBallotBatch(
 		addrBig := new(big.Int).SetBytes(v.AddressBytes)
 		addrLo16 := addrBig.Uint64() & 0xFFFF
 
-		// Sign the voteID with the voter's secp256k1 key.
-		sig, err := v.Signer.Sign(crypto.PadToSign(res.VoteID.Bytes()))
-		if err != nil {
-			return nil, fmt.Errorf("voter %d ecdsa sign: %w", i, err)
+		// Parse the 71 public signals (kept for checks, never sent).
+		var pubSigs []string
+		if err := json.Unmarshal([]byte(res.PubInputs), &pubSigs); err != nil {
+			return nil, fmt.Errorf("parse public inputs %d: %w", i, err)
 		}
 
-		// Extract secp256k1 public key coordinates and the recovery bit. The
-		// circuit recovers the public key via `ecdsa_recover_secp256k1(r, s, z, recid)`,
-		// so SignatureV must be the real parity bit (0 or 1), not a placeholder.
-		// sig.Bytes() returns [r(32) || s(32) || v(1)] with v normalised to 0/1.
-		sigBytes65 := sig.Bytes()
-		recid := sigBytes65[64]
+		// Sign the vote envelope with the voter's secp256k1 key: the process
+		// id, the vote id and the original ballot the proof commits to
+		// (public signals 7..70, circuit order).
+		sigBytes65, err := signVoteEnvelope(v, processID, voteID, pubSigs)
+		if err != nil {
+			return nil, fmt.Errorf("voter %d: %w", i, err)
+		}
+
+		// The circuit recovers the public key via `ecdsa_recover_secp256k1(r, s, z, recid)`,
+		// so SignatureV must be the real parity bit (0 or 1): [r(32) || s(32) || v(1)].
 		ecdsaKey := (*ecdsapkg.PrivateKey)(v.Signer)
 		sigData := sigJSON{
 			PublicKeyX: fmt.Sprintf("0x%064x", ecdsaKey.PublicKey.X),
 			PublicKeyY: fmt.Sprintf("0x%064x", ecdsaKey.PublicKey.Y),
-			SignatureR: fmt.Sprintf("0x%064x", sig.R),
-			SignatureS: fmt.Sprintf("0x%064x", sig.S),
-			SignatureV: recid,
+			SignatureR: "0x" + hex.EncodeToString(sigBytes65[:32]),
+			SignatureS: "0x" + hex.EncodeToString(sigBytes65[32:64]),
+			SignatureV: sigBytes65[64],
 			VoteID:     voteID,
 			Address:    addrBig.String(),
 		}
 		sigBytes, err := json.Marshal(sigData)
 		if err != nil {
 			return nil, fmt.Errorf("marshal sig %d: %w", i, err)
-		}
-
-		// Parse the 71 public signals (kept for checks, never sent).
-		var pubSigs []string
-		if err := json.Unmarshal([]byte(res.PubInputs), &pubSigs); err != nil {
-			return nil, fmt.Errorf("parse public inputs %d: %w", i, err)
 		}
 
 		// Extract raw ciphertext data from the ballot for re-encryption.
@@ -178,6 +175,28 @@ func GenerateBallotBatch(
 		Sigs:         sigs,
 		Results:      results,
 	}, nil
+}
+
+// signVoteEnvelope signs davinci.VoteEnvelopeDigest for one ballot: pubSigs
+// are its 71 public signals, whose last BallotFields entries are the original
+// ciphertexts in circuit order. Returns r ‖ s ‖ v, v in {0, 1}.
+func signVoteEnvelope(v *Voter, processID types.ProcessID, voteID uint64, pubSigs []string) ([]byte, error) {
+	if len(pubSigs) != davinci.BallotPublicInputs {
+		return nil, fmt.Errorf("%d public signals, want %d", len(pubSigs), davinci.BallotPublicInputs)
+	}
+	coords := make([]*big.Int, davinci.BallotFields)
+	for j := range coords {
+		c, ok := new(big.Int).SetString(pubSigs[davinci.BallotPublicInputs-davinci.BallotFields+j], 10)
+		if !ok {
+			return nil, fmt.Errorf("public signal %d is not decimal", j)
+		}
+		coords[j] = c
+	}
+	sig, err := davinci.SignVote((*ecdsapkg.PrivateKey)(v.Signer), processID.MathBigInt(), voteID, coords)
+	if err != nil {
+		return nil, fmt.Errorf("sign vote envelope: %w", err)
+	}
+	return sig, nil
 }
 
 // BatchProveComponents holds the proof data for one batch of ballots.
@@ -255,8 +274,8 @@ func CachedBallotBatch(e *Election, voters []*Voter, seedBase int64) (*BatchProv
 		return GenerateBallotBatch(e.ProcessID, e.EncKey, voters, seedBase)
 	}
 	_, nf := ballotModeLeaf()
-	// "v2": voter seeds changed (voterSeed); older caches hold other addresses.
-	tag := sha256.Sum256([]byte(seed + "|v2"))
+	// "v3": signatures cover the vote envelope; older caches hold vote-id signatures.
+	tag := sha256.Sum256([]byte(seed + "|v3"))
 	name := fmt.Sprintf("plonk-ballots-nf%d-v%d-%d-s%d-%s.gob",
 		nf, voters[0].CensusIdx, voters[len(voters)-1].CensusIdx, seedBase, hex.EncodeToString(tag[:4]))
 	dir := os.Getenv("BENCH_CACHE_DIR")

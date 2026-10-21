@@ -128,6 +128,30 @@ impl BallotMode {
         Ok(Fr::from_bigint(ark_ff::BigInt(v)).unwrap_or_default())
     }
 
+    /// The registry's creation rule (`ProcessRegistry._validateNewProcess`):
+    /// `cost_exponent >= 1` and `num_fields * max_value^cost_exponent < 2^63`,
+    /// so a ballot's cost never wraps in the field and both budget
+    /// comparators of the circuit compare integers.
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.cost_exponent == 0 {
+            return Err(Error::Input(
+                "ballot mode: costExponent must be at least 1".into(),
+            ));
+        }
+        let too_large = || {
+            Error::Input("ballot mode: numFields * maxValue^costExponent must be below 2^63".into())
+        };
+        let mut cost = self.num_fields as u128;
+        for _ in 0..self.cost_exponent {
+            // cost < 2^63 and max_value < 2^64: the product fits in u128.
+            cost *= self.max_value as u128;
+            if cost >> 63 != 0 {
+                return Err(too_large());
+            }
+        }
+        Ok(())
+    }
+
     /// Inverse of [`BallotMode::pack`]; rejects bits at or above 247 and a
     /// group size above the field count.
     pub fn unpack(v: &Fr) -> Result<Self, Error> {
@@ -216,7 +240,8 @@ pub fn vote_id(pid: &Fr, address: &Fr, k: &Fr) -> u64 {
 /// `ballot_proof.circom`): address, vote id, process id, packed ballot mode,
 /// encryption key x and y, weight, then `c1.x, c1.y, c2.x, c2.y` per field.
 /// Fields at or above the election's `num_fields` must hold the identity, as
-/// [`encrypt_ballot`] leaves them; the batch guest derives the same values.
+/// [`encrypt_ballot`] leaves them, or this errors: the batch guest derives
+/// the identity there, so other values would match no batch.
 pub fn public_signals(
     pid: &Fr,
     mode: &BallotMode,
@@ -226,6 +251,11 @@ pub fn public_signals(
     ballot: &Ballot,
     weight: &Fr,
 ) -> Result<[Fr; N_PUBLIC], Error> {
+    if !ballot.is_padded_ok(mode.num_fields) {
+        return Err(Error::Input(
+            "ballot: fields past numFields are not the identity".into(),
+        ));
+    }
     let mut out = [Fr::from(0u64); N_PUBLIC];
     out[..7].copy_from_slice(&[
         *address,

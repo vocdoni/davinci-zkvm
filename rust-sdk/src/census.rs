@@ -1,4 +1,4 @@
-//! Census: the Keccak lean-IMT Merkle census, CSP attestations, vote-id
+//! Census: the Keccak lean-IMT Merkle census, CSP attestations, vote
 //! signatures and the ballot slot of each voter.
 
 use k256::ecdsa::{RecoveryId, Signature, SigningKey, VerifyingKey};
@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sha3::{Digest, Keccak256};
 
+use crate::ballot::{ballot_leaf_hash, Ballot};
 use crate::crypto::field::{fr_to_be, Fr};
 use crate::limits::{BALLOT_MAX, BALLOT_MIN, MAX_CENSUS_DEPTH};
 use crate::Error;
@@ -358,20 +359,46 @@ pub fn csp_recover(pid: &Fr, p: &CspProof) -> Result<[u8; 20], Error> {
     recover_address(&hash, &p.r, &p.s, p.recid)
 }
 
-/// Personal-sign digest of a vote id: the message is `PadToSign(BE8(vid))`.
-pub fn vote_id_message_hash(vote_id: u64) -> [u8; 32] {
-    let mut msg = [0u8; 32];
-    msg[24..].copy_from_slice(&vote_id.to_be_bytes());
-    personal_hash(&msg)
+/// Domain tag of the vote envelope.
+pub const VOTE_TAG: &[u8] = b"davinci-vote-v1";
+
+/// The 32-byte message a voter signs: `keccak256("davinci-vote-v1" ||
+/// pid_BE32 || vote_id_BE8 || ballot_leaf_hash(ballot))` over 87 bytes, where
+/// `ballot` is the original ballot the proof commits to, in circuit order
+/// (fields at or above the election's `num_fields` hold the identity). It
+/// binds the signature to one process and one set of ciphertexts.
+pub fn vote_envelope_digest(pid: &Fr, vote_id: u64, ballot: &Ballot) -> [u8; 32] {
+    let mut pre = [0u8; 87];
+    pre[..15].copy_from_slice(VOTE_TAG);
+    pre[15..47].copy_from_slice(&fr_to_be(pid));
+    pre[47..55].copy_from_slice(&vote_id.to_be_bytes());
+    pre[55..].copy_from_slice(&ballot_leaf_hash(ballot));
+    keccak(&[&pre])
 }
 
-/// The voter's signature over its vote id (deterministic, RFC 6979).
-pub fn vote_id_sign(sk: &SigningKey, vote_id: u64) -> EcdsaSignature {
-    sign_prehash(sk, &vote_id_message_hash(vote_id))
+/// Personal-sign hash of [`vote_envelope_digest`]: the value the guest
+/// recovers the voter's key from.
+pub fn vote_message_hash(pid: &Fr, vote_id: u64, ballot: &Ballot) -> [u8; 32] {
+    personal_hash(&vote_envelope_digest(pid, vote_id, ballot))
 }
 
-/// Signer address of a vote-id signature. Rejects high-S and `v` outside
-/// `{0, 1, 27, 28}`.
-pub fn vote_id_recover(vote_id: u64, sig: &EcdsaSignature) -> Result<[u8; 20], Error> {
-    recover_address(&vote_id_message_hash(vote_id), &sig.r, &sig.s, sig.v)
+/// The voter's signature over its vote envelope (deterministic, RFC 6979).
+pub fn vote_sign(sk: &SigningKey, pid: &Fr, vote_id: u64, ballot: &Ballot) -> EcdsaSignature {
+    sign_prehash(sk, &vote_message_hash(pid, vote_id, ballot))
+}
+
+/// Signer address of a vote envelope signature. Rejects high-S and `v`
+/// outside `{0, 1, 27, 28}`.
+pub fn vote_recover(
+    pid: &Fr,
+    vote_id: u64,
+    ballot: &Ballot,
+    sig: &EcdsaSignature,
+) -> Result<[u8; 20], Error> {
+    recover_address(
+        &vote_message_hash(pid, vote_id, ballot),
+        &sig.r,
+        &sig.s,
+        sig.v,
+    )
 }

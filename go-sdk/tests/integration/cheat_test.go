@@ -1073,7 +1073,9 @@ func TestCheatSwappedFieldOrder(t *testing.T) {
 
 // TestCheatOriginalNonCanonical ships voter 0's c1.x as x + r, the same field
 // element in a second encoding. Re-encryption reduces it and the pairing sees
-// its residue, so only the canonical-encoding rule rejects it.
+// its residue, so the canonical-encoding rule (FAIL_BINDING) rejects it; the
+// vote envelope hashes the raw coordinates, so the voter's signature (over
+// the canonical ones) fails too.
 func TestCheatOriginalNonCanonical(t *testing.T) {
 	base, _, _ := buildCheatInput(t)
 	blk := append([]byte(nil), base.reencBlock...)
@@ -1094,7 +1096,7 @@ func TestCheatOriginalNonCanonical(t *testing.T) {
 	}
 	copy(blk[off:off+32], le)
 	base.reencBlock = blk
-	assertCircuitFailsExactly(t, base.fullInput(), failBinding, "original-plus-r")
+	assertCircuitFailsExactly(t, base.fullInput(), failBinding|failECDSA, "original-plus-r")
 }
 
 // TestCheatSwappedProofs swaps the first two proof records (A, B, C). Both

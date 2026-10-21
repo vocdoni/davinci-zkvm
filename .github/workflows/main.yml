@@ -146,7 +146,7 @@ jobs:
         run: cargo build --release -p davinci-zkvm-input-gen
 
       # A missing binary makes the cheat tests skip, so any skip fails the job.
-      - name: TestCheat and TestResultsCheat
+      - name: TestCheat, TestAttack and TestResultsCheat
         working-directory: go-sdk/tests
         env:
           GEN_INPUT_BIN: ${{ github.workspace }}/target/release/gen-input
@@ -155,7 +155,7 @@ jobs:
           RESULTS_ELF_PATH: ${{ github.workspace }}/circuit-results/elf/results.elf
         run: |
           set -o pipefail
-          go test ./integration -run 'TestCheat|TestResultsCheat' -v -count=1 -timeout 75m | tee cheat.log
+          go test ./integration -run 'TestCheat|TestAttack|TestResultsCheat' -v -count=1 -timeout 75m | tee cheat.log
           if grep -- '--- SKIP' cheat.log; then
             echo "::error::cheat tests skipped, check that ziskemu and the input generators are found"
             exit 1

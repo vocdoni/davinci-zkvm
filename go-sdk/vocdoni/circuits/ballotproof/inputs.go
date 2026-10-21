@@ -61,7 +61,9 @@ func (b *BallotProofInputs) VoteID() (types.VoteID, error) {
 // the ballot are given in gnark (reduced twisted Edwards) form; the signals
 // carry the twisted Edwards coordinates the circuit sees. Unused fields must
 // already hold the identity ciphertext, as GenerateBallotProofInputs leaves
-// them.
+// them: a ballot whose padded fields are not the identity is refused, since
+// the batch guest derives the identity there and the signals would match no
+// batch.
 func PublicSignals(
 	processID types.ProcessID,
 	ballotMode spec.BallotMode,
@@ -91,6 +93,13 @@ func PublicSignals(
 	coords := ballot.FromRTEtoTE().BigInts()
 	if len(coords) != 4*params.FieldsPerBallot {
 		return nil, fmt.Errorf("ballot has %d coordinates, want %d", len(coords), 4*params.FieldsPerBallot)
+	}
+	for f := int(ballotMode.NumFields); f < params.FieldsPerBallot; f++ {
+		for j, want := range [4]int64{0, 1, 0, 1} {
+			if coords[4*f+j].Cmp(big.NewInt(want)) != 0 {
+				return nil, fmt.Errorf("ballot field %d is past numFields %d but not the identity", f, ballotMode.NumFields)
+			}
+		}
 	}
 	keyX, keyY := format.FromRTEtoTE(encryptionKey.Point())
 	out := make([]*big.Int, 0, NumberOfPublicInputs)

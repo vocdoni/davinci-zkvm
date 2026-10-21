@@ -1,14 +1,18 @@
 //! Ethereum secp256k1 ECDSA signature batch verification via public-key recovery.
 //!
-//! Each ballot carries an ECDSA signature over its `vote_id`, produced with the
-//! standard Ethereum personal-sign scheme (matching `davinci-node/crypto/signatures/ethereum`):
+//! Each ballot carries an ECDSA signature over its vote envelope, produced with the
+//! standard Ethereum personal-sign scheme over a 32-byte digest:
 //!
 //! ```text
-//! message  = PadToSign(vote_id_BE8)            // 32 bytes: 24 zero prefix + 8-byte BE vote_id
-//! envelope = "\x19Ethereum Signed Message:\n32" || message   // 60 bytes total
-//! z        = keccak256(envelope)               // as big-endian 256-bit integer → [u64;4] LE
+//! ballot   = sha256(c1x ‖ c1y ‖ c2x ‖ c2y of the 16 original fields, BE32 each)  // 2048 B
+//! digest   = keccak256("davinci-vote-v1" ‖ process_id_BE32 ‖ vote_id_BE8 ‖ ballot)  // 87 B
+//! z        = keccak256("\x19Ethereum Signed Message:\n32" ‖ digest)   // as a big-endian integer
 //! sig      = secp256k1.Sign(z, privKey)        // R[32] || S[32] || V[1]
 //! ```
+//!
+//! The ballot is the one proof `i` was verified against: public inputs 7..70,
+//! the original ciphertexts with the identity above `num_fields`. A signature
+//! therefore binds one process, one vote id and one set of ciphertexts.
 //!
 //! Rather than carrying the public key in the witness and running
 //! `ecdsa_verify_secp256k1(pk, z, r, s)`, we use the recovery form
@@ -24,18 +28,37 @@
 
 use crate::hash::keccak256_short;
 use crate::io::ParsedInput;
-use crate::publics::Publics;
-use crate::types::{FrRaw, FAIL_ECDSA};
+use crate::publics::{Publics, PUB_FIELDS};
+use crate::results::ballot_leaf_hash;
+use crate::types::{BallotData, FrRaw, BALLOT_FIELDS, FAIL_ECDSA, ZERO_FR};
 use ziskos::zisklib::ecdsa_recover_secp256k1;
 
-/// Compute the Ethereum signed-message hash of `vote_id` as a `[u64; 4]` LE scalar.
-fn eth_message_hash(vote_id: u64) -> [u64; 4] {
+/// Domain tag of the vote envelope, 15 ASCII bytes, no length prefix.
+const VOTE_TAG: &[u8; 15] = b"davinci-vote-v1";
+
+/// FrRaw (LE limbs) as 32 big-endian bytes.
+fn fr_be(x: &FrRaw) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for i in 0..4 {
+        out[i * 8..i * 8 + 8].copy_from_slice(&x[3 - i].to_be_bytes());
+    }
+    out
+}
+
+/// The personal-sign hash of a vote envelope digest, as a `[u64; 4]` LE scalar.
+fn vote_message_hash(process_id: &FrRaw, vote_id: u64, ballot: &BallotData) -> [u64; 4] {
+    let mut pre = [0u8; 87];
+    pre[..15].copy_from_slice(VOTE_TAG);
+    pre[15..47].copy_from_slice(&fr_be(process_id));
+    pre[47..55].copy_from_slice(&vote_id.to_be_bytes());
+    // ballot_leaf_hash returns the digest read big-endian: fr_be gives its raw bytes.
+    pre[55..].copy_from_slice(&fr_be(&ballot_leaf_hash(ballot)));
+    let digest = keccak256_short(&pre);
     // Prefix: "\x19Ethereum Signed Message:\n32" = 28 bytes
     const PREFIX: &[u8] = b"\x19Ethereum Signed Message:\n32";
     let mut envelope = [0u8; 60];
     envelope[..28].copy_from_slice(PREFIX);
-    // PadToSign: 24 zero bytes (already zeroed) followed by 8-byte big-endian vote_id
-    envelope[52..].copy_from_slice(&vote_id.to_be_bytes());
+    envelope[28..].copy_from_slice(&digest);
     let h = keccak256_short(&envelope);
     // Interpret the 32-byte hash as a big-endian 256-bit integer, store as [u64; 4] LE.
     [
@@ -70,7 +93,8 @@ fn address_matches(addr_bytes: &[u8; 20], pubs_addr: &FrRaw) -> bool {
 }
 
 /// Verify all ECDSA signatures in `parsed.ecdsa` via public-key recovery,
-/// each over the vote id the guest derived for its proof.
+/// each over the vote envelope of its proof: the process id, the vote id the
+/// guest derived and the original ciphertexts the proof was verified against.
 ///
 /// Returns `ecdsa_ok = false` when any signature or address binding check fails.
 ///
@@ -92,8 +116,11 @@ pub fn verify_batch(parsed: &ParsedInput, publics: Option<&Publics>, fail_mask: 
         *fail_mask |= FAIL_ECDSA;
         return false;
     }
+    let process_id = publics.constants[0];
+    let mut ballot = [ZERO_FR; BALLOT_FIELDS];
     for (i, sig) in parsed.ecdsa.iter().enumerate() {
-        let z = eth_message_hash(publics.vote_id(i));
+        ballot.copy_from_slice(&publics.proof(i)[PUB_FIELDS..]);
+        let z = vote_message_hash(&process_id, publics.vote_id(i), &ballot);
 
         // Recover the public key. ecdsa_recover_secp256k1 returns Err for invalid
         // r/s/recid, point-not-on-curve, etc. — all collapse to FAIL_ECDSA.

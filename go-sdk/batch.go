@@ -195,6 +195,15 @@ func (b *ProveBatch) toRequest() (*ProveRequest, error) {
 		}
 	}
 
+	// The guest needs one eligibility proof and one re-encryption entry per
+	// voter, all of one census kind; a mixed batch would lose some.
+	if hasCsp && len(cspProofs) != len(b.Voters) {
+		return nil, fmt.Errorf("%d of %d voters carry a CSP attestation: a batch is all CSP or all Merkle", len(cspProofs), len(b.Voters))
+	}
+	if hasReenc && len(reencEntries) != len(b.Voters) {
+		return nil, fmt.Errorf("%d of %d voters carry re-encryption data: all or none must", len(reencEntries), len(b.Voters))
+	}
+
 	req := &ProveRequest{
 		VK:     vkJSON,
 		Proofs: proofs,
@@ -298,12 +307,17 @@ func (c *Client) Prove(ctx context.Context, batch *ProveBatch) (*ProveResult, er
 
 // PackAddressWeight packs an Ethereum address and voter weight into the
 // census leaf value used by the lean-IMT: leaf = (address << 88) | weight.
-// The weight must fit in 88 bits; larger values bleed into the address
-// bits and produce a leaf the circuit will reject.
+// The address must fit in 160 bits and the weight in 88, as rust-sdk
+// census_leaf requires: a wider weight would be OR-ed into the address bits
+// and give another member (address | weight >> 88, weight mod 2^88) that the
+// guest accepts. Panics on a negative or over-wide input, a caller bug.
 //
 // This matches the packing used by davinci-node's census tree and the
 // circuit's extract_address_from_census_leaf function.
 func PackAddressWeight(address, weight *big.Int) *big.Int {
+	if address.Sign() < 0 || address.BitLen() > 160 || weight.Sign() < 0 || weight.BitLen() > 88 {
+		panic("PackAddressWeight: address must fit 160 bits and weight 88 bits")
+	}
 	leaf := new(big.Int).Lsh(address, 88)
 	leaf.Or(leaf, weight)
 	return leaf

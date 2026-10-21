@@ -49,9 +49,9 @@ const (
 	rRegCPIndex = 42
 	rNumRegs    = 43
 
-	// Byte offsets in the guest frame.
+	// Byte offsets in the guest frame (RESULTS.md §1).
 	rOffNKey = 104
-	rOffNAcc = 4208
+	rOffNAcc = rOffNKey + 8 + proofLevels*32 + davinci.BallotFields*32
 )
 
 // bjjSubOrder is the BabyJubJub prime subgroup order l.
@@ -237,11 +237,11 @@ func buildResultsTree(t *testing.T, nf int, keyLeaf, accLeaf *big.Int) ([]byte, 
 		if err != nil {
 			t.Fatalf("UnpackSiblings: %v", err)
 		}
-		out := make([]string, 0, procLevels)
+		out := make([]string, 0, proofLevels)
 		for _, s := range sibs {
 			out = append(out, hex.EncodeToString(pad32(s)))
 		}
-		for len(out) < procLevels {
+		for len(out) < proofLevels {
 			out = append(out, hex.EncodeToString(make([]byte, 32)))
 		}
 		return out
@@ -544,7 +544,7 @@ func TestResultsCheat(t *testing.T) {
 
 	t.Run("BadSiblingCount", func(t *testing.T) {
 		f := append([]byte(nil), valid...)
-		binary.LittleEndian.PutUint64(f[rOffNKey:], procLevels-1)
+		binary.LittleEndian.PutUint64(f[rOffNKey:], proofLevels-1)
 		expectReject(t, runResults(t, f), rFailParse)
 	})
 
@@ -564,11 +564,11 @@ func resultsAttackParse(t *testing.T, valid []byte) {
 		off  int
 		n    uint64
 	}{
-		{"AccSiblingCount63", rOffNAcc, procLevels - 1},
+		{"AccSiblingCount64", rOffNAcc, proofLevels - 1},
 		{"KeySiblingCount0", rOffNKey, 0},
 		{"AccSiblingCount0", rOffNAcc, 0},
 		{"KeySiblingCountMax", rOffNKey, ^uint64(0)},
-		{"KeySiblingCount65", rOffNKey, procLevels + 1},
+		{"KeySiblingCount66", rOffNKey, proofLevels + 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := append([]byte(nil), valid...)
@@ -577,10 +577,10 @@ func resultsAttackParse(t *testing.T, valid []byte) {
 		})
 	}
 
-	// 65 declared and 65 present: the frame is one sibling too long.
-	t.Run("KeySiblings65Consistent", func(t *testing.T) {
+	// 66 declared and 66 present: the frame is one sibling too long.
+	t.Run("KeySiblings66Consistent", func(t *testing.T) {
 		f := append([]byte(nil), valid[:rOffNAcc]...)
-		binary.LittleEndian.PutUint64(f[rOffNKey:], procLevels+1)
+		binary.LittleEndian.PutUint64(f[rOffNKey:], proofLevels+1)
 		f = append(f, make([]byte, 32)...)
 		f = append(f, valid[rOffNAcc:]...)
 		expectReject(t, runResults(t, f), rFailParse)
@@ -597,8 +597,8 @@ func resultsAttackParse(t *testing.T, valid []byte) {
 		for i := 8; i < len(f); i++ {
 			f[i] = fill
 		}
-		binary.LittleEndian.PutUint64(f[rOffNKey:], procLevels)
-		binary.LittleEndian.PutUint64(f[rOffNAcc:], procLevels)
+		binary.LittleEndian.PutUint64(f[rOffNKey:], proofLevels)
+		binary.LittleEndian.PutUint64(f[rOffNAcc:], proofLevels)
 		return f
 	}
 	// pk = (0, 0) is off the curve, zero siblings put each leaf at the root.
@@ -806,8 +806,8 @@ func resultsAttackInclusion(t *testing.T, e *resultsElection, nf int) {
 		{"KeyExtraTrailingSibling", func(r *resultsRequest) { r.KeySiblings[kd] = nz }, rFailInclKey},
 		{"AccExtraTrailingSibling", func(r *resultsRequest) { r.AccSiblings[ad] = nz }, rFailInclResults},
 		// A non-zero sibling at the last level makes the leaf level undefined.
-		{"KeyLeafLevelSiblingSet", func(r *resultsRequest) { r.KeySiblings[procLevels-1] = nz }, rFailInclKey},
-		{"AccLeafLevelSiblingSet", func(r *resultsRequest) { r.AccSiblings[procLevels-1] = nz }, rFailInclResults},
+		{"KeyLeafLevelSiblingSet", func(r *resultsRequest) { r.KeySiblings[proofLevels-1] = nz }, rFailInclKey},
+		{"AccLeafLevelSiblingSet", func(r *resultsRequest) { r.AccSiblings[proofLevels-1] = nz }, rFailInclResults},
 		// Claim the leaf one level higher than it is.
 		{"KeyDeepestSiblingDropped", func(r *resultsRequest) { r.KeySiblings[kd-1] = zero }, rFailInclKey},
 		{"AccDeepestSiblingDropped", func(r *resultsRequest) { r.AccSiblings[ad-1] = zero }, rFailInclResults},
@@ -815,7 +815,7 @@ func resultsAttackInclusion(t *testing.T, e *resultsElection, nf int) {
 			r.KeySiblings[0] = flipHex(t, r.KeySiblings[0])
 		}, rFailInclKey},
 		{"AccSiblingsShifted", func(r *resultsRequest) {
-			r.AccSiblings = append([]string{zero}, r.AccSiblings[:procLevels-1]...)
+			r.AccSiblings = append([]string{zero}, r.AccSiblings[:proofLevels-1]...)
 		}, rFailInclResults},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -826,7 +826,7 @@ func resultsAttackInclusion(t *testing.T, e *resultsElection, nf int) {
 	}
 
 	// A root that is just the 0x03 leaf proves the key and nothing else.
-	allZero := make([]string, procLevels)
+	allZero := make([]string, proofLevels)
 	for i := range allZero {
 		allZero[i] = zero
 	}

@@ -115,11 +115,11 @@ func buildResultsPayload(e *Election) (*davinci.ResultsPayload, []uint64, error)
 			return nil, err
 		}
 		zero := make([]byte, bLen)
-		for len(sibs) < procLevels {
+		for len(sibs) < proofLevels {
 			sibs = append(sibs, zero)
 		}
-		out := make([]string, procLevels)
-		for i, s := range sibs[:procLevels] {
+		out := make([]string, proofLevels)
+		for i, s := range sibs[:proofLevels] {
 			out[i] = hex.EncodeToString(pad32(s))
 		}
 		return out, nil

@@ -1,11 +1,11 @@
-//! Keccak lean-IMT, census leaves, slot keys, CSP attestations and vote-id
-//! signatures against lean-imt-go / go-ethereum vectors.
+//! Keccak lean-IMT, census leaves, slot keys, CSP attestations and vote
+//! envelope signatures against lean-imt-go / go-ethereum vectors.
 
 mod common;
 
 use common::*;
 use davinci_zkvm_sdk::census::*;
-use davinci_zkvm_sdk::crypto::field::fr_to_be;
+use davinci_zkvm_sdk::crypto::field::{fr_from_be, fr_to_be};
 use k256::ecdsa::SigningKey;
 
 /// BN254 scalar field modulus, big-endian.
@@ -296,33 +296,53 @@ fn high_s(s: &[u8; 32]) -> [u8; 32] {
     out
 }
 
+/// `0x` hex of any length.
+fn hex0x(v: &serde_json::Value) -> Vec<u8> {
+    hex::decode(s(v).strip_prefix("0x").expect("0x prefix")).unwrap()
+}
+
 #[test]
-fn vote_id_signatures_match_geth() {
-    let v = load("voteid_sig.json");
-    let sk = SigningKey::from_slice(&hex32(&v["key"])).unwrap();
-    let addr = hex20(&v["address"]);
-    for c in v["sigs"].as_array().unwrap() {
-        let vid = u64v(&c["vote_id"]);
-        let sig = vote_id_sign(&sk, vid);
-        assert_eq!(hex::encode(sig.r), s(&c["r"]));
-        assert_eq!(hex::encode(sig.s), s(&c["s"]));
-        assert_eq!(sig.v as u64, u64v(&c["v"]));
-        assert_eq!(vote_id_recover(vid, &sig).unwrap(), addr);
+fn vote_envelope_matches_go() {
+    let v = load("hashes.json");
+    let cases = v["vote_envelope"].as_array().unwrap();
+    assert_eq!(cases.len(), 5);
+    for c in cases {
+        let pid = fr_from_be(&hex0x(&c["pid"]).try_into().unwrap()).unwrap();
+        let vid = u64::from_be_bytes(hex0x(&c["vote_id"]).try_into().unwrap());
+        let ballot = ballot(&c["ballot"]);
+        let sk = SigningKey::from_slice(&hex0x(&c["signer_key"])).unwrap();
+        let addr: [u8; 20] = hex0x(&c["address"]).try_into().unwrap();
         assert_eq!(
-            vote_id_recover(
-                vid,
-                &EcdsaSignature {
-                    v: sig.v + 27,
-                    ..sig
-                }
-            )
-            .unwrap(),
-            addr
+            vote_envelope_digest(&pid, vid, &ballot).to_vec(),
+            hex0x(&c["digest"])
         );
-        assert_ne!(vote_id_recover(vid ^ 1, &sig).ok(), Some(addr));
+        let sig = vote_sign(&sk, &pid, vid, &ballot);
+        let mut wire = sig.r.to_vec();
+        wire.extend_from_slice(&sig.s);
+        wire.push(sig.v);
+        assert_eq!(wire, hex0x(&c["signature"]));
+        assert_eq!(eth_address(sk.verifying_key()), addr);
+        assert_eq!(vote_recover(&pid, vid, &ballot, &sig).unwrap(), addr);
+        let sig27 = EcdsaSignature {
+            v: sig.v + 27,
+            ..sig
+        };
+        assert_eq!(vote_recover(&pid, vid, &ballot, &sig27).unwrap(), addr);
+
+        // Another vote id, process id or ciphertext recovers someone else.
+        assert_ne!(vote_recover(&pid, vid ^ 1, &ballot, &sig).ok(), Some(addr));
+        let other_pid = pid + davinci_zkvm_sdk::crypto::field::Fr::from(1u64);
+        assert_ne!(
+            vote_recover(&other_pid, vid, &ballot, &sig).ok(),
+            Some(addr)
+        );
+        let mut changed = ballot;
+        changed.0[0] = changed.0[0].add(&changed.0[0]);
+        assert_ne!(vote_recover(&pid, vid, &changed, &sig).ok(), Some(addr));
+
         for v in [2u8, 3, 26, 29, 255] {
             assert!(
-                vote_id_recover(vid, &EcdsaSignature { v, ..sig }).is_err(),
+                vote_recover(&pid, vid, &ballot, &EcdsaSignature { v, ..sig }).is_err(),
                 "v = {v}"
             );
         }
@@ -332,7 +352,7 @@ fn vote_id_signatures_match_geth() {
             v: sig.v ^ 1,
             ..sig
         };
-        assert!(vote_id_recover(vid, &twin).is_err());
-        assert!(vote_id_recover(vid, &EcdsaSignature { r: [0; 32], ..sig }).is_err());
+        assert!(vote_recover(&pid, vid, &ballot, &twin).is_err());
+        assert!(vote_recover(&pid, vid, &ballot, &EcdsaSignature { r: [0; 32], ..sig }).is_err());
     }
 }
