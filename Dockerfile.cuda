@@ -185,6 +185,11 @@ exec /app/davinci-zkvm "$@"
 EOF
 RUN chmod +x /app/entrypoint.sh
 
+# License texts and notices: the service and the guest ELFs are BUSL-1.1;
+# the image also ships third-party software under its own license (ZisK,
+# snarkjs, CUDA base image). See LICENSING.md and NOTICE.
+COPY LICENSE LICENSE-BUSL LICENSE-AGPL LICENSE-GPL LICENSING.md NOTICE /usr/share/licenses/davinci-zkvm/
+
 EXPOSE 8080
 
 ENTRYPOINT ["/app/entrypoint.sh"]

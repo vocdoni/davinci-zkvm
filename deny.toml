@@ -1,0 +1,43 @@
+# cargo-deny policy for the root workspace (service, input-gen, rust-sdk).
+# Run: cargo deny check licenses
+#
+# The workspace crates are BUSL-1.1 (see LICENSING.md). Third-party
+# dependencies may only use permissive licenses: a copyleft dependency
+# (GPL, AGPL, LGPL, MPL...) linked into a BUSL-1.1 binary needs a licensing
+# review first. Do not add one to `allow` to make this check pass.
+#
+# The ZisK guests (circuit*, circuit-primitives) are outside this workspace;
+# scan each with the same policy, from the repository root:
+#   cargo deny --manifest-path circuit/Cargo.toml check licenses
+
+[graph]
+all-features = true
+
+[licenses]
+confidence-threshold = 0.93
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+# Our own crates. BUSL-1.1 is never allowed for a dependency.
+exceptions = [
+    { allow = ["BUSL-1.1"], crate = "davinci-zkvm-service" },
+    { allow = ["BUSL-1.1"], crate = "davinci-zkvm-input-gen" },
+    { allow = ["BUSL-1.1"], crate = "davinci-zkvm-sdk" },
+    { allow = ["BUSL-1.1"], crate = "circuit-primitives" },
+    { allow = ["BUSL-1.1"], crate = "davinci-zkvm-circuit" },
+    { allow = ["BUSL-1.1"], crate = "davinci-zkvm-aggregator" },
+    { allow = ["BUSL-1.1"], crate = "davinci-zkvm-results" },
+]
+unused-allowed-license = "allow"

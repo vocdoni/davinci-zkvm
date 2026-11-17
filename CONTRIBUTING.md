@@ -28,6 +28,10 @@ gofmt -l .
 go vet ./...
 go test $(go list ./... | grep -v /tests/integration)
 go run ./cmd/sdk-vectors -out ../rust-sdk/testdata   # must leave no diff
+
+cd ..
+scripts/license/check.sh --allow-unset   # license metadata (see below)
+cargo deny check licenses                # dependency licenses
 ```
 
 After touching a guest or an input encoder, also run the emulator suites
@@ -163,3 +167,60 @@ go-sdk module pins, and the Rust SDK embeds the same verification key
 checks the VK hash against config key 0x07, and `rust-sdk/tests/ballot.rs`
 pins it to davinci-circom's `artifacts/VK_HASH` (the pre-production ceremony
 key, davinci-circom v1.3.0).
+
+## Licensing of contributions
+
+The repository is mixed-license; [LICENSING.md](LICENSING.md) maps every
+directory to its license.
+
+- A contribution to `go-sdk/` is licensed under AGPL-3.0-or-later.
+- A contribution anywhere else becomes part of the BUSL-1.1 Licensed Work,
+  which the Licensor also licenses commercially. External contributions to
+  these components need a contributor license agreement with the Licensor;
+  contact hello@synergize.dev before opening a pull request.
+- Do not copy code from other projects without recording its origin and
+  license in [NOTICE](NOTICE), and never remove or change an existing
+  copyright notice or SPDX header, including in `solidity/`. A dependency
+  under a copyleft license (GPL, AGPL, LGPL, MPL) needs a licensing review
+  before it can be linked into a BUSL-1.1 component; `cargo deny check
+  licenses` enforces this for the Rust workspace.
+- Do not edit `LICENSE-BUSL` by hand: releases set its version and Change
+  Date with `scripts/license/busl-release.sh` (see [Releasing](#releasing)).
+- Comments in sources compiled into a guest can change the ELF when they move a
+  panic location, so add no license headers to guest sources; the guest
+  manifests and LICENSING.md carry the license.
+
+## Releasing
+
+Each version of the BUSL-1.1 components gets its own Change Date: the UTC day
+it is first published plus three calendar years (29 February maps to
+28 February). The dates are recorded in
+[licensing/busl-versions.csv](licensing/busl-versions.csv), which is
+append-only: a published row never changes, and a later release never moves
+an earlier version's Change Date. Revisions of `main` pushed between two
+releases carry the previous release's `LICENSE-BUSL` and convert on its
+Change Date.
+
+On the release day:
+
+```bash
+scripts/license/busl-release.sh 0.6.0      # date defaults to today, UTC
+git add LICENSE-BUSL */LICENSE-BUSL licensing/busl-versions.csv
+git commit -m "chore(license): BUSL-1.1 parameters for v0.6.0"
+git push
+git tag v0.6.0 && git push origin v0.6.0   # same UTC day
+```
+
+Then add the version to the table in [LICENSING.md](LICENSING.md).
+
+`busl-release.sh` refuses versions that already have a row or a tag,
+AGPL-only versions, versions lower than the last one and dates in the
+future, and restores every file if the final check fails. Never use a date
+later than the actual publication: an earlier date only shortens the
+restricted period.
+
+CI runs `scripts/license/check.sh` on every pull request, push and tag. It
+checks the BUSL-1.1 text and parameters, the ledger rules, that a tag
+matches its ledger row, the license copies, the Cargo manifests and the
+Solidity headers. It fails while the version and Change Date are unset, and
+the image publishing job depends on it.

@@ -2,6 +2,7 @@
 name = "circuit-primitives"
 version = "0.1.0"
 edition = "2021"
+license = "BUSL-1.1"
 
 # Shared crypto primitives for the ZisK guests (vote batch, aggregator and
 # results). Depends on ziskos precompile wrappers, so it only builds

@@ -162,4 +162,7 @@ The emulator and integration suites under `tests/` are described in
 
 ## License
 
-GNU Affero General Public License v3.0 or later. See [LICENSE](../LICENSE).
+GNU Affero General Public License v3.0 or later. See [LICENSE](LICENSE).
+
+The rest of the repository (the prover service, the guests and the Rust
+SDK) is under a different license; see [LICENSING.md](../LICENSING.md).

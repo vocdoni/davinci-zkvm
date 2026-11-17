@@ -26,6 +26,60 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # License metadata, BUSL-1.1 Change Dates and dependency licenses. Fails
+  # while LICENSE-BUSL has no version or Change Date, so nothing is merged,
+  # tagged or published with them unset (see "Releasing" in CONTRIBUTING.md).
+  licensing:
+    name: Licensing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # the base ledger and the release tags
+
+      - name: License metadata and Change Dates
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          args=()
+          if [[ "$EVENT" == pull_request ]]; then
+            args+=(--base "origin/$BASE_REF")
+          elif [[ "$EVENT" == push && "$REF_TYPE" == branch && -n "$BEFORE" && ! "$BEFORE" =~ ^0+$ ]]; then
+            args+=(--base "$BEFORE")
+          fi
+          if [[ "$REF_TYPE" == tag ]]; then
+            args+=(--tag "$REF_NAME")
+          fi
+          scripts/license/check.sh "${args[@]}"
+
+      # deny.toml at the root is the policy for the workspace and the guests.
+      - name: Dependency licenses (workspace)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+
+      - name: Dependency licenses (vote-batch guest)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+          manifest-path: circuit/Cargo.toml
+
+      - name: Dependency licenses (aggregator guest)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+          manifest-path: circuit-aggregator/Cargo.toml
+
+      - name: Dependency licenses (results guest)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+          manifest-path: circuit-results/Cargo.toml
+
   rust:
     name: Rust
     runs-on: ubuntu-latest
@@ -208,7 +262,7 @@ jobs:
 
   docker:
     name: Docker
-    needs: [rust, go, guests]
+    needs: [licensing, rust, go, guests]
     permissions:
       contents: read
       packages: write

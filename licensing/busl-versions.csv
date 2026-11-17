@@ -1,0 +1,6 @@
+# BUSL-1.1 version ledger. Append-only: a row, once on main, never changes.
+# published   = UTC date the version was first made publicly available
+#               (the release commit pushed / the tag created), YYYY-MM-DD.
+# change_date = published + 3 calendar years (29 Feb maps to 28 Feb).
+# Add rows only with scripts/license/busl-release.sh; CI checks every rule.
+version,published,change_date
