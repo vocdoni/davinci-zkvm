@@ -8,7 +8,7 @@ run it on a GPU host; sequencers call it over HTTP or through the Go and Rust
 SDKs.
 
 [![Build and Test](https://github.com/vocdoni/davinci-zkvm/actions/workflows/main.yml/badge.svg)](https://github.com/vocdoni/davinci-zkvm/actions/workflows/main.yml)
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](LICENSE)
+[![License: BUSL-1.1 / AGPL-3.0](https://img.shields.io/badge/License-BUSL--1.1%20%2F%20AGPL--3.0-blue.svg)](LICENSING.md)
 
 ## Overview
 
@@ -216,4 +216,25 @@ A guest change also changes its verification key, which the SDKs pin. Read
 
 ## License
 
-GNU Affero General Public License v3.0 or later. See [LICENSE](LICENSE).
+This repository is mixed-license; [LICENSING.md](LICENSING.md) maps every
+directory to its license.
+
+- The prover service, the ZisK guests and `circuit-primitives` are
+  source-available under the [Business Source License 1.1](LICENSE-BUSL),
+  Licensor Synergize S.L. You may copy, modify, redistribute and use them
+  for anything except production; production use needs a commercial license
+  (hello@synergize.dev). Each version becomes
+  [AGPL-3.0-or-later](LICENSE-AGPL) four years after it is published, on
+  the Change Date stated in its `LICENSE-BUSL`. BUSL-1.1 is not an OSI
+  open source license.
+- `input-gen` is available under AGPL-3.0-or-later or BUSL-1.1, at your
+  option.
+- The Rust SDK, the Go SDK and the rest of the repository are licensed under
+  the [GNU Affero General Public License v3.0 or later](LICENSE-AGPL).
+- `solidity/` keeps the license stated in each file (GPL-3.0 for the
+  snarkJS verifier, AGPL-3.0 for the others).
+- Versions up to v0.5.0 were published under AGPL-3.0-or-later and remain
+  available under it.
+
+For commercial licensing, see
+[LICENSING.md](LICENSING.md#commercial-licensing).

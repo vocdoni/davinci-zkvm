@@ -1,0 +1,12 @@
+# Versions published only under AGPL-3.0-or-later, before the BUSL-1.1
+# transition. They stay AGPL-3.0-or-later forever; never add them to
+# busl-versions.csv and never move or re-tag them. Every revision of main up
+# to and including the commit below is also AGPL-only.
+last-agpl-commit 22dbedff4e67a352c751acde7a3158f8685d6098
+v0.1.0
+v0.1.1
+v0.2.0
+v0.3.0
+v0.4.0
+v0.4.1
+v0.5.0
