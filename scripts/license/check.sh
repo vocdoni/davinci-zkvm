@@ -82,7 +82,7 @@ while IFS=, read -r v pub cd extra; do
   valid_date "$pub" || fail "$LEDGER: $v: bad published date '$pub'"
   valid_date "$cd" || fail "$LEDGER: $v: bad change date '$cd'"
   [[ "$cd" == "$(change_date_for "$pub")" ]] ||
-    fail "$LEDGER: $v: change date $cd is not published + 3 years ($(change_date_for "$pub"))"
+    fail "$LEDGER: $v: change date $cd is not published + 4 years ($(change_date_for "$pub"))"
   if [[ "$pub" > "$today" ]]; then fail "$LEDGER: $v: published date $pub is in the future"; fi
   if [[ -n "$prev_pub" ]]; then
     if [[ "$pub" < "$prev_pub" ]]; then fail "$LEDGER: $v published before the previous row"; fi
@@ -105,7 +105,7 @@ fi
 # 6. Release tag: LICENSE-BUSL at the tag names the tagged version, and the
 #    ledger date is not later than the tagged commit (a version cannot be
 #    published before its commit exists, so the Change Date is never more
-#    than three years after the real publication).
+#    than four years after the real publication).
 if [[ -n "$tag" ]]; then
   if grep -qx "$tag" "$AGPL_VERSIONS"; then
     : # historical AGPL-only tag

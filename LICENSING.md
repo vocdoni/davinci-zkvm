@@ -3,7 +3,7 @@
 davinci-zkvm is a mixed-license repository. Most of it is source-available
 under the **Business Source License 1.1** (BUSL-1.1), with Synergize S.L.
 as Licensor. Each version converts automatically to the **GNU
-Affero General Public License v3.0 or later** three years after it is
+Affero General Public License v3.0 or later** four years after it is
 published. The Go SDK and the Solidity contracts keep their copyleft
 licenses.
 
@@ -74,11 +74,10 @@ source (AGPL-3.0-or-later) on its Change Date.
 
 ## When each version becomes AGPL-3.0-or-later
 
-Each published version has its own Change Date, three calendar years after
+Each published version has its own Change Date, four calendar years after
 the day it was first published. On that date, the version becomes available
 under the GNU Affero General Public License v3.0 or later, and the BUSL-1.1
-restrictions end for that version. BUSL-1.1 also caps the restricted period
-at four years from first publication, whichever comes first.
+restrictions end for that version.
 
 The Change Date of a version is stated in that version's `LICENSE-BUSL`.
 Every version is recorded, append-only, in
@@ -86,11 +85,11 @@ Every version is recorded, append-only, in
 
 | Version | First published (UTC) | Change Date (becomes AGPL-3.0-or-later) |
 |---|---|---|
-| 0.6.0 | 2026-11-18 | 2029-11-18 |
+| 0.6.0 | 2026-11-18 | 2030-11-18 |
 
 Revisions of `main` published between two releases are covered by the
 `LICENSE-BUSL` they contain, which names the previous release and its Change
-Date, so they convert no later than three years after their own publication.
+Date, so they convert no later than four years after their own publication.
 A later release never moves an earlier version's Change Date.
 [CONTRIBUTING.md](CONTRIBUTING.md#releasing) explains how the dates are
 assigned and checked.

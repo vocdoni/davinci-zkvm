@@ -21,12 +21,14 @@ valid_date() {
   [[ "$(date -u -d "$1" +%F 2>/dev/null)" == "$1" ]]
 }
 
-# change_date_for YYYY-MM-DD: the same day three calendar years later. A
-# 29 February maps to 28 February so the interval never exceeds three years.
+# change_date_for YYYY-MM-DD: the same day four calendar years later. A
+# 29 February with no counterpart (e.g. in 2100) maps to 28 February, so the
+# interval never exceeds four years.
 change_date_for() {
-  local y=${1:0:4} md=${1:5:5}
-  [[ "$md" == "02-29" ]] && md="02-28"
-  printf '%04d-%s\n' $((10#$y + 3)) "$md"
+  local d
+  d=$(printf '%04d-%s' $((10#${1:0:4} + 4)) "${1:5:5}")
+  valid_date "$d" || d="${d:0:4}-02-28"
+  printf '%s\n' "$d"
 }
 
 # ledger_rows FILE: the data rows of a ledger (no comments, no header).

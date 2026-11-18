@@ -193,8 +193,8 @@ directory to its license.
 ## Releasing
 
 Each version of the BUSL-1.1 components gets its own Change Date: the UTC day
-it is first published plus three calendar years (29 February maps to
-28 February). The dates are recorded in
+it is first published plus four calendar years (a 29 February with no
+counterpart maps to 28 February). The dates are recorded in
 [licensing/busl-versions.csv](licensing/busl-versions.csv), which is
 append-only: a published row never changes, and a later release never moves
 an earlier version's Change Date. Revisions of `main` pushed between two

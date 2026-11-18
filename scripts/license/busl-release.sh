@@ -8,7 +8,7 @@
 # never later than that (it would extend the restricted period), never in
 # the future. The script:
 #
-#   1. computes Change Date = published + 3 calendar years;
+#   1. computes Change Date = published + 4 calendar years;
 #   2. appends "version,published,change_date" to licensing/busl-versions.csv;
 #   3. writes the version and Change Date into LICENSE-BUSL and its copies;
 #   4. runs scripts/license/check.sh.

@@ -225,7 +225,7 @@ directory to its license.
   You may copy, modify, redistribute and use them for anything except
   production; production use needs a commercial license
   (hello@synergize.dev). Each version becomes
-  [AGPL-3.0-or-later](LICENSE-AGPL) three years after it is published, on
+  [AGPL-3.0-or-later](LICENSE-AGPL) four years after it is published, on
   the Change Date stated in its `LICENSE-BUSL`. BUSL-1.1 is not an OSI
   open source license.
 - `go-sdk/` stays under the [GNU Affero General Public License v3.0 or
