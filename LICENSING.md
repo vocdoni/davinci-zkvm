@@ -86,7 +86,7 @@ Every version is recorded, append-only, in
 
 | Version | First published (UTC) | Change Date (becomes AGPL-3.0-or-later) |
 |---|---|---|
-| *No BUSL-1.1 version has been published yet.* | | |
+| 0.6.0 | 2026-11-18 | 2029-11-18 |
 
 Revisions of `main` published between two releases are covered by the
 `LICENSE-BUSL` they contain, which names the previous release and its Change

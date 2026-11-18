@@ -4,3 +4,4 @@
 # change_date = published + 3 calendar years (29 Feb maps to 28 Feb).
 # Add rows only with scripts/license/busl-release.sh; CI checks every rule.
 version,published,change_date
+0.6.0,2026-11-18,2029-11-18
