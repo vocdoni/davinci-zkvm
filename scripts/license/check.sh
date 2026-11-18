@@ -47,7 +47,7 @@ terms_sha=$(sed -n "/^${SEPARATOR}\$/,\$p" "$BUSL_FILE" | tail -n +3 | sha256sum
 { grep -q '^Change License:       GNU Affero General Public License, version 3 or (at$' "$BUSL_FILE" &&
   grep -q '^                      your option) any later version (AGPL-3.0-or-later)$' "$BUSL_FILE"; } ||
   fail "$BUSL_FILE: Change License must be AGPL-3.0-or-later"
-grep -q '^                      The Licensed Work is (c) [0-9]\{4\}\(-[0-9]\{4\}\)\{0,1\} Vocdoni Association\.$' "$BUSL_FILE" ||
+grep -q '^                      The Licensed Work is (c) [0-9]\{4\}\(-[0-9]\{4\}\)\{0,1\} Synergize S\.L\.$' "$BUSL_FILE" ||
   fail "$BUSL_FILE: missing the Licensed Work copyright line"
 
 work=$(busl_param 'Licensed Work')

@@ -1,5 +1,5 @@
 davinci-zkvm
-Copyright (c) 2026 Vocdoni Association
+Copyright (c) 2026 Synergize S.L.
 
 This file lists third-party material in this repository and its
 attributions. LICENSING.md explains how the repository is licensed.
@@ -25,7 +25,7 @@ license.
    Source: https://github.com/iden3/go-iden3-crypto (poseidon/constants.go)
    License: MIT OR Apache-2.0. Copyright 2023 0kims Association.
    The MIT notice is reproduced at the end of this file. The code around
-   the constants is Vocdoni's and is part of the Licensed Work.
+   the constants is part of the Licensed Work.
 
 3. Third-party code compiled into binaries
    The guest ELFs (circuit/elf/, circuit-aggregator/elf/,
