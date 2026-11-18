@@ -65,8 +65,11 @@ RUN rm -rf input-gen/src service/src
 COPY input-gen/src input-gen/src
 COPY service/src service/src
 
-# Invalidate fingerprints so cargo rebuilds the real crates
-RUN find target/release/.fingerprint -maxdepth 1 -name "davinci*" -exec rm -rf {} + 2>/dev/null || true
+# Make the real sources newer than the stub build so cargo rebuilds the
+# workspace crates (COPY keeps the context's older mtimes, and newer cargo
+# no longer keeps fingerprints under target/release/.fingerprint).
+RUN find input-gen/src service/src -type f -exec touch {} + && \
+    find target/release/.fingerprint -maxdepth 1 -name "davinci*" -exec rm -rf {} + 2>/dev/null || true
 
 RUN cargo build --release -p davinci-zkvm-service -p davinci-zkvm-input-gen
 
